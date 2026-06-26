@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTA Admin Portal</title>
+<script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+<style>
+  :root { --bg: #111315; --surface: #1c1f23; --surface2: #252830; --border: #363940; --accent: #CB6015; --text: #D9D9D6; --muted: #B1B3B3; --red: #ef4444; --green: #22c55e;}
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  body { background: var(--bg); color: var(--text); padding: 30px; display: flex; justify-content: center; min-height: 100vh; }
+  
+  #auth-wall { background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--accent); padding: 32px; border-radius: 12px; width: 400px; height: fit-content; margin-top: 10vh; }
+  .form-group { margin-bottom: 16px; }
+  .form-label { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; display: block; }
+  .form-input, .form-select { width: 100%; background: var(--surface2); border: 1px solid var(--border); padding: 10px; color: var(--text); border-radius: 6px; outline: none; }
+  .form-input:focus, .form-select:focus { border-color: var(--accent); }
+  .btn { padding: 10px 16px; background: var(--accent); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; width: 100%; }
+  .btn-icon { padding: 8px 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--text); font-size: 16px; }
+  
+  #admin-app { display: none; width: 100%; max-width: 1000px; }
+  .header { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  
+  table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 10px; }
+  th { padding: 10px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
+  .flex-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; align-items: end; margin-bottom: 15px; }
+</style>
+</head>
+<body>
+
+  <div id="auth-wall">
+    <h2 style="margin-bottom: 8px; text-align: center;">Management Portal</h2>
+    <p style="color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 24px;">Admin credentials required.</p>
+    <div id="admin-auth-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+    <div class="form-group">
+      <label class="form-label">Admin Badge ID (Scan or Type)</label>
+      <div style="display: flex; gap: 8px;"><input class="form-input" id="admin-badge" placeholder="e.g. ADMIN-01"><button class="btn-icon" onclick="startAdminLoginCamera()">📷</button></div>
+    </div>
+    <div class="form-group"><label class="form-label">Secure PIN</label><input class="form-input" type="password" id="admin-pin" placeholder="••••" onkeydown="if(event.key==='Enter')loginAdmin()"></div>
+    <button class="btn" onclick="loginAdmin()">Access System →</button>
+  </div>
+
+  <div id="admin-app">
+    <div class="header">
+      <div><h2>System Administration</h2><div style="color: var(--muted); font-size: 13px;" id="admin-name">Logged in as: ---</div></div>
+      <div><button class="btn" style="background: var(--surface2); border: 1px solid var(--border);" onclick="window.location.reload()">Sign Out</button></div>
+    </div>
+
+    <div class="card" id="audit-section">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3>Live Transaction Telemetry</h3>
+        <button class="btn-icon" onclick="loadAuditLogs()" title="Refresh Logs">🔄</button>
+      </div>
+      <div style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface2);">
+        <table style="margin-top: 0;">
+          <thead style="position: sticky; top: 0; background: var(--surface2); z-index: 1;"><tr><th>Timestamp</th><th>Technician</th><th>Action</th><th>Asset ID</th><th>Notes</th></tr></thead>
+          <tbody id="audit-table-body"><tr><td colspan="5" style="text-align: center; color: var(--muted);">Loading telemetry...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" id="structure-management-panel">
+       <h3 style="margin-bottom: 12px;">Infrastructure Designer</h3>
+       <div class="flex-grid-3">
+          <div class="form-group" style="margin:0;"><label class="form-label">Create Dept (SuperAdmin)</label><div style="display:flex; gap:6px;"><input class="form-input" id="str-dept-name" placeholder="Name"><input class="form-input" id="str-dept-prefix" placeholder="Prefix" style="width:70px;"><button class="btn" style="width:auto;" onclick="submitStructureDept()">+</button></div></div>
+          <div class="form-group" style="margin:0;"><label class="form-label">Create Toolbox (DeptAdmin)</label><div style="display:flex; gap:6px;"><select class="form-select" id="str-box-dept-select"></select><input class="form-input" id="str-box-name" placeholder="Box Name"><button class="btn" style="width:auto;" onclick="submitStructureBox()">+</button></div></div>
+          <div class="form-group" style="margin:0;"><label class="form-label">Create Drawer (DeptAdmin)</label><div style="display:flex; gap:6px;"><select class="form-select" id="str-drawer-box-select"></select><input class="form-input" id="str-drawer-name" placeholder="Drawer Label"><button class="btn" style="width:auto;" onclick="submitStructureDrawer()">+</button></div></div>
+       </div>
+    </div>
+
+    <div id="personnel-section">
+      <div class="card">
+        <h3 style="margin-bottom: 16px;">Add New Personnel</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end;">
+          <div class="form-group" style="margin: 0;"><label class="form-label">Full Name</label><input class="form-input" id="new-name" placeholder="John Doe"></div>
+          <div class="form-group" style="margin: 0;"><label class="form-label">Badge ID</label><input class="form-input" id="new-badge" placeholder="T-099"></div>
+          <div class="form-group" style="margin: 0;"><label class="form-label">PIN</label><input class="form-input" id="new-pin" placeholder="1234"></div>
+          <button class="btn" style="width: auto;" onclick="addUser()">+ Create User</button>
+        </div>
+      </div>
+      <div class="card"><h3>Active Personnel Database</h3><table><thead><tr><th>Name</th><th>Badge ID</th><th>Role</th><th>Action</th></tr></thead><tbody id="user-table-body"></tbody></table></div>
+    </div>
+
+    <div id="tool-section">
+      <div class="card">
+        <h3 style="margin-bottom: 16px;">Add / Replace Asset</h3>
+        <div id="admin-reader" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+
+        <div class="flex-grid-3">
+          <div class="form-group" style="margin: 0;"><label class="form-label">Tool Description</label><input class="form-input" id="new-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
+          <div class="form-group" style="margin: 0;"><label class="form-label">Barcode ID</label><div style="display: flex; gap: 8px;"><select class="form-select" id="new-tool-prefix" style="width: 85px;"></select><input class="form-input" id="new-tool-id" placeholder="Generating..." style="font-family: monospace; color: var(--accent);"><button class="btn-icon" onclick="startAdminAssetCamera()">📷</button></div></div>
+          <div class="form-group" style="margin: 0;"><label class="form-label">Drawer Assignment</label><select class="form-select" id="new-tool-drawer"></select></div>
+        </div>
+
+        <div style="background: rgba(239,68,68,0.05); border: 1px solid rgba(239,68,68,0.2); padding: 12px; border-radius: 8px; margin-bottom: 15px;">
+          <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;"><input type="checkbox" id="is-replacement-check" onchange="toggleReplacementMenu()"><strong>This is a replacement tool (Reassigns ID)</strong></label>
+          <div id="replacement-menu" style="display: none; margin-top: 10px;"><label class="form-label">Select Tool to Retire</label><select class="form-select" id="replace-target-id" onchange="handleReplacementSelection()"></select></div>
+        </div>
+        <button class="btn" style="width: 100%; padding: 12px;" onclick="addTool()">Save Asset to Database</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentAdminBadge = null; let html5QrAdminInstance = null;
+
+    async function loginAdmin() {
+      const badge = document.getElementById('admin-badge').value.trim().toUpperCase(); const pin = document.getElementById('admin-pin').value.trim();
+      try {
+        const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ badge_id: badge, pin: pin }) });
+        const data = await response.json();
+        if (!response.ok) return alert('❌ ' + (data.error || 'Login failed'));
+        
+        currentAdminBadge = badge;
+        document.getElementById('auth-wall').style.display = 'none'; document.getElementById('admin-app').style.display = 'block'; document.getElementById('admin-name').textContent = `Logged in as: ${data.user.name} (${data.user.role.toUpperCase()})`;
+        
+        if (data.user.role === 'tool_rep') {
+            document.getElementById('personnel-section').style.display = 'none'; document.getElementById('structure-management-panel').style.display = 'none';
+        } else {
+            document.getElementById('personnel-section').style.display = 'block'; document.getElementById('structure-management-panel').style.display = 'block'; loadUsers(); 
+        }
+        await syncStorageHierarchyDropdowns(); fetchNextToolId(); loadAuditLogs();
+      } catch (err) { alert('Server connection failure.'); }
+    }
+
+    async function loadAuditLogs() {
+        if (!currentAdminBadge) return;
+        try {
+            const response = await fetch(`/api/audit?requester=${currentAdminBadge}`);
+            const data = await response.json();
+            if (!response.ok) { document.getElementById('audit-table-body').innerHTML = `<tr><td colspan="5" style="color:var(--red); text-align:center;">${data.error}</td></tr>`; return; }
+            const tbody = document.getElementById('audit-table-body');
+            tbody.innerHTML = data.logs.map(log => {
+                const date = new Date(log.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                let actionColor = 'var(--text)'; if (log.action === 'CHECKOUT_TOOL') actionColor = 'var(--accent)'; if (log.action === 'CHECKIN_TOOL') actionColor = 'var(--green)'; if (log.action.startsWith('REPORT')) actionColor = 'var(--red)';
+                return `<tr><td style="color: var(--muted); font-size: 12px;">${date}</td><td><strong>${log.user_name || 'System'}</strong> <span style="font-size:11px; color:var(--muted);">(${log.badge_id || 'N/A'})</span></td><td style="color: ${actionColor}; font-weight: 600;">${log.action.replace('_', ' ')}</td><td style="font-family: monospace;">${log.qr_code || '--'}</td><td style="font-size: 12px; color: var(--muted);">${log.notes || '-'}</td></tr>`;
+            }).join('');
+        } catch (err) { console.error("Failed to fetch audit logs."); }
+    }
+
+    async function syncStorageHierarchyDropdowns() {
+        try {
+            const response = await fetch('/api/storage'); const data = await response.json(); if(!data.success) return;
+            document.getElementById('new-tool-prefix').innerHTML = data.departments.map(d => `<option value="${d.prefix_code}-">${d.prefix_code}</option>`).join('');
+            document.getElementById('new-tool-drawer').innerHTML = data.drawers.map(dr => `<option value="${dr.drawer_id}">${dr.name}</option>`).join('');
+            document.getElementById('str-box-dept-select').innerHTML = data.departments.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
+            document.getElementById('str-drawer-box-select').innerHTML = data.toolboxes.map(b => `<option value="${b.box_id}">${b.name}</option>`).join('');
+        } catch(e) {}
+    }
+
+    async function submitStructureDept() { await fetch('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: document.getElementById('str-dept-name').value, prefix_code: document.getElementById('str-dept-prefix').value, requester: currentAdminBadge }) }); syncStorageHierarchyDropdowns(); }
+    async function submitStructureBox() { await fetch('/api/toolboxes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: document.getElementById('str-box-name').value, dept_id: document.getElementById('str-box-dept-select').value, requester: currentAdminBadge }) }); syncStorageHierarchyDropdowns(); }
+    async function submitStructureDrawer() { await fetch('/api/drawers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: document.getElementById('str-drawer-name').value, box_id: document.getElementById('str-drawer-box-select').value, requester: currentAdminBadge }) }); syncStorageHierarchyDropdowns(); }
+
+    async function loadUsers() {
+      try {
+        const response = await fetch(`/api/users?requester=${currentAdminBadge}`); const data = await response.json();
+        document.getElementById('user-table-body').innerHTML = data.users.map(u => `<tr><td><strong>${u.full_name}</strong></td><td style="font-family: monospace;">${u.badge_id}</td><td>${u.role.toUpperCase()}</td><td><button onclick="deactivateUser('${u.badge_id}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-weight:bold;">✕</button></td></tr>`).join('');
+      } catch (err) {}
+    }
+    async function addUser() { const payload = { requester: currentAdminBadge, full_name: document.getElementById('new-name').value, badge_id: document.getElementById('new-badge').value, pin: document.getElementById('new-pin').value, dept_id: 1, role: 'technician' }; const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (res.ok) { document.getElementById('new-name').value = ''; document.getElementById('new-badge').value = ''; document.getElementById('new-pin').value = ''; loadUsers(); } }
+    async function deactivateUser(id) { if(!confirm(`Deactivate ${id}?`)) return; await fetch(`/api/users/${id}/deactivate`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requester: currentAdminBadge }) }); loadUsers(); }
+
+    function initCameraCore(elementId, callback) {
+        document.getElementById(elementId).style.display = 'block';
+        if(html5QrAdminInstance) { html5QrAdminInstance.clear(); }
+        html5QrAdminInstance = new Html5Qrcode(elementId);
+        Html5Qrcode.getCameras().then(devices => {
+            if (devices && devices.length) {
+                html5QrAdminInstance.start(devices[0].id, { fps: 12, qrbox: 250 }, (txt) => { html5QrAdminInstance.stop().then(() => { document.getElementById(elementId).style.display = 'none'; callback(txt); }); }).catch((err) => { alert("Camera Error: " + err); document.getElementById(elementId).style.display = 'none'; });
+            } else { alert("No cameras found on device."); document.getElementById(elementId).style.display = 'none'; }
+        }).catch(err => { alert("Permission denied."); document.getElementById(elementId).style.display = 'none'; });
+    }
+
+    function startAdminLoginCamera() { initCameraCore('admin-auth-reader', (txt) => { document.getElementById('admin-badge').value = txt; }); }
+    function startAdminAssetCamera() { initCameraCore('admin-reader', (txt) => { document.getElementById('new-tool-prefix').style.display = 'none'; document.getElementById('new-tool-id').value = txt; }); }
+
+    function toggleReplacementMenu() {
+      const isChecked = document.getElementById('is-replacement-check').checked;
+      document.getElementById('replacement-menu').style.display = isChecked ? 'block' : 'none';
+      if (isChecked) { loadBrokenTools(); document.getElementById('new-tool-prefix').style.display = 'none'; } else { document.getElementById('new-tool-prefix').style.display = 'inline-block'; fetchNextToolId(); }
+    }
+    function handleReplacementSelection() { const opt = document.getElementById('replace-target-id').options[document.getElementById('replace-target-id').selectedIndex]; document.getElementById('new-tool-id').value = opt.value ? opt.dataset.qr : ''; }
+
+    async function fetchNextToolId() { try { const res = await fetch('/api/tools/next-id'); const data = await res.json(); if (data.success) document.getElementById('new-tool-id').value = data.next_sequence; } catch (err) {} }
+    async function loadBrokenTools() {
+      try {
+        const res = await fetch('/api/tools'); const data = await res.json(); const dropdown = document.getElementById('replace-target-id'); dropdown.innerHTML = '<option value="">-- Select a flagged tool --</option>';
+        data.tools.forEach(t => { if (['Broken','Missing','Worn'].includes(t.status)) dropdown.innerHTML += `<option value="${t.tool_id}" data-qr="${t.qr_code}">[${t.qr_code}] ${t.name} - ${t.status}</option>`; });
+      } catch (err) {}
+    }
+
+    async function addTool() {
+      const isReplacement = document.getElementById('is-replacement-check').checked;
+      const isCustomScan = document.getElementById('new-tool-prefix').style.display === 'none';
+      let finalQrCode = document.getElementById('new-tool-id').value;
+      if (!isReplacement && !isCustomScan) finalQrCode = document.getElementById('new-tool-prefix').value + finalQrCode;
+      
+      const payload = { requester: currentAdminBadge, name: document.getElementById('new-tool-name').value, qr_code: finalQrCode, drawer_id: document.getElementById('new-tool-drawer').value, replaced_tool_id: isReplacement ? document.getElementById('replace-target-id').value : null };
+      if (!payload.name || !payload.qr_code) return alert('Description and ID required.');
+
+      const response = await fetch('/api/tools', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (response.ok) {
+        alert(`✅ Asset configured: ${payload.qr_code}`); document.getElementById('new-tool-name').value = '';
+        if (isReplacement) { document.getElementById('is-replacement-check').checked = false; toggleReplacementMenu(); } else { document.getElementById('new-tool-prefix').style.display = 'inline-block'; fetchNextToolId(); }
+      }
+    }
+  </script>
+</body>
+</html>

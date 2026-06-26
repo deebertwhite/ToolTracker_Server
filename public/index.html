@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTA Tool Tracking Hub</title>
+<style>
+  :root {
+    --bg: #111315; --surface: #1c1f23; --surface2: #252830;
+    --border: #363940; --accent: #CB6015; --accent2: #FBDC3E;
+    --text: #D9D9D6; --muted: #B1B3B3;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+  
+  .header { text-align: center; margin-bottom: 40px; }
+  .title { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .subtitle { color: var(--muted); font-size: 14px; }
+  .accent-bar { height: 4px; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 100px; margin: 20px auto; border-radius: 2px; }
+  
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 1000px; width: 90%; }
+  
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 32px 24px; text-align: center; cursor: pointer; transition: all 0.2s;
+    text-decoration: none; color: var(--text); display: block;
+  }
+  .card:hover { transform: translateY(-5px); border-color: var(--accent); background: var(--surface2); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+  .card-icon { font-size: 48px; margin-bottom: 16px; }
+  .card-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+  .card-desc { font-size: 13px; color: var(--muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">LTA Tool Tracking System</div>
+    <div class="subtitle">Select your destination portal</div>
+    <div class="accent-bar"></div>
+  </div>
+
+  <div class="grid">
+    <a href="dashboard.html" class="card">
+      <div class="card-icon">📊</div>
+      <div class="card-title">Open Dashboard</div>
+      <div class="card-desc">View live inventory, calibration schedules, and checked-out tools. No login required.</div>
+    </a>
+    <a href="kiosk.html" class="card" style="border-top: 3px solid var(--accent);">
+      <div class="card-icon">📤</div>
+      <div class="card-title">Shop Floor Kiosk</div>
+      <div class="card-desc">Scan badges and tools for immediate check-out / check-in. Auto-locks for security.</div>
+    </a>
+    <a href="admin.html" class="card">
+      <div class="card-icon">🔐</div>
+      <div class="card-title">Management Portal</div>
+      <div class="card-desc">Admin access to manage personnel, add inventory, and view compliance audits.</div>
+    </a>
+  </div>
+</body>
+</html>

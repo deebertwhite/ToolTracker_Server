@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTA Dashboard</title>
+<style>
+  :root { --bg: #111315; --surface: #1c1f23; --surface2: #252830; --border: #363940; --accent: #CB6015; --text: #D9D9D6; --muted: #B1B3B3; --green: #22c55e; --red: #ef4444; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  body { background: var(--bg); color: var(--text); padding: 30px; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  table { width: 100%; border-collapse: collapse; text-align: left; }
+  th { padding: 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
+  .status-In { color: var(--green); font-weight: bold; }
+  .status-Out { color: var(--accent); font-weight: bold; }
+  .status-Broken, .status-Missing { color: var(--red); font-weight: bold; }
+  .btn { padding: 8px 16px; background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; text-decoration: none; font-size: 13px; }
+  .btn:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1 style="font-size: 20px;">Live Inventory Dashboard</h1>
+      <div style="color: var(--muted); font-size: 13px; margin-top: 4px;">Read-Only View · Auto-syncing with Central Database</div>
+    </div>
+    <a href="index.html" class="btn">← Back to Hub</a>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>Tool Name</th><th>Barcode/SN</th><th>Home Box</th><th>Status</th><th>Notes</th></tr>
+      </thead>
+      <tbody id="inventory-body">
+        <tr><td colspan="5" style="text-align: center; color: var(--muted);">Loading live database...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    async function loadInventory() {
+      try {
+        const response = await fetch('/api/tools');
+        const data = await response.json();
+        
+        const tbody = document.getElementById('inventory-body');
+        if (!data.success || data.tools.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align: center;">No tools found in database.</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = data.tools.map(t => `
+          <tr>
+            <td style="font-weight: 600;">${t.name}</td>
+            <td style="font-family: monospace; color: var(--muted);">${t.qr_code}</td>
+            <td>${t.toolbox_name || 'Unassigned'}</td>
+            <td class="status-${t.status}">${t.status}</td>
+            <td style="color: var(--muted); font-size: 12px;">${t.status_reason || ''}</td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        document.getElementById('inventory-body').innerHTML = `<tr><td colspan="5" style="color: var(--red);">Error connecting to database.</td></tr>`;
+      }
+    }
+    
+    // Load immediately on open
+    loadInventory();
+  </script>
+</body>
+</html>
