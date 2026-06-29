@@ -48,55 +48,81 @@
   .batch-item { display: flex; align-items: center; justify-content: space-between; padding: 10px; background: var(--surface2); border-radius: 6px; margin-bottom: 6px; border-left: 3px solid var(--accent); }
   
   .toast { position: fixed; bottom: 22px; right: 22px; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 9px; padding: 12px 20px; z-index: 200; display: none; box-shadow: 0 8px 28px rgba(0,0,0,0.5); }
+  /* Persistent Home Button */
+  .persistent-home { 
+    position: fixed; 
+    Bottom: 20px; 
+    left: 20px; 
+    background: var(--surface); 
+    border: 1px solid var(--border); 
+    color: var(--muted); 
+    padding: 8px 14px; 
+    border-radius: 8px; 
+    text-decoration: none; 
+    font-size: 13px; 
+    font-weight: 600; 
+    display: flex; 
+    align-items: center; 
+    gap: 8px; 
+    transition: 0.2s; 
+    z-index: 9999; 
+  }
+  .persistent-home:hover { 
+    color: var(--text); 
+    border-color: var(--accent); 
+    background: var(--surface2); 
+  }
 </style>
 </head>
 <body>
+  
+  <a href="index.html" class="persistent-home">🏠 Main Hub</a>
 
-<div id="screen-idle">
-  <svg class="lta-logo-svg" version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 431.4 212.9">
-    <path class="st0" d="M75.1,107c-0.1-64.8,76.8-92,84.8-94.6l0,0C83.9,28.9,38.9,73.5,21,95c-5.7,6.9-5.7,16.9,0,23.8c17.8,21.4,62.6,65.7,138,82.5C148.8,197.8,75.2,170.2,75.1,107z"/>
-    <path class="st0" d="M164,134l0-96l-7.3,0c-13.8,0-25,11.2-25,25l0,70.8c0,24.9,20.1,45,45,45l45.5,0l0-7.3c0-13.8-11.2-25-25-25l-20.7,0C169.6,146.5,164,140.9,164,134z"/>
-    <path class="st0" d="M242.9,38c12.7,6.5,22.3,18.1,26,32.2H295l1.1-3.9c0.3-1.1,2.6-9.5,9.3-18c2.7-3.4,6.4-7.1,11.1-10.3H242.9z"/>
-    <path class="st0" d="M332.6,75.8c0.6-2,2-11,11.1-11c9.2,0,10.8,9,11.3,11s9.3,33.4,9.3,33.4h-35.5l-3,10.6c-3,10.8,5.1,21.6,16.4,21.6h21.6c5.6,0,10.5,3.7,12,9.1l2.8,10c3,10.8,12.9,18.3,24.1,18.3h14.5l-31-111c0,0-8.1-32.1-42.5-32.1s-42.4,32-42.4,32l-31.1,111.1h14.5c11.2,0,21.1-7.5,24.1-18.3L332.6,75.8z"/>
-    <path class="st0" d="M232.7,82.8l0,96l7.3,0c13.8,0,25-11.2,25-25l0-70.8c0-24.9-20.1-45-45-45l-45.5,0l0,7.3c0,13.8,11.2,25,25,25l20.7,0C227.1,70.3,232.7,75.9,232.7,82.8z"/>
-  </svg>
-  <div class="idle-title">Select Kiosk Action</div>
-  <div class="action-grid">
-    <div class="action-btn" onclick="startWorkflow('OUT')"><div class="action-icon">📤</div><div class="action-label">Check Out Tools</div></div>
-    <div class="action-btn" onclick="startWorkflow('IN')"><div class="action-icon">📥</div><div class="action-label">Check In Tools</div></div>
-    <div class="action-btn" onclick="startWorkflow('REPORT')" style="border-color: rgba(239,68,68,0.5);"><div class="action-icon">⚠️</div><div class="action-label">Report Issue</div></div>
-  </div>
-  <a href="index.html" style="margin-top: 40px; color: var(--muted); text-decoration: none; font-size: 13px;">← Back to Hub</a>
-</div>
-
-<div id="screen-auth">
-  <div class="auth-card">
-    <div class="auth-header">
-      <div style="font-size: 32px; margin-bottom: 10px;" id="auth-header-icon">🪪</div>
-      <div class="auth-title" id="auth-header-title">Identify Technician</div>
-      <div class="auth-sub">Scan Badge or Enter ID</div>
+  <div id="screen-idle">
+    <svg class="lta-logo-svg" version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 431.4 212.9">
+      <path class="st0" d="M75.1,107c-0.1-64.8,76.8-92,84.8-94.6l0,0C83.9,28.9,38.9,73.5,21,95c-5.7,6.9-5.7,16.9,0,23.8c17.8,21.4,62.6,65.7,138,82.5C148.8,197.8,75.2,170.2,75.1,107z"/>
+      <path class="st0" d="M164,134l0-96l-7.3,0c-13.8,0-25,11.2-25,25l0,70.8c0,24.9,20.1,45,45,45l45.5,0l0-7.3c0-13.8-11.2-25-25-25l-20.7,0C169.6,146.5,164,140.9,164,134z"/>
+      <path class="st0" d="M242.9,38c12.7,6.5,22.3,18.1,26,32.2H295l1.1-3.9c0.3-1.1,2.6-9.5,9.3-18c2.7-3.4,6.4-7.1,11.1-10.3H242.9z"/>
+      <path class="st0" d="M332.6,75.8c0.6-2,2-11,11.1-11c9.2,0,10.8,9,11.3,11s9.3,33.4,9.3,33.4h-35.5l-3,10.6c-3,10.8,5.1,21.6,16.4,21.6h21.6c5.6,0,10.5,3.7,12,9.1l2.8,10c3,10.8,12.9,18.3,24.1,18.3h14.5l-31-111c0,0-8.1-32.1-42.5-32.1s-42.4,32-42.4,32l-31.1,111.1h14.5c11.2,0,21.1-7.5,24.1-18.3L332.6,75.8z"/>
+      <path class="st0" d="M232.7,82.8l0,96l7.3,0c13.8,0,25-11.2,25-25l0-70.8c0-24.9-20.1-45-45-45l-45.5,0l0,7.3c0,13.8,11.2,25,25,25l20.7,0C227.1,70.3,232.7,75.9,232.7,82.8z"/>
+    </svg>
+    <div class="idle-title">Select Kiosk Action</div>
+    <div class="action-grid">
+      <div class="action-btn" onclick="startWorkflow('OUT')"><div class="action-icon">📤</div><div class="action-label">Check Out Tools</div></div>
+      <div class="action-btn" onclick="startWorkflow('IN')"><div class="action-icon">📥</div><div class="action-label">Check In Tools</div></div>
+      <div class="action-btn" onclick="startWorkflow('REPORT')" style="border-color: rgba(239,68,68,0.5);"><div class="action-icon">⚠️</div><div class="action-label">Report Issue</div></div>
     </div>
+    <a href="index.html" style="margin-top: 40px; color: var(--muted); text-decoration: none; font-size: 13px;">← Back to Hub</a>
+  </div>
+
+  <div id="screen-auth">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div style="font-size: 32px; margin-bottom: 10px;" id="auth-header-icon">🪪</div>
+        <div class="auth-title" id="auth-header-title">Identify Technician</div>
+        <div class="auth-sub">Scan Badge or Enter Username</div>
+      </div>
     
-    <div id="auth-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+      <div id="auth-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
 
-    <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
-      <input class="form-input" id="auth-badge-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Scan Badge..." onkeydown="if(event.key==='Enter')authenticateUser()">
-      <button class="btn-icon" onclick="startAuthCameraScanner()" title="Camera">📷</button>
-    </div>
+      <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
+        <input class="form-input" id="auth-badge-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Badge or Username..." onkeydown="if(event.key==='Enter')authenticateUser()">
+        <button class="btn-icon" onclick="startAuthCameraScanner()" title="Camera">📷</button>
+      </div>
     
-    <div style="display: flex; gap: 10px; margin-top: 20px;">
-      <button class="btn btn-secondary" style="flex: 1;" onclick="resetToIdle()">Cancel</button>
-      <button class="btn btn-primary" style="flex: 2;" onclick="authenticateUser()">Next →</button>
+      <div style="display: flex; gap: 10px; margin-top: 20px;">
+        <button class="btn btn-secondary" style="flex: 1;" onclick="resetToIdle()">Cancel</button>
+        <button class="btn btn-primary" style="flex: 2;" onclick="authenticateUser()">Next →</button>
+      </div>
     </div>
   </div>
-</div>
 
-<div id="screen-action">
-  <div class="topbar">
-    <div class="auth-banner"><div class="avatar" id="user-avatar">--</div><div><div style="font-weight: 700; font-size: 14px;" id="user-name">Loading...</div><div style="font-size: 11px; color: var(--muted);" id="user-meta">Authorized</div></div></div>
-    <button class="btn btn-secondary" onclick="resetToIdle()">Cancel & Log Out</button>
-  </div>
-  <div class="accent-bar"></div>
+  <div id="screen-action">
+    <div class="topbar">
+      <div class="auth-banner"><div class="avatar" id="user-avatar">--</div><div><div style="font-weight: 700; font-size: 14px;" id="user-name">Loading...</div><div style="font-size: 11px; color: var(--muted);" id="user-meta">Authorized</div></div></div>
+      <button class="btn btn-secondary" onclick="resetToIdle()">Cancel & Log Out</button>
+    </div>
+    <div class="accent-bar"></div>
 
   <div class="content">
     <div class="card" id="panel-scanner">
@@ -155,17 +181,20 @@
   }
 
   async function authenticateUser() {
-    const badgeId = document.getElementById('auth-badge-input').value.trim().toUpperCase();
-    if (!badgeId) return showToast('⚠️ Badge ID is required.');
+    const loginId = document.getElementById('auth-badge-input').value.trim();
+    if (!loginId) return showToast('⚠️ Identifier is required.');
     try {
-      const response = await fetch('/api/kiosk-auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ badge_id: badgeId }) });
+      const response = await fetch('/api/kiosk-auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login_id: loginId }) });
       const data = await response.json();
-      if (!response.ok) return showToast('❌ ' + (data.error || 'Badge not recognized.'));
+      if (!response.ok) return showToast('❌ ' + (data.error || 'Identity not recognized.'));
 
-      activeUser = { badgeId: badgeId, name: data.user.name, initials: data.user.name.split(' ').map(n => n[0]).join('') };
-      document.getElementById('user-avatar').textContent = activeUser.initials; document.getElementById('user-name').textContent = activeUser.name;
+      // Use the actual badge_id from the database for transactions, no matter what they typed to log in
+      activeUser = { badgeId: data.user.badge_id, name: data.user.full_name, initials: data.user.full_name.split(' ').map(n => n[0]).join('') };
+      document.getElementById('user-avatar').textContent = activeUser.initials; 
+      document.getElementById('user-name').textContent = activeUser.name;
       document.getElementById('auth-badge-input').value = '';
-      document.getElementById('screen-auth').style.display = 'none'; document.getElementById('screen-action').style.display = 'flex';
+      document.getElementById('screen-auth').style.display = 'none'; 
+      document.getElementById('screen-action').style.display = 'flex';
       setupActionScreen();
     } catch (err) { showToast('❌ Server error.'); }
   }

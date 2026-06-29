@@ -18,9 +18,36 @@
   .status-Broken, .status-Missing { color: var(--red); font-weight: bold; }
   .btn { padding: 8px 16px; background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; text-decoration: none; font-size: 13px; }
   .btn:hover { border-color: var(--accent); }
+  /* Persistent Home Button */
+  .persistent-home { 
+    position: fixed; 
+    bottom: 20px; 
+    left: 20px; 
+    background: var(--surface); 
+    border: 1px solid var(--border); 
+    color: var(--muted); 
+    padding: 8px 14px; 
+    border-radius: 8px; 
+    text-decoration: none; 
+    font-size: 13px; 
+    font-weight: 600; 
+    display: flex; 
+    align-items: center; 
+    gap: 8px; 
+    transition: 0.2s; 
+    z-index: 9999; 
+  }
+  .persistent-home:hover { 
+    color: var(--text); 
+    border-color: var(--accent); 
+    background: var(--surface2); 
+  }
 </style>
 </head>
 <body>
+
+  <a href="index.html" class="persistent-home">🏠 Main Hub</a>
+
   <div class="header">
     <div>
       <h1 style="font-size: 20px;">Live Inventory Dashboard</h1>
