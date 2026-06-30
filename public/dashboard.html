@@ -1,267 +1,85 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LTA Global Dashboard</title>
-<style>
-  :root { --bg: #111315; --surface: #1c1f23; --surface2: #252830; --border: #363940; --accent: #CB6015; --text: #D9D9D6; --muted: #B1B3B3; --red: #ef4444; --green: #22c55e; --orange: #f59e0b;}
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
-  
-  body { background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; padding-bottom: 0; }
-  
-  /* Dual Pane Layout */
-  .sidebar { width: 300px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; padding-bottom: 100px; }
-  .main-content { flex: 1; overflow-y: auto; padding: 30px; padding-bottom: 100px; background: var(--bg); }
-  
-  .sidebar-header { padding: 20px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 18px; position: sticky; top: 0; background: var(--surface); z-index: 10; }
-  
-  /* Navigable Tree Styles */
-  .nav-item { padding: 12px 20px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.02); transition: 0.2s; font-size: 14px; }
-  .nav-item:hover { background: var(--surface2); }
-  .nav-item.active { border-left: 4px solid var(--accent); background: rgba(203,96,21,0.1); font-weight: bold; }
-  .nav-dept { font-weight: 600; color: var(--text); }
-  .nav-box { padding-left: 40px; color: var(--muted); font-size: 13px; }
-  
-  /* Dashboard Cards */
-  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 20px; }
-  .grid-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 24px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; }
-  .card-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px; letter-spacing: 0.5px; }
-  .kpi-value { font-size: 36px; font-weight: 700; }
-  
-  /* Tables */
-  .table-responsive-wrapper { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-  table { width: 100%; border-collapse: collapse; text-align: left; min-width: 700px; }
-  th { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; white-space: nowrap; background: var(--surface2); position: sticky; top: 0; }
-  td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
-  
-  /* Mobile Stacking */
-  @media (max-width: 850px) {
-      body { flex-direction: column; overflow-y: auto; }
-      .sidebar { width: 100%; height: auto; max-height: 300px; border-right: none; border-bottom: 2px solid var(--accent); padding-bottom: 0; }
-      .main-content { overflow-y: visible; }
-  }
-
-  .persistent-home { position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%); background: rgba(37, 40, 48, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid var(--border); border-top: 1px solid rgba(255,255,255,0.1); color: var(--text); padding: 14px 28px; border-radius: 40px; text-decoration: none; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 10px; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); z-index: 9999; box-shadow: 0 8px 32px rgba(0,0,0,0.6); }
-  .persistent-home:hover { color: white; border-color: var(--accent); background: var(--surface2); transform: translateX(-50%) translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.8); }
-</style>
-</head>
-<body>
-
-  <a href="index.html" class="persistent-home">🏠 Main Hub</a>
-
-  <div class="sidebar">
-    <div class="sidebar-header">Infrastructure Navigator</div>
-    <div class="nav-item nav-dept active" id="nav-global" onclick="loadGlobalDashboard()">🌍 Global Overview</div>
-    <div id="tree-container">
-        <div style="padding: 20px; color: var(--muted); font-size: 13px; text-align: center;">Loading tree...</div>
-    </div>
-  </div>
-
-  <div class="main-content">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LTA Global Dashboard</title>
     
-    <div id="view-global">
-        <div class="header">
-            <div><h2 style="font-size: 28px;">Command Center</h2><div style="color: var(--muted); font-size: 14px;">Live Global Telemetry</div></div>
-            <button onclick="loadGlobalDashboard()" style="padding: 8px 16px; background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; cursor: pointer;">🔄 Refresh Data</button>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="dashboard-layout">
+
+    <a href="index.html" class="persistent-home">🏠 Main Hub</a>
+
+    <div class="sidebar">
+        <div class="sidebar-header">Infrastructure Navigator</div>
+        <div class="nav-item nav-dept active" id="nav-global" onclick="loadGlobalDashboard()">🌍 Global Overview</div>
+        <div id="tree-container">
+            <div style="padding: 20px; color: var(--muted); font-size: 13px; text-align: center;">Loading tree...</div>
         </div>
+    </div>
+
+    <div class="main-content">
         
-        <div class="grid-container">
-            <div class="card" style="border-top: 3px solid var(--accent);">
-                <div class="card-title">Assets In Use</div>
-                <div class="kpi-value" id="kpi-out">--</div>
+        <div id="view-global">
+            <div class="header">
+                <div>
+                    <h2 style="font-size: 28px;">Command Center</h2>
+                    <div style="color: var(--muted); font-size: 14px;">Live Global Telemetry</div>
+                </div>
+                <button class="btn btn-secondary" style="width: auto;" onclick="loadGlobalDashboard()">🔄 Refresh Data</button>
             </div>
-            <div class="card" style="border-top: 3px solid var(--red);">
-                <div class="card-title">Action Required (Flagged)</div>
-                <div class="kpi-value" id="kpi-flagged">--</div>
-            </div>
-            <div class="card" style="border-top: 3px solid var(--green);">
-                <div class="card-title">Total Tracked Inventory</div>
-                <div class="kpi-value" id="kpi-total">--</div>
-            </div>
-        </div>
-
-        <h3 style="margin-bottom: 12px; margin-top: 30px;">📤 Currently Checked Out</h3>
-        <div class="table-responsive-wrapper">
-            <table>
-                <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Checked Out By</th><th>Time of Checkout</th><th>Assigned Location</th></tr></thead>
-                <tbody id="dash-out-body"><tr><td colspan="5" style="text-align: center;">Loading...</td></tr></tbody>
-            </table>
-        </div>
-
-        <h3 style="margin-bottom: 12px; margin-top: 30px;">⚠️ Maintenance & Calibration Required</h3>
-        <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
-            <table>
-                <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Status Issue</th><th>Condition Notes</th><th>Assigned Location</th></tr></thead>
-                <tbody id="dash-flagged-body"><tr><td colspan="5" style="text-align: center;">Loading...</td></tr></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div id="view-location" style="display: none;">
-        <div class="header">
-            <div><h2 style="font-size: 28px;" id="loc-title">Location Inventory</h2><div style="color: var(--muted); font-size: 14px;" id="loc-subtitle">Specific Node Filter</div></div>
-        </div>
-
-        <div class="table-responsive-wrapper">
-            <table>
-                <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Sub-Location</th><th>Current Status</th></tr></thead>
-                <tbody id="loc-table-body"><tr><td colspan="4" style="text-align: center;">Loading inventory...</td></tr></tbody>
-            </table>
-        </div>
-    </div>
-
-  </div>
-
-  <script>
-    let globalTools = [];
-
-    // --- 1. BOOT SEQUENCE ---
-    async function bootDashboard() {
-        await fetchStorageTree();
-        await loadGlobalDashboard();
-    }
-
-    // --- 2. BUILD THE NAV TREE ---
-    async function fetchStorageTree() {
-        try {
-            const res = await fetch('/api/storage');
-            const data = await res.json();
             
-            let html = '';
-            data.departments.forEach(dept => {
-                // Add Department Node
-                html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">🏢 ${dept.name}</div>`;
-                
-                // Add Sub-Toolbox Nodes
-                const boxes = data.toolboxes.filter(b => b.dept_id === dept.dept_id);
-                boxes.forEach(box => {
-                    html += `<div class="nav-item nav-box" onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')">🧰 ${box.name}</div>`;
-                });
-            });
-            document.getElementById('tree-container').innerHTML = html;
-        } catch (e) {
-            document.getElementById('tree-container').innerHTML = `<div style="color:var(--red); padding:20px;">Failed to load tree.</div>`;
-        }
-    }
+            <div class="grid-container">
+                <div class="card" style="border-top: 3px solid var(--accent);">
+                    <div style="font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">Assets In Use</div>
+                    <div style="font-size: 36px; font-weight: 700;" id="kpi-out">--</div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--red);">
+                    <div style="font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">Action Required</div>
+                    <div style="font-size: 36px; font-weight: 700;" id="kpi-flagged">--</div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--green);">
+                    <div style="font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">Total Inventory</div>
+                    <div style="font-size: 36px; font-weight: 700;" id="kpi-total">--</div>
+                </div>
+            </div>
 
-    // --- 3. LOAD THE GLOBAL COMMAND CENTER ---
-    async function loadGlobalDashboard() {
-        // UI Switching
-        document.getElementById('view-global').style.display = 'block';
-        document.getElementById('view-location').style.display = 'none';
-        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-        document.getElementById('nav-global').classList.add('active');
+            <h3 style="margin-bottom: 12px; margin-top: 30px;">📤 Currently Checked Out</h3>
+            <div class="table-responsive-wrapper">
+                <table>
+                    <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Checked Out By</th><th>Time of Checkout</th><th>Assigned Location</th></tr></thead>
+                    <tbody id="dash-out-body"><tr><td colspan="5" style="text-align: center;">Loading...</td></tr></tbody>
+                </table>
+            </div>
 
-        try {
-            // Fetch the new /api/dashboard logic
-            const res = await fetch('/api/dashboard');
-            const data = await res.json();
+            <h3 style="margin-bottom: 12px; margin-top: 30px;">⚠️ Maintenance & Calibration Required</h3>
+            <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
+                <table>
+                    <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Status Issue</th><th>Condition Notes</th><th>Assigned Location</th></tr></thead>
+                    <tbody id="dash-flagged-body"><tr><td colspan="5" style="text-align: center;">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
 
-            // Populate KPIs
-            document.getElementById('kpi-out').textContent = data.stats.total_out || 0;
-            document.getElementById('kpi-flagged').textContent = data.stats.total_flagged || 0;
-            document.getElementById('kpi-total').textContent = data.stats.total_tools || 0;
+        <div id="view-location" style="display: none;">
+            <div class="header">
+                <div>
+                    <h2 style="font-size: 28px;" id="loc-title">Location Inventory</h2>
+                    <div style="color: var(--muted); font-size: 14px;" id="loc-subtitle">Specific Node Filter</div>
+                </div>
+            </div>
 
-            // Populate "Checked Out" Table
-            const outBody = document.getElementById('dash-out-body');
-            if (data.out_tools.length === 0) { outBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--muted);">All tools are secured.</td></tr>`; } 
-            else {
-                outBody.innerHTML = data.out_tools.map(t => {
-                    const time = new Date(t.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                    return `<tr>
-                        <td style="font-family: monospace;">${t.qr_code}</td>
-                        <td><strong>${t.tool_name}</strong></td>
-                        <td style="color: var(--accent); font-weight:bold;">👤 ${t.user_name || 'Unknown'}</td>
-                        <td style="font-size:12px; color:var(--muted);">${time}</td>
-                        <td>${t.dept_name || '--'} / ${t.box_name || '--'}</td>
-                    </tr>`;
-                }).join('');
-            }
+            <div class="table-responsive-wrapper">
+                <table>
+                    <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Sub-Location</th><th>Current Status</th></tr></thead>
+                    <tbody id="loc-table-body"><tr><td colspan="4" style="text-align: center;">Loading inventory...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
 
-            // Populate "Flagged" Table with Calibration Logic
-            const flagBody = document.getElementById('dash-flagged-body');
-            if (data.flagged_tools.length === 0) { flagBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--muted);">No maintenance items flagged.</td></tr>`; } 
-            else {
-                flagBody.innerHTML = data.flagged_tools.map(t => {
-                    let badgeColor = t.status === 'Missing' ? 'var(--red)' : 'var(--orange)';
-                    let displayStatus = t.status;
-                    let reason = t.status_reason || 'No notes provided.';
+    </div>
 
-                    // Calibration Overrides
-                    if (t.is_calibrated && t.cal_due_date) {
-                        const due = new Date(t.cal_due_date);
-                        const today = new Date();
-                        if (due <= today) {
-                            badgeColor = 'var(--red)'; displayStatus = 'CAL OVERDUE'; reason = `Overdue since ${t.cal_due_date.split('T')[0]}`;
-                        } else if (due <= new Date(today.getTime() + (30 * 24 * 60 * 60 * 1000))) {
-                            badgeColor = 'var(--orange)'; displayStatus = 'CAL DUE SOON'; reason = `Due on ${t.cal_due_date.split('T')[0]}`;
-                        }
-                    }
-
-                    return `<tr>
-                        <td style="font-family: monospace;">${t.qr_code}</td>
-                        <td><strong>${t.tool_name}</strong></td>
-                        <td><span style="background: ${badgeColor}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase;">${displayStatus}</span></td>
-                        <td style="font-size:12px; color:var(--muted);">${reason}</td>
-                        <td>${t.dept_name || '--'} / ${t.box_name || '--'}</td>
-                    </tr>`;
-                }).join('');
-            }
-
-            // Silently fetch ALL tools in the background so they are ready for the location drill-down
-            const toolsRes = await fetch('/api/tools');
-            const toolsData = await toolsRes.json();
-            globalTools = toolsData.tools;
-
-        } catch (e) {
-            alert('Failed to load dashboard data.');
-        }
-    }
-
-    // --- 4. LOAD THE DRILL-DOWN LOCATION VIEWER ---
-    function loadLocationView(type, filterValue, title, subtitle) {
-        // UI Switching
-        document.getElementById('view-global').style.display = 'none';
-        document.getElementById('view-location').style.display = 'block';
-        document.getElementById('loc-title').textContent = title;
-        document.getElementById('loc-subtitle').textContent = type === 'dept' ? `Department Code: ${subtitle}` : subtitle;
-
-        // Visual highlighting in the sidebar
-        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-        event.currentTarget.classList.add('active'); // Highlight clicked item
-
-        // Filter the pre-loaded global tools list
-        let filteredTools = [];
-        if (type === 'dept') {
-            filteredTools = globalTools.filter(t => t.department_name === title);
-        } else if (type === 'box') {
-            filteredTools = globalTools.filter(t => t.toolbox_name === title);
-        }
-
-        // Render Table
-        const tbody = document.getElementById('loc-table-body');
-        if (filteredTools.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--muted);">No tools currently assigned to this location.</td></tr>`;
-            return;
-        }
-
-        tbody.innerHTML = filteredTools.map(t => {
-            let statusColor = t.status === 'In' ? 'var(--green)' : (t.status === 'Out' ? 'var(--accent)' : 'var(--red)');
-            return `
-                <tr>
-                    <td style="font-family: monospace;">${t.qr_code}</td>
-                    <td><strong>${t.name}</strong></td>
-                    <td style="font-size:12px; color:var(--muted);">${t.toolbox_name || '--'} / ${t.drawer_name || '--'}</td>
-                    <td style="color: ${statusColor}; font-weight: bold;">${t.status}</td>
-                </tr>
-            `;
-        }).join('');
-    }
-
-    // Start everything when the page loads
-    window.onload = bootDashboard;
-  </script>
+    <script src="dashboard.js"></script>
 </body>
 </html>
