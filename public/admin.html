@@ -4,15 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LTA Admin Portal</title>
-    
     <link rel="stylesheet" href="style.css">
-    
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
 </head>
 <body class="admin-layout">
 
     <input type="file" id="global-photo-upload" style="display: none;" accept="image/*" onchange="handlePhotoUpload(event)">
-
     <a href="index.html" class="persistent-home no-print">🏠 Main Hub</a>
 
     <div id="auth-wall">
@@ -42,9 +39,7 @@
                 <h2>LTA Central Hub</h2>
                 <div style="color: var(--muted); font-size: 13px;" id="admin-name">Logged in as: ---</div>
             </div>
-            <div>
-                <button class="btn btn-secondary" style="width: auto;" onclick="window.location.reload()">Sign Out</button>
-            </div>
+            <div><button class="btn btn-secondary" style="width: auto;" onclick="window.location.reload()">Sign Out</button></div>
         </div>
 
         <div id="hub-view" class="grid-container no-print">
@@ -54,11 +49,8 @@
             <div class="hub-card" id="hub-personnel" onclick="openWorkspace('ws-personnel')">
                 <div class="hub-icon">👥</div><div class="hub-title">Personnel</div><div class="hub-desc">View roster and manage accounts.</div>
             </div>
-            <div class="hub-card" id="hub-assets" onclick="openWorkspace('ws-assets')">
-                <div class="hub-icon">🔧</div><div class="hub-title">Assets & Tools</div><div class="hub-desc">Add tools, replace broken items.</div>
-            </div>
-            <div class="hub-card" id="hub-infrastructure" onclick="openWorkspace('ws-infrastructure')">
-                <div class="hub-icon">🏗️</div><div class="hub-title">Infrastructure</div><div class="hub-desc">Floor layouts and storage units.</div>
+            <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree();">
+                <div class="hub-icon">📦</div><div class="hub-title">Inventory & Infra</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
             <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports')">
                 <div class="hub-icon">📊</div><div class="hub-title">Telemetry & Reports</div><div class="hub-desc">Custom queries and data export.</div>
@@ -71,14 +63,8 @@
                 <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
                 <div class="card" style="max-width: 500px;">
                     <h3 style="margin-bottom: 16px;">Security Settings</h3>
-                    <div class="form-group">
-                        <label class="form-label">New Username</label>
-                        <input class="form-input" id="my-new-username" placeholder="Leave blank to keep current">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">New PIN Code</label>
-                        <input class="form-input" id="my-new-pin" type="password" placeholder="Leave blank to keep current">
-                    </div>
+                    <div class="form-group"><label class="form-label">New Username</label><input class="form-input" id="my-new-username" placeholder="Leave blank to keep current"></div>
+                    <div class="form-group"><label class="form-label">New PIN Code</label><input class="form-input" id="my-new-pin" type="password" placeholder="Leave blank to keep current"></div>
                     <button class="btn" onclick="updateMyAccount()">Save Security Updates</button>
                 </div>
             </div>
@@ -89,7 +75,7 @@
                     <h3 style="margin-bottom: 20px;">Personnel Department</h3>
                     <div class="grid-container">
                         <div class="hub-card" id="card-manage-users" onclick="openSubPanel('panel-manage-users')">
-                            <div class="hub-icon">⚙️</div><div class="hub-title">Manage Accounts</div><div class="hub-desc">Create accounts, reset PINs, set roles.</div>
+                            <div class="hub-icon">⚙️</div><div class="hub-title">Manage Accounts</div><div class="hub-desc">Create accounts and reset PINs.</div>
                         </div>
                         <div class="hub-card" onclick="openSubPanel('panel-view-roster'); loadRosterDirectory();">
                             <div class="hub-icon">📇</div><div class="hub-title">Company Roster</div><div class="hub-desc">View and search active personnel.</div>
@@ -103,20 +89,14 @@
                         <h3 style="margin-bottom: 16px;">Provision New User</h3>
                         <div class="flex-grid-4">
                             <div class="form-group" style="margin:0;"><label class="form-label">Full Name</label><input class="form-input" id="new-name" placeholder="John Doe"></div>
-                            <div class="form-group" style="margin:0;"><label class="form-label">Email Address</label><input class="form-input" id="new-email" placeholder="jdoe@ltaresearch.com"></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Email</label><input class="form-input" id="new-email" placeholder="jdoe@ltaresearch.com"></div>
                             <div class="form-group" style="margin:0;"><label class="form-label">Department</label><select class="form-select" id="new-user-dept"></select></div>
-                            <div class="form-group" style="margin:0;"><label class="form-label">System Role</label>
-                                <select class="form-select" id="new-role">
-                                    <option value="technician">Technician</option>
-                                    <option value="tool_rep">Tool Rep</option>
-                                    <option value="dept_admin">Department Admin</option>
-                                </select>
-                            </div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">System Role</label><select class="form-select" id="new-role"><option value="technician">Technician</option><option value="tool_rep">Tool Rep</option><option value="dept_admin">Department Admin</option></select></div>
                         </div>
-                        <button class="btn" style="width: auto;" onclick="addUser()">+ Generate Profile & Send Credentials</button>
+                        <button class="btn" style="width: auto; margin-top: 15px;" onclick="addUser()">+ Generate Profile & Send Credentials</button>
                     </div>
                     <div class="card">
-                        <h3>Subordinate Roster (Editable)</h3>
+                        <h3>Subordinate Roster</h3>
                         <div class="table-responsive-wrapper">
                             <table>
                                 <thead><tr><th>Name / Profile</th><th>Identifiers</th><th>Role</th><th>Actions</th></tr></thead>
@@ -129,7 +109,7 @@
                 <div id="panel-view-roster" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-personnel', 'subhub-personnel')">← Back to Personnel Menu</button>
                     <div class="card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                             <h3>Company Directory</h3>
                             <input type="text" class="form-input" id="roster-search" placeholder="Search by name..." style="max-width: 250px;" onkeyup="filterRoster()">
                         </div>
@@ -143,127 +123,64 @@
                 </div>
             </div>
 
-            <div id="ws-infrastructure" class="workspace-panel no-print">
-                <div id="subhub-infra">
+            <div id="ws-inventory" class="workspace-panel no-print">
+                <div id="subhub-inventory">
                     <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
-                    <h3 style="margin-bottom: 20px;">Infrastructure Designer</h3>
+                    <h3 style="margin-bottom: 20px;">Global Inventory Management</h3>
                     <div class="grid-container">
-                        <div class="hub-card" id="card-manage-depts" onclick="openSubPanel('panel-manage-depts')">
-                            <div class="hub-icon">🏢</div><div class="hub-title">Departments</div><div class="hub-desc">Establish top-level departments.</div>
+                        <div class="hub-card" onclick="openSubPanel('panel-inv-tree'); renderEditableInfraTree();">
+                            <div class="hub-icon">🗺️</div><div class="hub-title">Master Directory</div><div class="hub-desc">View and edit the complete global structure.</div>
                         </div>
-                        <div class="hub-card" id="card-manage-boxes" onclick="openSubPanel('panel-manage-boxes')">
-                            <div class="hub-icon">🧰</div><div class="hub-title">Storage Units</div><div class="hub-desc">Build toolboxes and internal drawers.</div>
-                        </div>
-                        <div class="hub-card" onclick="openSubPanel('panel-view-infra'); renderInfraDirectory();">
-                            <div class="hub-icon">🗺️</div><div class="hub-title">Floor Map Viewer</div><div class="hub-desc">View the entire storage tree.</div>
-                        </div>
-                        <div class="hub-card" id="card-manage-infra-tables" onclick="openSubPanel('panel-manage-infra-tables'); loadInfraManagementTables();">
-                            <div class="hub-icon">📋</div><div class="hub-title">Manage Existing</div><div class="hub-desc">View and delete empty storage structures.</div>
+                        <div class="hub-card" onclick="openSubPanel('panel-inv-build'); syncStorageHierarchyDropdowns();">
+                            <div class="hub-icon">🏗️</div><div class="hub-title">Deployment Builder</div><div class="hub-desc">Provision new toolboxes and ingest new tools.</div>
                         </div>
                     </div>
                 </div>
 
-                <div id="panel-manage-depts" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-infrastructure', 'subhub-infra')">← Back to Infrastructure Menu</button>
+                <div id="panel-inv-tree" class="sub-panel">
+                    <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
                     <div class="card">
-                        <h3 style="margin-bottom: 16px;">Create Global Department</h3>
-                        <div class="flex-grid-3">
-                            <div class="form-group" style="margin:0;"><label class="form-label">Department Name</label><input class="form-input" id="str-dept-name" placeholder="Avionics"></div>
-                            <div class="form-group" style="margin:0;"><label class="form-label">Prefix Code</label><input class="form-input" id="str-dept-prefix" placeholder="AVI" style="text-transform: uppercase;"></div>
-                            <button class="btn" style="width: auto;" onclick="submitStructureDept()">Establish Department</button>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <h3>Master Storage & Asset Tree</h3>
+                            <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree()">🔄 Refresh Data</button>
                         </div>
-                    </div>
-                </div>
-
-                <div id="panel-manage-boxes" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-infrastructure', 'subhub-infra')">← Back to Infrastructure Menu</button>
-                    <div class="card">
-                        <h3 style="margin-bottom: 16px;">Create Toolbox</h3>
-                        <div class="flex-grid-3">
-                            <div class="form-group" style="margin:0;"><label class="form-label">Parent Department</label><select class="form-select" id="str-box-dept-select"></select></div>
-                            <div class="form-group" style="margin:0;"><label class="form-label">Toolbox Designation</label><input class="form-input" id="str-box-name" placeholder="Main Flight Line Box"></div>
-                            <button class="btn" style="width: auto;" onclick="submitStructureBox()">Install Toolbox</button>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3 style="margin-bottom: 16px;">Create Drawer (Sub-Storage)</h3>
-                        <div class="flex-grid-3">
-                            <div class="form-group" style="margin:0;"><label class="form-label">Target Toolbox</label><select class="form-select" id="str-drawer-box-select"></select></div>
-                            <div class="form-group" style="margin:0;"><label class="form-label">Drawer Label</label><input class="form-input" id="str-drawer-name" placeholder="Top Drawer - Sockets"></div>
-                            <button class="btn" style="width: auto;" onclick="submitStructureDrawer()">Install Drawer</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div id="panel-view-infra" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-infrastructure', 'subhub-infra')">← Back to Infrastructure Menu</button>
-                    <div class="card">
-                        <h3 style="margin-bottom: 16px;">Global Asset Map</h3>
-                        <div id="infra-tree-container">
+                        <div id="editable-infra-tree-container">
                             <div style="text-align: center; color: var(--muted); padding: 20px;">Fetching structural data...</div>
                         </div>
                     </div>
                 </div>
 
-                <div id="panel-manage-infra-tables" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-infrastructure', 'subhub-infra')">← Back to Infrastructure Menu</button>
+                <div id="panel-inv-build" class="sub-panel">
+                    <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
                     
-                    <div class="card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                            <h3>Active Departments</h3>
-                            <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="loadInfraManagementTables()">🔄 Refresh</button>
-                        </div>
-                        <div class="table-responsive-wrapper" style="margin-bottom: 30px;">
-                            <table>
-                                <thead><tr><th>Prefix Code</th><th>Department Name</th><th>Action</th></tr></thead>
-                                <tbody id="manage-dept-body"></tbody>
-                            </table>
-                        </div>
-
-                        <h3 style="margin-bottom: 16px;">Active Toolboxes</h3>
-                        <div class="table-responsive-wrapper" style="margin-bottom: 30px;">
-                            <table>
-                                <thead><tr><th>Parent Department</th><th>Toolbox Details</th><th>Action</th></tr></thead>
-                                <tbody id="manage-box-body"></tbody>
-                            </table>
-                        </div>
-
-                        <h3 style="margin-bottom: 16px;">Active Drawers</h3>
-                        <div class="table-responsive-wrapper">
-                            <table>
-                                <thead><tr><th>Parent Toolbox</th><th>Drawer Details</th><th>Action</th></tr></thead>
-                                <tbody id="manage-drawer-body"></tbody>
-                            </table>
+                    <div class="card" id="card-manage-depts">
+                        <h3 style="margin-bottom: 16px;">1. Establish New Department</h3>
+                        <div class="flex-grid-3">
+                            <div class="form-group" style="margin:0;"><label class="form-label">Department Name</label><input class="form-input" id="str-dept-name" placeholder="Avionics"></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Prefix Code</label><input class="form-input" id="str-dept-prefix" placeholder="AVI" style="text-transform: uppercase;"></div>
+                            <button class="btn btn-secondary" style="width: auto;" onclick="submitStructureDept()">Establish Department</button>
                         </div>
                     </div>
-                </div>
-            </div>
 
-            <div id="ws-assets" class="workspace-panel no-print">
-                <div id="subhub-assets">
-                    <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
-                    <h3 style="margin-bottom: 20px;">Assets & Tools</h3>
-                    <div class="grid-container">
-                        <div class="hub-card" id="card-add-tools" onclick="openSubPanel('panel-add-remove'); loadRemovableTools();">
-                            <div class="hub-icon">➕</div><div class="hub-title">Add / Remove</div><div class="hub-desc">Introduce new tools or free up IDs.</div>
+                    <div class="card" id="card-manage-boxes">
+                        <h3 style="margin-bottom: 16px;">2. Smart Box Builder (Storage)</h3>
+                        <div class="flex-grid-4">
+                            <div class="form-group" style="margin:0;"><label class="form-label">Parent Dept</label><select class="form-select" id="str-box-dept-select" onchange="fetchNextBoxId()"></select></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Box Designation</label><input class="form-input" id="str-box-name" placeholder="e.g. Crash Cart A"></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Box Barcode ID</label><input class="form-input" id="str-box-id" readonly style="font-family: monospace; color: var(--accent);"></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Number of Drawers</label><input type="number" class="form-input" id="str-box-drawers" placeholder="e.g. 5" min="0" max="20"></div>
                         </div>
-                        <div class="hub-card" id="card-replace-tools" onclick="openSubPanel('panel-replace-tools'); loadBrokenTools();">
-                            <div class="hub-icon">♻️</div><div class="hub-title">Replace Assets</div><div class="hub-desc">Swap out broken or missing tools.</div>
-                        </div>
-                        <div class="hub-card" onclick="openSubPanel('panel-view-inventory'); loadInventoryDirectory();">
-                            <div class="hub-icon">📋</div><div class="hub-title">Inventory Directory</div><div class="hub-desc">Search and view all global assets.</div>
-                        </div>
+                        <button class="btn btn-primary" style="margin-top: 15px; width: auto;" onclick="submitSmartBox()">🔨 Build Storage Structure</button>
                     </div>
-                </div>
 
-                <div id="panel-add-remove" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-assets', 'subhub-assets')">← Back to Assets Menu</button>
-                    
                     <div class="card">
-                        <h3 style="margin-bottom: 16px;">Add New Asset</h3>
+                        <h3 style="margin-bottom: 16px;">3. Ingest New Asset (Tools)</h3>
                         <div id="admin-reader-add" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
                         <div class="flex-grid-3">
-                            <div class="form-group" style="margin: 0;"><label class="form-label">Tool Description</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Tool Name</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Detailed Description</label><input class="form-input" id="add-tool-desc" placeholder="e.g. Snap-on 72-tooth flex head"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Replacement URL</label><input class="form-input" id="add-tool-url" placeholder="https://mcmaster.com/..."></div>
+                            
                             <div class="form-group" style="margin: 0;">
                                 <label class="form-label">Barcode ID</label>
                                 <div style="display: flex; gap: 8px;">
@@ -274,105 +191,25 @@
                             </div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Drawer Assignment</label><select class="form-select" id="add-tool-drawer"></select></div>
                         </div>
-
-                        <div style="background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; margin-bottom: 15px; border: 1px solid var(--border);">
-                            <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;">
-                                <input type="checkbox" id="add-tool-is-cal" onchange="document.getElementById('add-tool-cal-fields').style.display = this.checked ? 'flex' : 'none'">
-                                <strong>Asset Requires Calibration Tracking</strong>
-                            </label>
-                            <div id="add-tool-cal-fields" style="display: none; gap: 15px; margin-top: 10px;">
-                                <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="add-tool-last-cal"></div>
-                                <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Calibration Due Date</label><input type="date" class="form-input" id="add-tool-cal-due"></div>
-                            </div>
-                        </div>
-
-                        <button class="btn" style="width: auto;" onclick="addNewTool()">+ Save Asset to Database</button>
-                    </div>
-
-                    <div class="card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
-                            <h3>Active Tools (Removable)</h3>
-                            <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="loadRemovableTools()">🔄 Refresh</button>
-                        </div>
-                        <div class="table-responsive-wrapper">
-                            <table>
-                                <thead><tr><th>Barcode ID</th><th>Description</th><th>Location</th><th>Status</th><th>Action</th></tr></thead>
-                                <tbody id="tools-removable-body"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-
-                <div id="panel-replace-tools" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-assets', 'subhub-assets')">← Back to Assets Menu</button>
-                    <div class="card">
-                        <h3 style="margin-bottom: 16px;">Replace Flagged Asset</h3>
-                        <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">This will officially retire the broken tool and transfer its exact Barcode ID to the new physical replacement tool.</p>
-                        <div id="admin-reader-replace" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
-                        
-                        <div class="form-group">
-                            <label class="form-label">Select Tool to Retire</label>
-                            <select class="form-select" id="replace-target-id" onchange="handleReplacementSelection()"></select>
-                        </div>
-
-                        <div class="flex-grid-3">
-                            <div class="form-group" style="margin: 0;"><label class="form-label">New Tool Description</label><input class="form-input" id="replace-tool-name" placeholder="e.g. New 1/4 Ratchet"></div>
-                            <div class="form-group" style="margin: 0;"><label class="form-label">Transferred ID (Reserved)</label><input class="form-input" id="replace-tool-id" disabled style="font-family: monospace; color: var(--accent); opacity: 0.7;"></div>
-                            <div class="form-group" style="margin: 0;"><label class="form-label">Drawer Assignment</label><select class="form-select" id="replace-tool-drawer"></select></div>
-                        </div>
-                        <button class="btn" style="width: auto;" onclick="replaceTool()">♻️ Process Replacement</button>
-                    </div>
-                </div>
-
-                <div id="panel-view-inventory" class="sub-panel">
-                    <button class="back-btn" onclick="closeSubPanel('ws-assets', 'subhub-assets')">← Back to Assets Menu</button>
-                    <div class="card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
-                            <h3>Global Inventory Directory</h3>
-                            <input type="text" class="form-input" id="inventory-search" placeholder="Search by ID or Name..." style="max-width: 250px;" onkeyup="filterInventory()">
-                        </div>
-                        <div class="table-responsive-wrapper">
-                            <table id="inventory-table">
-                                <thead><tr><th>Barcode ID</th><th>Description</th><th>Location</th><th>Status</th><th>Notes</th></tr></thead>
-                                <tbody id="inventory-directory-body"></tbody>
-                            </table>
-                        </div>
+                        <button class="btn btn-secondary" style="width: auto; margin-top: 15px;" onclick="addNewTool()">+ Save Asset to Database</button>
                     </div>
                 </div>
             </div>
 
             <div id="ws-reports" class="workspace-panel">
                 <button class="back-btn no-print" onclick="showMainHub()">← Return to Main Hub</button>
-                
                 <div class="card no-print">
                     <h3 style="margin-bottom: 16px;">Custom Report Builder</h3>
                     <div class="flex-grid-4">
-                        <div class="form-group" style="margin: 0;">
-                            <label class="form-label">Report Type</label>
-                            <select class="form-select" id="rep-type">
-                                <option value="AUDIT">Transaction History</option>
-                                <option value="FLAGGED">Damaged / Missing Assets</option>
-                            </select>
-                        </div>
-                        <div class="form-group" style="margin: 0;">
-                            <label class="form-label">Department</label>
-                            <select class="form-select" id="rep-dept">
-                                <option value="ALL">Global (All Departments)</option>
-                            </select>
-                        </div>
-                        <div class="form-group" style="margin: 0;">
-                            <label class="form-label">Start Date</label>
-                            <input type="date" class="form-input" id="rep-start">
-                        </div>
-                        <div class="form-group" style="margin: 0;">
-                            <label class="form-label">End Date</label>
-                            <input type="date" class="form-input" id="rep-end">
-                        </div>
+                        <div class="form-group" style="margin: 0;"><label class="form-label">Report Type</label><select class="form-select" id="rep-type"><option value="AUDIT">Transaction History</option><option value="FLAGGED">Damaged / Missing Assets</option></select></div>
+                        <div class="form-group" style="margin: 0;"><label class="form-label">Department</label><select class="form-select" id="rep-dept"><option value="ALL">Global (All Departments)</option></select></div>
+                        <div class="form-group" style="margin: 0;"><label class="form-label">Start Date</label><input type="date" class="form-input" id="rep-start"></div>
+                        <div class="form-group" style="margin: 0;"><label class="form-label">End Date</label><input type="date" class="form-input" id="rep-end"></div>
                     </div>
                     <div style="display: flex; gap: 10px; margin-top: 15px;">
                         <button class="btn" style="width: auto;" onclick="generateCustomReport()">📊 Generate Report</button>
-                        <button class="btn btn-secondary" style="width: auto;" onclick="exportTableToCSV('LTA_Report.csv')">💾 Export to CSV</button>
-                        <button class="btn btn-secondary" style="width: auto;" onclick="window.print()">🖨️ Print Report</button>
+                        <button class="btn btn-secondary" style="width: auto;" onclick="exportTableToCSV('LTA_Report.csv')">💾 Export CSV</button>
+                        <button class="btn btn-secondary" style="width: auto;" onclick="window.print()">🖨️ Print</button>
                     </div>
                 </div>
 
@@ -380,18 +217,41 @@
                     <h3 id="report-display-title" style="margin-bottom: 16px;">Generated Report Data</h3>
                     <div class="table-responsive-wrapper" style="max-height: 600px; overflow-y: auto;">
                         <table id="generated-report-table">
-                            <thead id="report-thead" style="position: sticky; top: 0; background: var(--surface2); z-index: 1;">
-                                <tr><th>Run a report to view data.</th></tr>
-                            </thead>
-                            <tbody id="report-tbody">
-                                <tr><td style="text-align: center; color: var(--muted);">Waiting for query...</td></tr>
-                            </tbody>
+                            <thead id="report-thead" style="position: sticky; top: 0; background: var(--surface2); z-index: 1;"><tr><th>Run a report to view data.</th></tr></thead>
+                            <tbody id="report-tbody"><tr><td style="text-align: center; color: var(--muted);">Waiting for query...</td></tr></tbody>
                         </table>
                     </div>
                 </div>
             </div>
 
         </div>
+    </div>
+
+    <div id="entity-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div class="card" style="width: 100%; max-width: 450px; position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+            <button onclick="closeEntityModal()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;">✕</button>
+            
+            <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 15px;">
+                <div id="em-thumb" style="width: 60px; height: 60px; border-radius: 8px; background: var(--surface2); display: flex; align-items: center; justify-content: center; font-size: 24px;">📦</div>
+                <div style="flex: 1;">
+                    <div style="font-family: monospace; color: var(--accent); font-size: 11px; margin-bottom: 4px;" id="em-type-badge">TYPE</div>
+                    <div id="em-title-container"></div>
+                </div>
+            </div>
+            
+            <div id="em-edit-fields"></div>
+            <div id="em-read-fields"></div>
+
+            <input type="hidden" id="em-target-id">
+            <input type="hidden" id="em-target-type">
+
+            <div style="display: flex; gap: 10px; margin-top: 20px;" id="em-actions"></div>
+        </div>
+    </div>
+
+    <div id="image-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.9); z-index: 10000; justify-content: center; align-items: center; padding: 20px;" onclick="closeImageModal()">
+        <span style="position: absolute; top: 20px; right: 30px; color: white; font-size: 30px; cursor: pointer;">✕</span>
+        <img id="image-modal-content" style="max-width: 95%; max-height: 95%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
     </div>
 
     <script src="admin.js"></script>

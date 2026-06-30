@@ -100,7 +100,7 @@ app.get('/api/tools', async (req, res) => {
             SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name 
             FROM tools t 
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id 
-            LEFT JOIN toolboxes b ON t.box_id = b.box_id 
+            LEFT JOIN toolboxes b ON dr.box_id = b.box_id 
             LEFT JOIN departments d ON b.dept_id = d.dept_id 
             ORDER BY t.name ASC;
         `;
@@ -296,6 +296,7 @@ app.put('/api/users/me/update', async (req, res) => {
 // ==========================================
 // 4. INFRASTRUCTURE & STORAGE MANAGEMENT
 // ==========================================
+
 app.get('/api/storage', async (req, res) => {
     try {
         const depts = await pool.query('SELECT * FROM departments ORDER BY name');
@@ -303,7 +304,8 @@ app.get('/api/storage', async (req, res) => {
         const drawers = await pool.query('SELECT * FROM drawers ORDER BY name');
         res.json({ success: true, departments: depts.rows, toolboxes: boxes.rows, drawers: drawers.rows });
     } catch (err) { 
-        res.status(500).json({ error: 'Failed.' }); 
+        console.error("Storage GET Error:", err);
+        res.status(500).json({ error: err.message }); 
     }
 });
 
@@ -316,20 +318,64 @@ app.post('/api/departments', async (req, res) => {
         const result = await pool.query('INSERT INTO departments (name, prefix_code) VALUES ($1, $2) RETURNING *', [name, prefix_code.toUpperCase()]);
         res.json({ success: true, department: result.rows[0] });
     } catch (err) { 
-        res.status(500).json({ error: 'Failed.' }); 
+        console.error("Department POST Error:", err);
+        res.status(500).json({ error: err.message }); 
     }
 });
 
-app.post('/api/toolboxes', async (req, res) => {
-    const { name, dept_id, requester } = req.body;
+// Auto-generate a Barcode ID for Toolboxes (e.g. AVI-BOX-001)
+app.get('/api/toolboxes/next-id', async (req, res) => {
+    const { prefix } = req.query;
+    if (!prefix) return res.status(400).json({ error: 'Prefix required.' });
+
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Admin required.' });
-        
-        const result = await pool.query('INSERT INTO toolboxes (dept_id, name) VALUES ($1, $2) RETURNING *', [dept_id, name]);
-        res.json({ success: true, toolbox: result.rows[0] });
+        const query = `
+            SELECT COALESCE(MAX(CAST(NULLIF(regexp_replace(qr_code, '\\D', '', 'g'), '') AS INTEGER)), 0) + 1 AS next_number 
+            FROM toolboxes WHERE qr_code LIKE $1;
+        `;
+        const result = await pool.query(query, [`${prefix}BOX-%`]);
+        const nextSequence = String(result.rows[0].next_number).padStart(3, '0');
+        res.json({ success: true, next_sequence: `${prefix}BOX-${nextSequence}` });
     } catch (err) { 
-        res.status(500).json({ error: 'Failed.' }); 
+        res.status(500).json({ error: 'Failed to calculate Box ID.' }); 
+    }
+});
+
+// Smart Builder: Create Box AND its Drawers in one transaction
+app.post('/api/toolboxes', async (req, res) => {
+    const { name, dept_id, qr_code, drawer_count, requester } = req.body;
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+        
+        const auth = await client.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
+        if (getRoleWeight(auth.rows[0].role) < 3) throw new Error('Admin required.');
+        
+        // 1. Create the Toolbox with its Barcode ID
+        const boxRes = await client.query(
+            'INSERT INTO toolboxes (dept_id, name, qr_code) VALUES ($1, $2, $3) RETURNING *', 
+            [dept_id, name, qr_code || null]
+        );
+        const newBox = boxRes.rows[0];
+
+        // 2. Auto-generate the requested number of drawers
+        const numDrawers = parseInt(drawer_count) || 0;
+        for (let i = 1; i <= numDrawers; i++) {
+            await client.query(
+                'INSERT INTO drawers (box_id, name) VALUES ($1, $2)', 
+                [newBox.box_id, `Drawer ${i}`]
+            );
+        }
+
+        await client.query('COMMIT');
+        res.json({ success: true, toolbox: newBox });
+    } catch (err) { 
+        await client.query('ROLLBACK');
+        console.error("Toolbox Bulk POST Error:", err);
+        res.status(500).json({ error: err.message }); 
+    } finally {
+        client.release();
     }
 });
 
@@ -342,7 +388,8 @@ app.post('/api/drawers', async (req, res) => {
         const result = await pool.query('INSERT INTO drawers (box_id, name) VALUES ($1, $2) RETURNING *', [box_id, name]);
         res.json({ success: true, drawer: result.rows[0] });
     } catch (err) { 
-        res.status(500).json({ error: 'Failed.' }); 
+        console.error("Drawer POST Error:", err);
+        res.status(500).json({ error: err.message }); 
     }
 });
 
@@ -384,7 +431,7 @@ app.delete('/api/drawers/:id', async (req, res) => {
 // 5. ASSET CREATION & DELETION
 // ==========================================
 app.post('/api/tools', async (req, res) => {
-    const { qr_code, name, drawer_id, replaced_tool_id, requester, is_calibrated, last_cal_date, cal_due_date } = req.body;
+    const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, requester, is_calibrated, last_cal_date, cal_due_date } = req.body;
     try {
         const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
         if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep clearance required.' });
@@ -396,8 +443,9 @@ app.post('/api/tools', async (req, res) => {
                 await client.query("UPDATE tools SET qr_code = qr_code || '-RET-' || tool_id, status = 'Retired' WHERE tool_id = $1", [replaced_tool_id]);
             }
             
-            const insertQuery = `INSERT INTO tools (qr_code, name, drawer_id, status, is_calibrated, last_cal_date, cal_due_date) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING tool_id`;
-            const insertRes = await client.query(insertQuery, [qr_code, name, drawer_id || null, 'In', is_calibrated || false, last_cal_date || null, cal_due_date || null]);
+            // Updated to include description and replacement_url
+            const insertQuery = `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING tool_id`;
+            const insertRes = await client.query(insertQuery, [qr_code, name, description || null, replacement_url || null, drawer_id || null, 'In', is_calibrated || false, last_cal_date || null, cal_due_date || null]);
             
             if (replaced_tool_id) {
                 await client.query('UPDATE tools SET replaced_by_id = $1 WHERE tool_id = $2', [insertRes.rows[0].tool_id, replaced_tool_id]);
@@ -436,6 +484,42 @@ app.delete('/api/tools/:tool_id', async (req, res) => {
     } catch (err) { 
         res.status(500).json({ error: 'Failed to delete tool.' }); 
     }
+});
+
+// Update a Toolbox
+app.put('/api/toolboxes/:id', async (req, res) => {
+    const { name, requester } = req.body;
+    try {
+        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
+        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Admin required.' });
+        await pool.query('UPDATE toolboxes SET name = $1 WHERE box_id = $2', [name, req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to update toolbox.' }); }
+});
+
+// Update a Drawer
+app.put('/api/drawers/:id', async (req, res) => {
+    const { name, requester } = req.body;
+    try {
+        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
+        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Admin required.' });
+        await pool.query('UPDATE drawers SET name = $1 WHERE drawer_id = $2', [name, req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to update drawer.' }); }
+});
+
+// Update a Tool
+app.put('/api/tools/:id', async (req, res) => {
+    const { name, description, replacement_url, status, requester } = req.body;
+    try {
+        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
+        if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep required.' });
+        await pool.query(
+            'UPDATE tools SET name = $1, description = $2, replacement_url = $3, status = $4 WHERE tool_id = $5', 
+            [name, description || null, replacement_url || null, status, req.params.id]
+        );
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to update tool.' }); }
 });
 
 // ==========================================
