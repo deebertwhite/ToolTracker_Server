@@ -5,55 +5,48 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LTA Tool Tracking Hub</title>
 <style>
-  :root {
-    --bg: #111315; --surface: #1c1f23; --surface2: #252830;
-    --border: #363940; --accent: #CB6015; --accent2: #FBDC3E;
-    --text: #D9D9D6; --muted: #B1B3B3;
-  }
+  :root { --bg: #111315; --surface: #1c1f23; --surface2: #252830; --border: #363940; --accent: #CB6015; --text: #D9D9D6; --muted: #B1B3B3; }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
-  body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+  body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; overflow-x: hidden; }
   
-  .header { text-align: center; margin-bottom: 40px; }
-  .title { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
-  .subtitle { color: var(--muted); font-size: 14px; }
-  .accent-bar { height: 4px; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 100px; margin: 20px auto; border-radius: 2px; }
+  .lta-logo-svg { width: 100%; max-width: 220px; height: auto; display: block; margin: 0 auto 40px; }
+  .lta-logo-svg .st0 { fill: rgba(255,255,255,0.92); }
   
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 1000px; width: 90%; }
-  
-  .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 32px 24px; text-align: center; cursor: pointer; transition: all 0.2s;
-    text-decoration: none; color: var(--text); display: block;
-  }
-  .card:hover { transform: translateY(-5px); border-color: var(--accent); background: var(--surface2); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-  .card-icon { font-size: 48px; margin-bottom: 16px; }
-  .card-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
-  .card-desc { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .menu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; width: 100%; max-width: 900px; }
+  .menu-card { background: var(--surface); border: 2px solid var(--border); border-radius: 12px; padding: clamp(30px, 5vw, 40px) 20px; text-align: center; cursor: pointer; transition: all 0.2s; text-decoration: none; color: var(--text); display: block; }
+  .menu-card:hover { border-color: var(--accent); background: var(--surface2); transform: translateY(-4px); }
+  .menu-icon { font-size: 48px; margin-bottom: 16px; }
+  .menu-title { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+  .menu-desc { font-size: 14px; color: var(--muted); }
 </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">LTA Tool Tracking System</div>
-    <div class="subtitle">Select your destination portal</div>
-    <div class="accent-bar"></div>
+
+  <svg class="lta-logo-svg" version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 431.4 212.9">
+    <path class="st0" d="M75.1,107c-0.1-64.8,76.8-92,84.8-94.6l0,0C83.9,28.9,38.9,73.5,21,95c-5.7,6.9-5.7,16.9,0,23.8c17.8,21.4,62.6,65.7,138,82.5C148.8,197.8,75.2,170.2,75.1,107z"/>
+    <path class="st0" d="M164,134l0-96l-7.3,0c-13.8,0-25,11.2-25,25l0,70.8c0,24.9,20.1,45,45,45l45.5,0l0-7.3c0-13.8-11.2-25-25-25l-20.7,0C169.6,146.5,164,140.9,164,134z"/>
+    <path class="st0" d="M242.9,38c12.7,6.5,22.3,18.1,26,32.2H295l1.1-3.9c0.3-1.1,2.6-9.5,9.3-18c2.7-3.4,6.4-7.1,11.1-10.3H242.9z"/>
+    <path class="st0" d="M332.6,75.8c0.6-2,2-11,11.1-11c9.2,0,10.8,9,11.3,11s9.3,33.4,9.3,33.4h-35.5l-3,10.6c-3,10.8,5.1,21.6,16.4,21.6h21.6c5.6,0,10.5,3.7,12,9.1l2.8,10c3,10.8,12.9,18.3,24.1,18.3h14.5l-31-111c0,0-8.1-32.1-42.5-32.1s-42.4,32-42.4,32l-31.1,111.1h14.5c11.2,0,21.1-7.5,24.1-18.3L332.6,75.8z"/>
+    <path class="st0" d="M232.7,82.8l0,96l7.3,0c13.8,0,25-11.2,25-25l0-70.8c0-24.9-20.1-45-45-45l-45.5,0l0,7.3c0,13.8,11.2,25,25,25l20.7,0C227.1,70.3,232.7,75.9,232.7,82.8z"/>
+  </svg>
+
+  <div class="menu-grid">
+    <a href="kiosk.html" class="menu-card">
+      <div class="menu-icon">📱</div>
+      <div class="menu-title">Shop Floor Kiosk</div>
+      <div class="menu-desc">Check tools in/out and report damaged assets.</div>
+    </a>
+    <a href="admin.html" class="menu-card">
+      <div class="menu-icon">⚙️</div>
+      <div class="menu-title">Admin Portal</div>
+      <div class="menu-desc">Manage personnel, infrastructure, and inventory.</div>
+    </a>
+    <a href="dashboard.html" class="menu-card">
+      <div class="menu-icon">📈</div>
+      <div class="menu-title">Global Dashboard</div>
+      <div class="menu-desc">View real-time telemetry and data analytics.</div>
+    </a>
   </div>
 
-  <div class="grid">
-    <a href="dashboard.html" class="card">
-      <div class="card-icon">📊</div>
-      <div class="card-title">Open Dashboard</div>
-      <div class="card-desc">View live inventory, calibration schedules, and checked-out tools. No login required.</div>
-    </a>
-    <a href="kiosk.html" class="card" style="border-top: 3px solid var(--accent);">
-      <div class="card-icon">📤</div>
-      <div class="card-title">Shop Floor Kiosk</div>
-      <div class="card-desc">Scan badges and tools for immediate check-out / check-in. Auto-locks for security.</div>
-    </a>
-    <a href="admin.html" class="card">
-      <div class="card-icon">🔐</div>
-      <div class="card-title">Management Portal</div>
-      <div class="card-desc">Admin access to manage personnel, add inventory, and view compliance audits.</div>
-    </a>
-  </div>
 </body>
 </html>

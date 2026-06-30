@@ -41,10 +41,25 @@ app.get('/api/tools', async (req, res) => {
 });
 
 app.get('/api/tools/next-id', async (req, res) => {
+    const { prefix } = req.query;
+    if (!prefix) return res.status(400).json({ error: 'Prefix required.' });
+
     try {
-        const result = await pool.query(`SELECT MAX(CAST(SUBSTRING(qr_code FROM '[0-9]+') AS INTEGER)) + 1 AS next_number FROM tools WHERE qr_code LIKE '%-%';`);
-        res.json({ success: true, next_sequence: result.rows[0].next_number || 10001 });
-    } catch (err) { res.status(500).json({ error: 'Failed to calculate ID.' }); }
+        // Look for the highest number specifically tied to this department prefix
+        // COALESCE safely turns a NULL (empty database) into a 0 so the math doesn't crash!
+        const query = `
+            SELECT COALESCE(MAX(CAST(NULLIF(regexp_replace(qr_code, '\\D', '', 'g'), '') AS INTEGER)), 0) + 1 AS next_number 
+            FROM tools 
+            WHERE qr_code LIKE $1;
+        `;
+        const result = await pool.query(query, [`${prefix}%`]);
+        
+        // Pad it out to exactly 6 digits (e.g., 000001)
+        const nextSequence = String(result.rows[0].next_number).padStart(6, '0');
+        res.json({ success: true, next_sequence: nextSequence });
+    } catch (err) { 
+        res.status(500).json({ error: 'Failed to calculate ID.' }); 
+    }
 });
 
 // ==========================================
@@ -97,6 +112,23 @@ app.get('/api/users', async (req, res) => {
         const filteredUsers = result.rows.filter(u => getRoleWeight(u.role) < reqWeight);
         res.json({ success: true, users: filteredUsers });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch users.' }); }
+});
+
+// READ-ONLY ROSTER: Safe for all active users to view the company directory
+app.get('/api/roster', async (req, res) => {
+    try {
+        const query = `
+            SELECT u.badge_id, u.username, u.full_name, u.role, d.name AS department_name 
+            FROM users u 
+            LEFT JOIN departments d ON u.dept_id = d.dept_id 
+            WHERE u.is_active = true 
+            ORDER BY u.full_name ASC
+        `;
+        const result = await pool.query(query);
+        res.json({ success: true, roster: result.rows });
+    } catch (err) { 
+        res.status(500).json({ error: 'Failed to fetch roster.' }); 
+    }
 });
 
 app.post('/api/users', async (req, res) => {
@@ -259,6 +291,31 @@ app.post('/api/tools', async (req, res) => {
         } catch (err) { await client.query('ROLLBACK'); throw err; } finally { client.release(); }
     } catch (err) { res.status(500).json({ error: 'Failed.' }); }
 });
+// PERMANENTLY REMOVE TOOL (Frees up the Barcode ID)
+app.delete('/api/tools/:tool_id', async (req, res) => {
+    const { tool_id } = req.params;
+    const { requester } = req.body;
+    try {
+        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
+        if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep clearance required.' });
+
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            // Safely erase the audit logs tied to this specific tool first (Foreign Key constraint)
+            await client.query('DELETE FROM audit_logs WHERE tool_id = $1', [tool_id]);
+            // Now permanently delete the tool, freeing up its Barcode ID for reuse
+            await client.query('DELETE FROM tools WHERE tool_id = $1', [tool_id]);
+            await client.query('COMMIT');
+            res.json({ success: true });
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+    } catch (err) { res.status(500).json({ error: 'Failed to delete tool.' }); }
+});
 app.get('/api/audit', async (req, res) => {
     const requesterBadge = req.query.requester;
     if (!requesterBadge) return res.status(401).json({ error: 'Unauthorized.' });
@@ -287,20 +344,204 @@ app.post('/api/transactions', async (req, res) => {
         await client.query('COMMIT'); res.json({ success: true });
     } catch (err) { await client.query('ROLLBACK'); res.status(400).json({ error: err.message }); } finally { client.release(); }
 });
-app.post('/api/tools/report', async (req, res) => {
-    const { badge_id, qr_code, issue_type, notes } = req.body;
-    const client = await pool.connect();
+app.post('/api/tools', async (req, res) => {
+    const { qr_code, name, drawer_id, replaced_tool_id, requester, is_calibrated, last_cal_date, cal_due_date } = req.body;
     try {
-        await client.query('BEGIN');
-        const userRes = await client.query('SELECT user_id FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0) throw new Error('Invalid badge.');
-        const toolRes = await client.query('SELECT tool_id FROM tools WHERE qr_code = $1', [qr_code]);
-        if (toolRes.rows.length === 0) throw new Error('Tool not found.');
-        await client.query('UPDATE tools SET status = $1, status_reason = $2 WHERE tool_id = $3', [issue_type, notes, toolRes.rows[0].tool_id]);
-        await client.query('INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)', [userRes.rows[0].user_id, `REPORT_${issue_type.toUpperCase()}`, toolRes.rows[0].tool_id, notes]);
-        await client.query('COMMIT'); res.json({ success: true });
-    } catch (err) { await client.query('ROLLBACK'); res.status(400).json({ error: err.message }); } finally { client.release(); }
+        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
+        if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep clearance required.' });
+        
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            if (replaced_tool_id) await client.query("UPDATE tools SET qr_code = qr_code || '-RET-' || tool_id, status = 'Retired' WHERE tool_id = $1", [replaced_tool_id]);
+            
+            const insertRes = await client.query(
+                'INSERT INTO tools (qr_code, name, drawer_id, status, is_calibrated, last_cal_date, cal_due_date) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING tool_id', 
+                [qr_code, name, drawer_id || null, 'In', is_calibrated || false, last_cal_date || null, cal_due_date || null]
+            );
+            
+            if (replaced_tool_id) await client.query('UPDATE tools SET replaced_by_id = $1 WHERE tool_id = $2', [insertRes.rows[0].tool_id, replaced_tool_id]);
+            await client.query('COMMIT'); 
+            res.json({ success: true });
+        } catch (err) { await client.query('ROLLBACK'); throw err; } finally { client.release(); }
+    } catch (err) { res.status(500).json({ error: 'Failed.' }); }
 });
+
+// SAFE DELETE: Department
+app.delete('/api/departments/:id', async (req, res) => {
+    try {
+        // Check if toolboxes are still inside
+        const check = await pool.query('SELECT COUNT(*) FROM toolboxes WHERE dept_id = $1', [req.params.id]);
+        if (parseInt(check.rows[0].count) > 0) {
+            return res.status(400).json({ error: 'Cannot delete: This Department still contains Toolboxes.' });
+        }
+        await pool.query('DELETE FROM departments WHERE dept_id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to delete Department.' }); }
+});
+
+// SAFE DELETE: Toolbox
+app.delete('/api/toolboxes/:id', async (req, res) => {
+    try {
+        // Check if drawers or tools are still inside
+        const checkDrawers = await pool.query('SELECT COUNT(*) FROM drawers WHERE box_id = $1', [req.params.id]);
+        const checkTools = await pool.query('SELECT COUNT(*) FROM tools WHERE box_id = $1', [req.params.id]);
+        
+        if (parseInt(checkDrawers.rows[0].count) > 0 || parseInt(checkTools.rows[0].count) > 0) {
+            return res.status(400).json({ error: 'Cannot delete: This Toolbox is not empty.' });
+        }
+        await pool.query('DELETE FROM toolboxes WHERE box_id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to delete Toolbox.' }); }
+});
+
+// SAFE DELETE: Drawer
+app.delete('/api/drawers/:id', async (req, res) => {
+    try {
+        // Check if tools are still inside
+        const checkTools = await pool.query('SELECT COUNT(*) FROM tools WHERE drawer_id = $1', [req.params.id]);
+        if (parseInt(checkTools.rows[0].count) > 0) {
+            return res.status(400).json({ error: 'Cannot delete: This Drawer still contains tools.' });
+        }
+        await pool.query('DELETE FROM drawers WHERE drawer_id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to delete Drawer.' }); }
+});
+
+// ==========================================
+// 5. DASHBOARD & ANALYTICS
+// ==========================================
+app.get('/api/dashboard', async (req, res) => {
+    try {
+        // 1. Tools Currently Out (Grabs the exact timestamp and user from the latest audit log)
+        const outTools = await pool.query(`
+            SELECT t.qr_code, t.name AS tool_name, u.full_name AS user_name, a.timestamp, d.name AS dept_name, b.name AS box_name
+            FROM tools t
+            LEFT JOIN audit_logs a ON a.log_id = (SELECT MAX(log_id) FROM audit_logs WHERE tool_id = t.tool_id)
+            LEFT JOIN users u ON a.user_id = u.user_id
+            LEFT JOIN toolboxes b ON t.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
+            WHERE t.status = 'Out'
+            ORDER BY a.timestamp DESC
+        `);
+
+        // 2. Flagged Tools (Broken, Missing, Worn/Needs Cal)
+        const flaggedTools = await pool.query(`
+            SELECT t.qr_code, t.name AS tool_name, t.status, t.status_reason, d.name AS dept_name, b.name AS box_name
+            FROM tools t
+            LEFT JOIN toolboxes b ON t.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
+            WHERE t.status IN ('Broken', 'Missing', 'Worn')
+            ORDER BY t.status ASC
+        `);
+
+        // 3. Quick KPIs
+        const stats = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM tools) AS total_tools,
+                (SELECT COUNT(*) FROM tools WHERE status = 'Out') AS total_out,
+                (SELECT COUNT(*) FROM tools WHERE status IN ('Broken', 'Missing', 'Worn')) AS total_flagged
+        `);
+
+        res.json({
+            success: true,
+            out_tools: outTools.rows,
+            flagged_tools: flaggedTools.rows,
+            stats: stats.rows[0]
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch dashboard data.' });
+    }
+});
+
+// CUSTOM REPORT GENERATOR
+app.post('/api/reports/generate', async (req, res) => {
+    const { requester, report_type, dept_id, start_date, end_date } = req.body;
+    
+    try {
+        const auth = await pool.query('SELECT role, dept_id FROM users WHERE badge_id = $1', [requester]);
+        if (auth.rows.length === 0) return res.status(403).json({ error: 'Unauthorized.' });
+        
+        const user = auth.rows[0];
+        const weight = getRoleWeight(user.role);
+        
+        // Force Dept Admins to only see their own department's data
+        let queryDept = dept_id;
+        if (weight === 3) queryDept = user.dept_id;
+
+        let data = [];
+        
+        if (report_type === 'AUDIT') {
+            // Transaction History
+            let query = `
+                SELECT a.timestamp, u.full_name, u.badge_id, a.action, t.qr_code, t.name AS tool_name, d.name AS dept_name, a.notes
+                FROM audit_logs a
+                LEFT JOIN users u ON a.user_id = u.user_id
+                LEFT JOIN tools t ON a.tool_id = t.tool_id
+                LEFT JOIN toolboxes b ON t.box_id = b.box_id
+                LEFT JOIN departments d ON b.dept_id = d.dept_id
+                WHERE a.timestamp >= $1::timestamp AND a.timestamp <= $2::timestamp
+            `;
+            const params = [start_date + ' 00:00:00', end_date + ' 23:59:59'];
+            
+            if (queryDept !== 'ALL') {
+                query += ` AND d.dept_id = $3`;
+                params.push(queryDept);
+            }
+            query += ` ORDER BY a.timestamp DESC`;
+            
+            const result = await pool.query(query, params);
+            data = result.rows;
+        } 
+        else if (report_type === 'FLAGGED') {
+            // Damaged/Missing Tool Report
+            let query = `
+                SELECT t.qr_code, t.name AS tool_name, t.status, t.status_reason, d.name AS dept_name
+                FROM tools t
+                LEFT JOIN toolboxes b ON t.box_id = b.box_id
+                LEFT JOIN departments d ON b.dept_id = d.dept_id
+                WHERE t.status IN ('Broken', 'Missing', 'Worn')
+            `;
+            const params = [];
+            if (queryDept !== 'ALL') {
+                query += ` AND d.dept_id = $1`;
+                params.push(queryDept);
+            }
+            const result = await pool.query(query, params);
+            data = result.rows;
+        }
+
+        res.json({ success: true, data });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to generate report.' });
+    }
+});
+
+// ==========================================
+// 9. AUTOMATED BACKGROUND LOGGER
+// ==========================================
+// Track the current state when the server boots
+let lastHourlyLog = new Date().getHours();
+let lastDailyLog = new Date().getDate();
+
+// Check the time once every 60 seconds (60000ms)
+setInterval(() => {
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentDate = now.getDate();
+
+    // If the hour has changed since we last checked, run the hourly log
+    if (currentHour !== lastHourlyLog) {
+        generateHourlyLog();
+        lastHourlyLog = currentHour; // Update the state so it doesn't run again until next hour
+    }
+
+    // If the day has changed (Midnight crossed), run the daily log
+    if (currentDate !== lastDailyLog) {
+        generateDailyLog();
+        lastDailyLog = currentDate; // Update the state
+    }
+}, 60000);
 
 // START SERVER
 app.listen(3000, '0.0.0.0', () => { console.log(`Backend API running on port 3000.`); });
