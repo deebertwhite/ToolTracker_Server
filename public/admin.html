@@ -191,6 +191,16 @@
                             </div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Drawer Assignment</label><select class="form-select" id="add-tool-drawer"></select></div>
                         </div>
+                        <div style="background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; margin-top: 15px; border: 1px solid var(--border);">
+                            <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;">
+                                <input type="checkbox" id="add-tool-is-cal" onchange="document.getElementById('add-tool-cal-fields').style.display = this.checked ? 'flex' : 'none'">
+                                <strong>Asset Requires Calibration Tracking</strong>
+                            </label>
+                            <div id="add-tool-cal-fields" style="display: none; gap: 15px; margin-top: 10px;">
+                                <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="add-tool-last-cal"></div>
+                                <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Calibration Due Date</label><input type="date" class="form-input" id="add-tool-cal-due"></div>
+                            </div>
+                        </div>
                         <button class="btn btn-secondary" style="width: auto; margin-top: 15px;" onclick="addNewTool()">+ Save Asset to Database</button>
                     </div>
                 </div>

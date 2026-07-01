@@ -14,6 +14,17 @@ let globalToolsCache = [];
 // ==========================================
 // 2. UTILITIES & VIEW TOGGLES
 // ==========================================
+
+function toggleModalEditMode(isEditing) {
+    document.getElementById('em-read-fields').style.display = isEditing ? 'none' : 'block';
+    document.getElementById('em-edit-fields').style.display = isEditing ? 'block' : 'none';
+    
+    const editBtn = document.getElementById('em-btn-edit');
+    const saveBtn = document.getElementById('em-btn-save');
+    if (editBtn) editBtn.style.display = isEditing ? 'none' : 'inline-flex';
+    if (saveBtn) saveBtn.style.display = isEditing ? 'inline-flex' : 'none';
+}
+
 function getRoleWeight(role) {
     const weights = { 'super_admin': 4, 'dept_admin': 3, 'tool_rep': 2, 'technician': 1 };
     return weights[role] || 0;
@@ -496,45 +507,62 @@ function openEntityModal(type, id) {
     if (type === 'toolbox') {
         entity = globalBoxesCache.find(b => b.box_id == id);
         if(!entity) return;
-        
         document.getElementById('em-type-badge').textContent = `STORAGE UNIT [ID: ${entity.box_id}]`;
-        // INJECTED LIGHTBOX IMAGE HERE
         document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '🧰';
         
+        titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
+        fieldsHtml = `<div class="form-group"><label class="form-label">Unit Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
+        
         if (canEditInfra) {
-            titleHtml = `<input class="form-input" id="em-input-name" value="${entity.name}" style="font-size: 18px; font-weight: bold; padding: 6px;">`;
-            actionsHtml = `<button class="btn btn-primary" onclick="saveEntityUpdates()">💾 Save Changes</button>`;
-        } else { 
-            titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`; 
+            actionsHtml = `
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
+            `;
         }
 
     } else if (type === 'drawer') {
         entity = globalDrawersCache.find(d => d.drawer_id == id);
         if(!entity) return;
-        
         document.getElementById('em-type-badge').textContent = `STORAGE DRAWER [ID: ${entity.drawer_id}]`;
-        // INJECTED LIGHTBOX IMAGE HERE
         document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '📂';
         
+        titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
+        fieldsHtml = `<div class="form-group"><label class="form-label">Drawer Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
+        
         if (canEditInfra) {
-            titleHtml = `<input class="form-input" id="em-input-name" value="${entity.name}" style="font-size: 18px; font-weight: bold; padding: 6px;">`;
-            actionsHtml = `<button class="btn btn-primary" onclick="saveEntityUpdates()">💾 Save Changes</button>`;
-        } else { 
-            titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`; 
+            actionsHtml = `
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
+            `;
         }
 
     } else if (type === 'tool') {
         entity = globalToolsCache.find(t => t.qr_code === id);
         if(!entity) return;
-        
         document.getElementById('em-type-badge').textContent = `ASSET [${entity.qr_code}]`;
-        // INJECTED LIGHTBOX IMAGE HERE
         document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '🔧';
         
-        if (canEditTools) {
-            titleHtml = `<input class="form-input" id="em-input-name" value="${entity.name}" style="font-size: 18px; font-weight: bold; padding: 6px;">`;
-            fieldsHtml = `
-                <div class="form-group"><label class="form-label">Description</label><textarea class="form-input" id="em-input-desc" rows="2">${entity.description || ''}</textarea></div>
+        const lastCal = entity.last_cal_date ? entity.last_cal_date.split('T')[0] : '';
+        const dueCal = entity.cal_due_date ? entity.cal_due_date.split('T')[0] : '';
+        const calText = entity.is_calibrated ? `Due: ${dueCal || 'Unknown'}` : 'Not Required';
+
+        titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
+        
+        // The Clean "Read" View
+        readHtml = `
+            <div style="margin-bottom:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Description</div><div style="font-size:14px;margin-top:4px;">${entity.description || '--'}</div></div>
+            <div style="display: flex; gap: 30px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Status</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${entity.status}</div></div>
+                <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration</div><div style="font-size:14px;margin-top:4px;font-weight:bold;">${calText}</div></div>
+            </div>
+        `;
+        if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">🛒 Open Replacement Link →</a></div>`;
+
+        // The "Edit" View (Hidden by default)
+        fieldsHtml = `
+            <div class="form-group"><label class="form-label">Asset Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
+            <div class="form-group"><label class="form-label">Description</label><textarea class="form-input" id="em-input-desc" rows="2">${entity.description || ''}</textarea></div>
+            <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
                 <div class="form-group"><label class="form-label">Replacement URL</label><input class="form-input" id="em-input-url" value="${entity.replacement_url || ''}"></div>
                 <div class="form-group"><label class="form-label">Physical Status</label>
                     <select class="form-select" id="em-input-status">
@@ -545,23 +573,34 @@ function openEntityModal(type, id) {
                         <option value="Worn" ${entity.status === 'Worn' ? 'selected' : ''}>Worn</option>
                     </select>
                 </div>
+            </div>
+            <div style="background: rgba(255,255,255,0.02); padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; margin-bottom: 10px;">
+                    <input type="checkbox" id="em-input-is-cal" ${entity.is_calibrated ? 'checked' : ''} onchange="document.getElementById('em-cal-dates').style.display = this.checked ? 'flex' : 'none'">
+                    <strong>Requires Calibration</strong>
+                </label>
+                <div id="em-cal-dates" style="display: ${entity.is_calibrated ? 'flex' : 'none'}; gap: 10px;">
+                    <div class="form-group" style="margin: 0;"><label class="form-label">Last Cal</label><input type="date" class="form-input" id="em-input-last-cal" value="${lastCal}"></div>
+                    <div class="form-group" style="margin: 0;"><label class="form-label">Cal Due</label><input type="date" class="form-input" id="em-input-cal-due" value="${dueCal}"></div>
+                </div>
+            </div>
+        `;
+        
+        if (canEditTools) {
+            actionsHtml = `
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
             `;
-            actionsHtml = `<button class="btn btn-primary" onclick="saveEntityUpdates()">💾 Save Asset</button>`;
-        } else {
-            titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
-            readHtml = `
-                <div style="margin-bottom:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Description</div><div style="font-size:14px;margin-top:4px;">${entity.description || '--'}</div></div>
-                <div style="margin-bottom:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Status</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${entity.status}</div></div>
-            `;
-            if(entity.replacement_url) readHtml += `<div style="margin-top:10px;"><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue);">🛒 Order Replacement Link</a></div>`;
         }
     }
 
     document.getElementById('em-title-container').innerHTML = titleHtml;
-    document.getElementById('em-edit-fields').innerHTML = fieldsHtml;
     document.getElementById('em-read-fields').innerHTML = readHtml;
+    document.getElementById('em-edit-fields').innerHTML = fieldsHtml;
     document.getElementById('em-actions').innerHTML = actionsHtml;
 
+    // ALWAYS open in Read-Only mode first!
+    toggleModalEditMode(false);
     document.getElementById('entity-modal-overlay').style.display = 'flex';
 }
 
@@ -582,6 +621,9 @@ async function saveEntityUpdates() {
         payload.description = document.getElementById('em-input-desc').value;
         payload.replacement_url = document.getElementById('em-input-url').value;
         payload.status = document.getElementById('em-input-status').value;
+        payload.is_calibrated = document.getElementById('em-input-is-cal').checked;
+        payload.last_cal_date = document.getElementById('em-input-last-cal').value || null;
+        payload.cal_due_date = document.getElementById('em-input-cal-due').value || null;
     }
 
     try {

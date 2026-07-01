@@ -510,16 +510,29 @@ app.put('/api/drawers/:id', async (req, res) => {
 
 // Update a Tool
 app.put('/api/tools/:id', async (req, res) => {
-    const { name, description, replacement_url, status, requester } = req.body;
+    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, requester } = req.body;
     try {
         const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
         if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep required.' });
+        
+        // If they checked the box but didn't provide a due date, throw an error
+        if (is_calibrated && !cal_due_date) {
+            return res.status(400).json({ error: 'Calibration Due Date is required.' });
+        }
+
         await pool.query(
-            'UPDATE tools SET name = $1, description = $2, replacement_url = $3, status = $4 WHERE tool_id = $5', 
-            [name, description || null, replacement_url || null, status, req.params.id]
+            `UPDATE tools 
+             SET name = $1, description = $2, replacement_url = $3, status = $4, 
+                 is_calibrated = $5, last_cal_date = $6, cal_due_date = $7 
+             WHERE tool_id = $8`, 
+            [name, description || null, replacement_url || null, status, 
+             is_calibrated || false, last_cal_date || null, cal_due_date || null, req.params.id]
         );
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Failed to update tool.' }); }
+    } catch (err) { 
+        console.error("Tool Update Error:", err);
+        res.status(500).json({ error: 'Failed to update tool.' }); 
+    }
 });
 
 // ==========================================
@@ -569,31 +582,80 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 // ==========================================
 // 7. KIOSK TRANSACTIONS & AUDITS
 // ==========================================
+// Process Tool Check-in / Check-out (With Overrides & Cal Checks)
 app.post('/api/transactions', async (req, res) => {
-    const { badge_id, action, qr_codes } = req.body;
+    const { badge_id, action, qr_codes, manager_pin } = req.body;
     const client = await pool.connect();
-    
+
     try {
         await client.query('BEGIN');
-        const userRes = await client.query('SELECT user_id FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0) throw new Error('Invalid badge.');
-        const userId = userRes.rows[0].user_id;
-        
-        const targetStatus = action === 'CHECKOUT_TOOL' ? 'Out' : 'In'; 
-        const expectedStatus = action === 'CHECKOUT_TOOL' ? 'In' : 'Out';
-        
-        for (let qr of qr_codes) {
-            const toolRes = await client.query('SELECT tool_id FROM tools WHERE qr_code = $1 AND status = $2', [qr, expectedStatus]);
-            if (toolRes.rows.length === 0) throw new Error(`Tool ${qr} unavailable.`);
-            
-            await client.query('UPDATE tools SET status = $1 WHERE tool_id = $2', [targetStatus, toolRes.rows[0].tool_id]);
-            await client.query('INSERT INTO audit_logs (user_id, action, tool_id) VALUES ($1, $2, $3)', [userId, action, toolRes.rows[0].tool_id]);
+
+        // 1. Authenticate the Primary User
+        const userRes = await client.query('SELECT user_id, dept_id, role, full_name FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0) throw new Error("Invalid User Badge.");
+        const user = userRes.rows[0];
+
+        // 2. Validate Manager Override PIN (If provided)
+        let overrideUserId = null;
+        if (manager_pin) {
+            const mgrRes = await client.query("SELECT user_id, role FROM users WHERE pin = $1 AND role IN ('super_admin', 'dept_admin', 'tool_rep') AND is_active = true", [manager_pin]);
+            if (mgrRes.rows.length === 0) {
+                return res.status(403).json({ error: 'Invalid Manager PIN or insufficient permissions.', code: 'BAD_PIN' });
+            }
+            overrideUserId = mgrRes.rows[0].user_id;
         }
-        await client.query('COMMIT'); res.json({ success: true });
-    } catch (err) { 
-        await client.query('ROLLBACK'); res.status(400).json({ error: err.message }); 
-    } finally { 
-        client.release(); 
+
+        // 3. Process each tool
+        for (let qr of qr_codes) {
+            // Get tool info AND its owning department
+            const toolQuery = `
+                SELECT t.tool_id, t.name, t.status, t.is_calibrated, t.cal_due_date, b.dept_id AS tool_dept_id 
+                FROM tools t
+                LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+                WHERE t.qr_code = $1
+            `;
+            const toolRes = await client.query(toolQuery, [qr]);
+            if (toolRes.rows.length === 0) throw new Error(`Tool ${qr} not found.`);
+            const tool = toolRes.rows[0];
+
+            if (action === 'CHECKOUT_TOOL') {
+                // A. CALIBRATION HARD-STOP
+                if (tool.is_calibrated && tool.cal_due_date) {
+                    const today = new Date();
+                    const dueDate = new Date(tool.cal_due_date);
+                    if (dueDate <= today) {
+                        return res.status(403).json({ error: `Checkout Blocked: ${tool.name} calibration is expired!`, code: 'CAL_EXPIRED' });
+                    }
+                }
+
+                // B. DEPARTMENT SOFT-STOP
+                // If they don't match, and the user isn't an admin, and no manager PIN was provided -> Block it.
+                if (tool.tool_dept_id !== user.dept_id && getRoleWeight(user.role) < 3 && !overrideUserId) {
+                    return res.status(403).json({ error: `Cross-Department checkouts require a Manager Override.`, code: 'DEPT_RESTRICTED' });
+                }
+
+                // Execute Checkout
+                await client.query("UPDATE tools SET status = 'Out' WHERE tool_id = $1", [tool.tool_id]);
+                
+                const logNotes = overrideUserId ? 'Cross-Department Override Authorized' : null;
+                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)", [user.user_id, 'CHECKOUT_TOOL', tool.tool_id, logNotes]);
+
+            } else if (action === 'CHECKIN_TOOL') {
+                // Check-ins are always allowed, no strict checks needed
+                await client.query("UPDATE tools SET status = 'In', status_reason = NULL WHERE tool_id = $1", [tool.tool_id]);
+                await client.query("INSERT INTO audit_logs (user_id, action, tool_id) VALUES ($1, $2, $3)", [user.user_id, 'CHECKIN_TOOL', tool.tool_id]);
+            }
+        }
+
+        await client.query('COMMIT');
+        res.json({ success: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Transaction Error:", err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
     }
 });
 
@@ -663,32 +725,53 @@ app.post('/api/audits/submit', async (req, res) => {
 // ==========================================
 app.get('/api/dashboard', async (req, res) => {
     try {
-        const outTools = await pool.query(`
-            SELECT t.qr_code, t.name AS tool_name, u.full_name AS user_name, a.timestamp, d.name AS dept_name, b.name AS box_name
+        const totalTools = await pool.query("SELECT COUNT(*) FROM tools WHERE status != 'Retired'");
+        const totalOut = await pool.query("SELECT COUNT(*) FROM tools WHERE status = 'Out'");
+        const totalFlagged = await pool.query("SELECT COUNT(*) FROM tools WHERE status IN ('Missing', 'Broken', 'Worn')");
+
+        // Checked Out Tools
+        const outQuery = `
+            SELECT t.qr_code, t.name AS tool_name, u.full_name AS user_name, al.timestamp, d.name AS dept_name, b.name AS box_name
             FROM tools t
-            LEFT JOIN audit_logs a ON a.log_id = (SELECT MAX(log_id) FROM audit_logs WHERE tool_id = t.tool_id)
-            LEFT JOIN users u ON a.user_id = u.user_id
-            LEFT JOIN toolboxes b ON t.box_id = b.box_id
+            LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+            LEFT JOIN toolboxes b ON dr.box_id = b.box_id
             LEFT JOIN departments d ON b.dept_id = d.dept_id
-            WHERE t.status = 'Out' ORDER BY a.timestamp DESC
-        `);
+            LEFT JOIN LATERAL (SELECT user_id, timestamp FROM audit_logs WHERE tool_id = t.tool_id AND action = 'CHECKOUT_TOOL' ORDER BY timestamp DESC LIMIT 1) al ON true
+            LEFT JOIN users u ON al.user_id = u.user_id
+            WHERE t.status = 'Out' ORDER BY al.timestamp DESC LIMIT 50;
+        `;
+        const outTools = await pool.query(outQuery);
 
-        const flaggedTools = await pool.query(`
+        // Maintenance Flagged Tools (Separated)
+        const flagQuery = `
             SELECT t.qr_code, t.name AS tool_name, t.status, t.status_reason, d.name AS dept_name, b.name AS box_name
-            FROM tools t LEFT JOIN toolboxes b ON t.box_id = b.box_id LEFT JOIN departments d ON b.dept_id = d.dept_id
-            WHERE t.status IN ('Broken', 'Missing', 'Worn') ORDER BY t.status ASC
-        `);
+            FROM tools t
+            LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+            LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
+            WHERE t.status IN ('Missing', 'Broken', 'Worn') ORDER BY t.name ASC;
+        `;
+        const flaggedTools = await pool.query(flagQuery);
 
-        const stats = await pool.query(`
-            SELECT (SELECT COUNT(*) FROM tools) AS total_tools,
-                   (SELECT COUNT(*) FROM tools WHERE status = 'Out') AS total_out,
-                   (SELECT COUNT(*) FROM tools WHERE status IN ('Broken', 'Missing', 'Worn')) AS total_flagged
-        `);
+        // Calibration Tools (Separated)
+        const calQuery = `
+            SELECT t.qr_code, t.name AS tool_name, t.cal_due_date, d.name AS dept_name, b.name AS box_name
+            FROM tools t
+            LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+            LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
+            WHERE t.is_calibrated = true AND t.status != 'Retired' ORDER BY t.cal_due_date ASC;
+        `;
+        const calTools = await pool.query(calQuery);
 
-        res.json({ success: true, out_tools: outTools.rows, flagged_tools: flaggedTools.rows, stats: stats.rows[0] });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch dashboard data.' });
-    }
+        res.json({
+            success: true,
+            stats: { total_tools: parseInt(totalTools.rows[0].count), total_out: parseInt(totalOut.rows[0].count), total_flagged: parseInt(totalFlagged.rows[0].count) },
+            out_tools: outTools.rows,
+            flagged_tools: flaggedTools.rows,
+            cal_tools: calTools.rows // Sending the new array to the frontend
+        });
+    } catch (err) { res.status(500).json({ error: 'Failed to fetch dashboard data.' }); }
 });
 
 app.post('/api/reports/generate', async (req, res) => {

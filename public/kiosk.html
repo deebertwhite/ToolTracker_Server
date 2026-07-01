@@ -181,6 +181,23 @@
         </div>
     </div>
 
+    <div id="override-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div class="card" style="width: 100%; max-width: 400px; border-top: 3px solid var(--accent); text-align: center;">
+            <div style="font-size: 40px; margin-bottom: 10px;">🛡️</div>
+            <h3 style="margin-bottom: 10px;">Manager Override Required</h3>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">You are attempting to borrow an asset from outside your department. A Manager or Tool Rep must enter their PIN to authorize this transaction.</p>
+            
+            <div class="form-group">
+                <input class="form-input" type="password" id="override-pin-input" placeholder="Enter Manager PIN" style="text-align: center; font-size: 20px; letter-spacing: 5px;">
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 10px;">
+                <button class="btn btn-secondary" onclick="document.getElementById('override-modal').style.display='none'">Cancel</button>
+                <button class="btn btn-primary" onclick="submitTransactionWithOverride()">Authorize Borrowing</button>
+            </div>
+        </div>
+    </div>
+
     <div class="toast" id="kiosk-toast">Toast Message</div>
 
     <script src="kiosk.js"></script>

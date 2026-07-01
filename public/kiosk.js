@@ -372,12 +372,14 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null) {
 }
 
 // ==========================================
-// 7. GENERAL API ACTIONS
+// 7. GENERAL API ACTIONS (Transactions & Errors)
 // ==========================================
-async function submitTransaction() {
-    if (batchQueue.length === 0) {
-        return showToast('⚠️ Queue empty.');
-    }
+async function submitTransaction(managerPin = null) {
+    if (batchQueue.length === 0) return showToast('⚠️ Queue empty.');
+    
+    // Lock the button to prevent double-clicks
+    const submitBtn = document.getElementById('btn-submit-action');
+    if(submitBtn) { submitBtn.textContent = 'Processing...'; submitBtn.disabled = true; }
     
     try {
         const response = await fetch('/api/transactions', { 
@@ -386,47 +388,46 @@ async function submitTransaction() {
             body: JSON.stringify({ 
                 badge_id: activeUser.badgeId, 
                 action: pendingMode === 'OUT' ? 'CHECKOUT_TOOL' : 'CHECKIN_TOOL', 
-                qr_codes: batchQueue 
+                qr_codes: batchQueue,
+                manager_pin: managerPin
             }) 
         });
         
-        if (!response.ok) return showToast('❌ Failed.');
+        const data = await response.json();
+
+        if (!response.ok) {
+            // Restore button
+            if(submitBtn) { submitBtn.textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in'; submitBtn.disabled = false; }
+            
+            // Handle Custom Hard-Stops
+            if (data.code === 'CAL_EXPIRED') {
+                return showToast('🛑 ' + data.error);
+            } 
+            else if (data.code === 'DEPT_RESTRICTED') {
+                document.getElementById('override-pin-input').value = '';
+                document.getElementById('override-modal').style.display = 'flex';
+                document.getElementById('override-pin-input').focus();
+                return;
+            } 
+            else if (data.code === 'BAD_PIN') {
+                return showToast('❌ Invalid Manager PIN.');
+            }
+            return showToast('❌ ' + (data.error || 'Transaction failed.'));
+        }
         
-        showToast(`✅ Logged ${batchQueue.length} assets.`); 
+        document.getElementById('override-modal').style.display = 'none';
+        showToast(`✅ Successfully processed ${batchQueue.length} assets.`); 
         setTimeout(resetToIdle, 1500);
     } catch (err) { 
+        if(submitBtn) { submitBtn.textContent = 'Error'; submitBtn.disabled = false; }
         showToast('❌ Connection error.'); 
     }
 }
 
-async function submitProblemReport() {
-    const qr = document.getElementById('report-qr').value.trim().toUpperCase(); 
-    const type = document.getElementById('report-type').value; 
-    const notes = document.getElementById('report-notes').value.trim();
-    
-    if (!qr || !notes) {
-        return showToast('⚠️ Tag and description mandatory.');
-    }
-    
-    try {
-        const response = await fetch('/api/tools/report', { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ 
-                badge_id: activeUser.badgeId, 
-                qr_code: qr, 
-                issue_type: type, 
-                notes: notes 
-            }) 
-        });
-        
-        if (!response.ok) return showToast('❌ Error.');
-        
-        showToast(`🚨 Status altered to ${type}.`); 
-        setTimeout(resetToIdle, 1500);
-    } catch (err) { 
-        showToast('❌ Error.'); 
-    }
+function submitTransactionWithOverride() {
+    const pin = document.getElementById('override-pin-input').value.trim();
+    if (!pin) return showToast('⚠️ PIN is required.');
+    submitTransaction(pin); // Re-run the exact same transaction, but pass the PIN this time
 }
 
 // ==========================================
