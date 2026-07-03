@@ -44,6 +44,7 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
 /* These elements MUST be hidden by default until the JS unlocks them */
 #admin-app, #workspace-view, .workspace-panel, .sub-panel { display: none; }
 #screen-auth, #screen-action { display: none; }
+/* kiosk.js swaps this back on via inline style.display = 'flex' (not a class toggle) */
 
 /* Login Cards */
 #auth-wall { background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--accent); padding: clamp(20px, 5vw, 32px); border-radius: 12px; width: 100%; max-width: 400px; margin-top: 10vh; height: fit-content; }
@@ -55,13 +56,15 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
 /* ==========================================
    4. REUSABLE COMPONENTS
    ========================================== */
-.persistent-home { 
-    position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%); 
-    background: rgba(37, 40, 48, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); 
-    border: 1px solid var(--border); border-top: 1px solid rgba(255,255,255,0.1); 
-    color: var(--text); padding: 14px 28px; border-radius: 40px; text-decoration: none; 
-    font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 10px; 
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); z-index: 9999; box-shadow: 0 8px 32px rgba(0,0,0,0.6); 
+/* Floating pill-shaped "back home" button, fixed to the bottom-center of the viewport on every non-dashboard page */
+.persistent-home {
+    position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%);
+    background: rgba(37, 40, 48, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-top: 1px solid rgba(255,255,255,0.1);
+    color: var(--text); padding: 14px 28px; border-radius: 40px; text-decoration: none;
+    font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 10px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); z-index: 9999; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    /* z-index: 9999 keeps this above toasts (200), modals, and everything else so it's always reachable */
 }
 .persistent-home:hover { color: white; border-color: var(--accent); background: var(--surface2); transform: translateX(-50%) translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.8); }
 
@@ -97,6 +100,7 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
    ========================================== */
 .table-responsive-wrapper { width: 100%; overflow-x: auto; border-radius: 6px; border: 1px solid var(--border); }
 table { width: 100%; border-collapse: collapse; text-align: left; min-width: 600px; }
+/* position: sticky + top: 0 keeps the header row visible while a long table body scrolls inside .table-responsive-wrapper */
 th { padding: 12px 16px; background: var(--surface2); color: var(--muted); border-bottom: 1px solid var(--border); font-size: 12px; white-space: nowrap; position: sticky; top: 0; }
 td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; vertical-align: middle; }
 
@@ -128,6 +132,7 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
 .back-btn { display: inline-flex; align-items: center; gap: 8px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; font-weight: 600; margin-bottom: 20px; transition: 0.2s; }
 .back-btn:hover { color: var(--text); }
 
+/* dashboard.html no longer carries its own inline <style> block -- this section is now its sole styling source. */
 /* ==========================================
    7. MODULE SPECIFIC: DASHBOARD SIDEBAR
    ========================================== */
@@ -153,6 +158,7 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
 .action-icon { font-size: 48px; margin-bottom: 16px; }
 .action-label { font-size: 18px; font-weight: 700; }
 
+/* z-index: 50 just needs to clear #screen-idle and other kiosk content; well below the persistent-home button's 9999 */
 #screen-action { width: 100vw; height: 100vh; flex-direction: column; position: absolute; top: 0; left: 0; background: var(--bg); z-index: 50; }
 .topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .accent-bar { height: 3px; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 100%; }
@@ -186,6 +192,8 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
     body.dashboard-layout .main-content { overflow-y: visible; }
 }
 
+/* Printing renders only .printable-area: everything is hidden, then that one subtree (and its children) is switched back
+   to visible and forced to black-on-white, regardless of the dark theme colors used on screen. */
 @media print {
     body * { visibility: hidden; }
     .printable-area, .printable-area * { visibility: visible; color: black !important; }

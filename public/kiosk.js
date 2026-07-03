@@ -1,120 +1,167 @@
 // ==========================================
 // 1. STATE MANAGEMENT
 // ==========================================
-let activeUser = null; 
-let pendingMode = null; // 'OUT', 'IN', 'REPORT', or 'AUDIT'
-let batchQueue = []; 
+let activeUser = null;
+let pendingMode = null; // 'OUT', 'IN', 'REPORT', 'AUDIT', or 'TRANSFERS'
+let batchQueue = [];
 let html5QrScannerInstance = null;
 
 // Specific Audit State Variables
 let auditTools = [];
 let auditBoxName = '';
+// Set by jumpToAuditFromGate() when the audit workflow was entered via the
+// AUDIT_REQUIRED gate (mid-checkout); checked/cleared at the end of
+// submitAudit()'s success path so the tech is returned to their
+// still-populated checkout batch instead of the idle screen.
+let auditGateReturnPending = false;
 
 // ==========================================
 // 2. WORKFLOW NAVIGATION
 // ==========================================
+/**
+ * Entry point for each of the 5 idle-screen action buttons.
+ * Stores the chosen mode ('OUT' | 'IN' | 'REPORT' | 'AUDIT' | 'TRANSFERS') in
+ * pendingMode, updates the auth screen's icon/title to match, and
+ * transitions from #screen-idle to #screen-auth.
+ */
 function startWorkflow(mode) {
     pendingMode = mode;
-    const authIcon = document.getElementById('auth-header-icon'); 
+    const authIcon = document.getElementById('auth-header-icon');
     const authTitle = document.getElementById('auth-header-title');
-    
-    if (mode === 'OUT') { 
-        authIcon.textContent = '📤'; 
-        authTitle.textContent = 'Check Out'; 
-    } else if (mode === 'IN') { 
-        authIcon.textContent = '📥'; 
-        authTitle.textContent = 'Check In'; 
-    } else if (mode === 'REPORT') { 
-        authIcon.textContent = '⚠️'; 
-        authTitle.textContent = 'Issue Report'; 
-    } else if (mode === 'AUDIT') { 
-        authIcon.textContent = '📋'; 
-        authTitle.textContent = 'Toolbox Audit'; 
+
+    if (mode === 'OUT') {
+        authIcon.textContent = '📤';
+        authTitle.textContent = 'Check Out';
+    } else if (mode === 'IN') {
+        authIcon.textContent = '📥';
+        authTitle.textContent = 'Check In';
+    } else if (mode === 'REPORT') {
+        authIcon.textContent = '⚠️';
+        authTitle.textContent = 'Issue Report';
+    } else if (mode === 'AUDIT') {
+        authIcon.textContent = '📋';
+        authTitle.textContent = 'Toolbox Audit';
+    } else if (mode === 'TRANSFERS') {
+        authIcon.textContent = '🔁';
+        authTitle.textContent = 'Transfers';
     }
-    
-    document.getElementById('screen-idle').style.display = 'none'; 
-    document.getElementById('screen-auth').style.display = 'flex'; 
+
+    document.getElementById('screen-idle').style.display = 'none';
+    document.getElementById('screen-auth').style.display = 'flex';
     document.getElementById('auth-badge-input').focus();
 }
 
-function resetToIdle() { 
-    killActiveCamera(); 
-    activeUser = null; 
-    pendingMode = null; 
-    batchQueue = []; 
-    auditTools = []; 
-    
-    document.getElementById('auth-badge-input').value = ''; 
-    document.getElementById('screen-action').style.display = 'none'; 
-    document.getElementById('screen-auth').style.display = 'none'; 
-    document.getElementById('screen-idle').style.display = 'flex'; 
+/**
+ * Tears down any in-progress workflow (stops the camera, clears
+ * user/mode/queue/audit state) and returns the UI to #screen-idle.
+ * Used by both the "Cancel" buttons and post-submit success paths.
+ */
+function resetToIdle() {
+    killActiveCamera();
+    activeUser = null;
+    pendingMode = null;
+    batchQueue = [];
+    auditTools = [];
+    auditGateReturnPending = false;
+
+    document.getElementById('auth-badge-input').value = '';
+    document.getElementById('auth-pin-input').value = '';
+    document.getElementById('screen-action').style.display = 'none';
+    document.getElementById('screen-auth').style.display = 'none';
+    document.getElementById('screen-idle').style.display = 'flex';
 }
 
 // ==========================================
 // 3. AUTHENTICATION LOGIC
 // ==========================================
+/**
+ * Validates the badge/username and PIN typed or scanned into
+ * #auth-badge-input / #auth-pin-input against POST /api/kiosk-auth. On
+ * success, populates activeUser (including the entered pin, so later
+ * actions in this same kiosk session can resubmit it without
+ * re-prompting) and the topbar avatar/name, then swaps #screen-auth for
+ * #screen-action and calls setupActionScreen().
+ */
 async function authenticateUser() {
     const loginId = document.getElementById('auth-badge-input').value.trim();
-    
+    const pin = document.getElementById('auth-pin-input').value.trim();
+
     if (!loginId) {
         return showToast('⚠️ Identifier is required.');
     }
-    
+    if (!pin) {
+        return showToast('⚠️ PIN is required.');
+    }
+
     try {
-        const response = await fetch('/api/kiosk-auth', { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ login_id: loginId }) 
+        const response = await fetch('/api/kiosk-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login_id: loginId, pin: pin })
         });
         const data = await response.json();
-        
+
         if (!response.ok) {
             return showToast('❌ ' + (data.error || 'Identity not recognized.'));
         }
 
-        activeUser = { 
-            badgeId: data.user.badge_id, 
-            name: data.user.full_name, 
-            initials: data.user.full_name.split(' ').map(n => n[0]).join('') 
+        activeUser = {
+            badgeId: data.user.badge_id,
+            name: data.user.full_name,
+            initials: data.user.full_name.split(' ').map(n => n[0]).join(''),
+            pin: pin
         };
-        
+
         if (data.user.photo_url) {
             document.getElementById('user-avatar').innerHTML = `<img src="${data.user.photo_url}" />`;
         } else {
-            document.getElementById('user-avatar').textContent = activeUser.initials; 
+            document.getElementById('user-avatar').textContent = activeUser.initials;
         }
 
         document.getElementById('user-name').textContent = activeUser.name;
         document.getElementById('auth-badge-input').value = '';
-        
-        document.getElementById('screen-auth').style.display = 'none'; 
+        document.getElementById('auth-pin-input').value = '';
+
+        document.getElementById('screen-auth').style.display = 'none';
         document.getElementById('screen-action').style.display = 'flex';
-        
+
         setupActionScreen();
-    } catch (err) { 
-        showToast('❌ Server error.'); 
+    } catch (err) {
+        showToast('❌ Server error.');
     }
 }
 
+/**
+ * Resets per-session batch/audit state and shows the correct
+ * sub-panel (#panel-scanner, #panel-report, #panel-audit, or
+ * #panel-transfers) for the current pendingMode, wiring up
+ * mode-specific labels and kicking off dropdown loading when needed.
+ */
 function setupActionScreen() {
-    batchQueue = []; 
-    auditTools = []; 
+    batchQueue = [];
+    auditTools = [];
     renderQueue();
-    
+
     document.getElementById('panel-scanner').style.display = 'none';
     document.getElementById('panel-report').style.display = 'none';
     document.getElementById('panel-audit').style.display = 'none';
+    document.getElementById('panel-transfers').style.display = 'none';
 
-    if (pendingMode === 'REPORT') { 
-        document.getElementById('panel-report').style.display = 'block'; 
-        document.getElementById('report-qr').focus(); 
+    if (pendingMode === 'REPORT') {
+        document.getElementById('panel-report').style.display = 'block';
+        document.getElementById('report-qr').focus();
+        toggleReportQaDeptVisibility();
+        loadReportQaDeptDropdown();
     } else if (pendingMode === 'AUDIT') {
         document.getElementById('panel-audit').style.display = 'block';
         document.getElementById('audit-step-1').style.display = 'block';
         document.getElementById('audit-step-2').style.display = 'none';
         loadAuditDropdown();
+    } else if (pendingMode === 'TRANSFERS') {
+        document.getElementById('panel-transfers').style.display = 'block';
+        loadTransferQueue();
     } else {
-        document.getElementById('panel-scanner').style.display = 'block'; 
+        document.getElementById('panel-scanner').style.display = 'block';
         document.getElementById('action-title').textContent = pendingMode === 'OUT' ? '📤 Scan Tools for Checkout' : '📥 Scan Tools for Check-in';
         document.getElementById('btn-submit-action').textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
         focusScanInput('kiosk-scan-input');
@@ -124,6 +171,12 @@ function setupActionScreen() {
 // ==========================================
 // 4. SCANNING (IN/OUT)
 // ==========================================
+/**
+ * Focuses the given scan input, but only while #screen-action is
+ * actually visible (guards against stealing focus after navigating
+ * away). Used both directly (scan-box click) and by the
+ * auto-refocus blur listeners set up on DOMContentLoaded.
+ */
 function focusScanInput(inputId) {
     const input = document.getElementById(inputId);
     if(input && document.getElementById('screen-action').style.display === 'flex') {
@@ -131,6 +184,11 @@ function focusScanInput(inputId) {
     }
 }
 
+/**
+ * Reads #kiosk-scan-input, normalizes it, and (if not already
+ * queued) appends it to batchQueue for the checkout/check-in batch
+ * being built, then re-renders the queue list.
+ */
 function handleToolScan() {
     const input = document.getElementById('kiosk-scan-input');
     const qr = input.value.trim().toUpperCase();
@@ -149,6 +207,10 @@ function handleToolScan() {
     showToast(`➕ Added: ${qr}`);
 }
 
+/**
+ * Redraws the #queue-count and #queue-list UI from the current
+ * batchQueue array, including each item's remove ("✕") control.
+ */
 function renderQueue() {
     document.getElementById('queue-count').textContent = batchQueue.length;
     document.getElementById('queue-list').innerHTML = batchQueue.map((qr, index) => `
@@ -159,7 +221,11 @@ function renderQueue() {
     `).join('');
 }
 
-function removeItem(index) { 
+/**
+ * Removes a single tool from batchQueue by index (invoked from the
+ * per-row "✕" control rendered in renderQueue()) and re-renders.
+ */
+function removeItem(index) {
     batchQueue.splice(index, 1); 
     renderQueue(); 
 }
@@ -167,6 +233,10 @@ function removeItem(index) {
 // ==========================================
 // 5. AUDIT WORKFLOW
 // ==========================================
+/**
+ * Populates the #audit-box-select dropdown (audit-step-1) from
+ * GET /api/storage so the user can pick which toolbox to inventory.
+ */
 async function loadAuditDropdown() {
     try {
         const res = await fetch('/api/storage');
@@ -177,6 +247,13 @@ async function loadAuditDropdown() {
     }
 }
 
+/**
+ * Begins the physical audit for the toolbox selected in
+ * #audit-box-select: fetches the full tool manifest via
+ * GET /api/tools, filters it down to non-retired tools assigned to
+ * that box, seeds auditTools with an initial 'Pending' status per
+ * tool, then advances the UI from audit-step-1 to audit-step-2.
+ */
 async function startAudit() {
     const select = document.getElementById('audit-box-select');
     if (!select.value) {
@@ -212,6 +289,11 @@ async function startAudit() {
     }
 }
 
+/**
+ * Redraws the #audit-progress counter/coloring and the
+ * #audit-tool-list table rows from the current auditTools array,
+ * including each row's status <select> and notes <input> controls.
+ */
 function renderAuditList() {
     const scannedCount = auditTools.filter(t => t.audit_status === 'Present').length;
     const progressEl = document.getElementById('audit-progress');
@@ -255,6 +337,11 @@ function renderAuditList() {
     }).join('');
 }
 
+/**
+ * Reads #audit-scan-input and, if the scanned QR matches a tool in
+ * the current auditTools manifest, marks that tool 'Present' and
+ * re-renders the list; otherwise warns that it doesn't belong here.
+ */
 function handleAuditScan() {
     const input = document.getElementById('audit-scan-input');
     const qr = input.value.trim().toUpperCase();
@@ -274,6 +361,11 @@ function handleAuditScan() {
     input.value = '';
 }
 
+/**
+ * Manually edits a single auditTools entry's field (audit_status or
+ * audit_notes) by qr_code, in response to the row-level <select>/
+ * <input> onchange handlers rendered by renderAuditList().
+ */
 function updateAuditItem(qr, field, value) {
     const idx = auditTools.findIndex(t => t.qr_code === qr);
     if (idx !== -1) {
@@ -282,15 +374,27 @@ function updateAuditItem(qr, field, value) {
     }
 }
 
+/**
+ * Finalizes the audit and POSTs the results to /api/audits/submit.
+ * Before submitting, if any tools are still 'Pending' (never
+ * scanned), prompts the user via confirm() to auto-mark them as
+ * 'Missing'; if the user declines that confirmation, the submit is
+ * aborted entirely so nothing is sent. On success, shows a toast and
+ * either returns to the idle screen after a short delay, or — if this
+ * audit was reached via the AUDIT_REQUIRED gate mid-checkout
+ * (auditGateReturnPending) — returns to #panel-scanner with the
+ * original batchQueue still intact so the tech can finalize the
+ * checkout that triggered the gate.
+ */
 async function submitAudit() {
     const pendingCount = auditTools.filter(t => t.audit_status === 'Pending').length;
-    
+
     if (pendingCount > 0) {
         const confirmMissing = confirm(`You have ${pendingCount} tools still pending. Auto-mark them as Missing?`);
-        if (!confirmMissing) return; 
-        
-        auditTools.forEach(t => { 
-            if (t.audit_status === 'Pending') t.audit_status = 'Missing'; 
+        if (!confirmMissing) return;
+
+        auditTools.forEach(t => {
+            if (t.audit_status === 'Pending') t.audit_status = 'Missing';
         });
     }
 
@@ -308,7 +412,20 @@ async function submitAudit() {
         if (!res.ok) {
             return showToast("❌ Failed to log audit.");
         }
-        
+
+        if (auditGateReturnPending) {
+            auditGateReturnPending = false;
+            pendingMode = 'OUT';
+            auditTools = [];
+            document.getElementById('panel-audit').style.display = 'none';
+            document.getElementById('panel-scanner').style.display = 'block';
+            document.getElementById('action-title').textContent = '📤 Scan Tools for Checkout';
+            document.getElementById('btn-submit-action').textContent = '✓ Complete Checkout';
+            renderQueue();
+            showToast("✅ Audit logged — you can now finalize your checkout.");
+            return;
+        }
+
         showToast("✅ Audit complete and verified.");
         setTimeout(resetToIdle, 1500);
     } catch (e) {
@@ -316,9 +433,44 @@ async function submitAudit() {
     }
 }
 
+/**
+ * Audit-gate entry point: invoked from #audit-gate-modal's
+ * per-toolbox "Audit <name> Now" buttons when a checkout was rejected
+ * with AUDIT_REQUIRED. Hides the gate modal, switches the visible
+ * panel from #panel-scanner to #panel-audit (leaving pendingMode and
+ * batchQueue untouched so the checkout can resume after), loads the
+ * toolbox dropdown, pre-selects boxName, and immediately calls
+ * startAudit() — skipping the manual dropdown-pick-and-click-Begin
+ * step. Sets auditGateReturnPending so submitAudit() knows to return
+ * to the scanner panel (with batchQueue intact) instead of resetting
+ * to idle once this audit is logged.
+ */
+async function jumpToAuditFromGate(boxName) {
+    document.getElementById('audit-gate-modal').style.display = 'none';
+    auditGateReturnPending = true;
+
+    document.getElementById('panel-scanner').style.display = 'none';
+    document.getElementById('panel-audit').style.display = 'block';
+    document.getElementById('audit-step-1').style.display = 'block';
+    document.getElementById('audit-step-2').style.display = 'none';
+
+    await loadAuditDropdown();
+    const select = document.getElementById('audit-box-select');
+    select.value = boxName;
+    startAudit();
+}
+
 // ==========================================
 // 6. CAMERA HARDWARE CONTROLS
 // ==========================================
+/**
+ * Camera lifecycle: safely stops the shared html5QrScannerInstance
+ * if it is currently scanning, then hides every possible camera
+ * preview element (#reader, #auth-reader, #report-reader,
+ * #audit-reader) regardless of which one was active. Called
+ * whenever a workflow is abandoned (e.g. resetToIdle()) to make sure
+ * no camera is left running in the background.
+ */
 function killActiveCamera() {
     if (html5QrScannerInstance && html5QrScannerInstance.isScanning) {
         html5QrScannerInstance.stop().then(() => { 
@@ -330,6 +482,16 @@ function killActiveCamera() {
     }
 }
 
+/**
+ * Camera lifecycle: shared low-level driver behind all camera scan
+ * buttons. Reveals the given preview element, (re)creates the
+ * html5QrScannerInstance against it, picks the first available
+ * camera device, and starts scanning. On a successful decode it
+ * stops the camera, hides the preview, and invokes successCallback
+ * with the decoded text. Surfaces toasts for no-camera and
+ * permission-denied failure paths. Used by startAuthCameraScanner()
+ * and startToolCameraScanner() to implement their specific flows.
+ */
 function executeCameraScan(elementId, successCallback) {
     document.getElementById(elementId).style.display = 'block';
     
@@ -357,14 +519,28 @@ function executeCameraScan(elementId, successCallback) {
     });
 }
 
-function startAuthCameraScanner() { 
+/**
+ * Camera lifecycle: opens the auth-screen camera (#auth-reader) via
+ * executeCameraScan() and, once a badge is decoded, fills
+ * #auth-badge-input with the scanned text and immediately calls
+ * authenticateUser() to log the technician in.
+ */
+function startAuthCameraScanner() {
     executeCameraScan('auth-reader', (txt) => { 
         document.getElementById('auth-badge-input').value = txt; 
         authenticateUser(); 
     }); 
 }
 
-function startToolCameraScanner(readerId, inputId, triggerFunc = null) { 
+/**
+ * Camera lifecycle: generic tool-scan camera opener reused by the
+ * scanner, report, and audit panels (each passes its own reader
+ * element id and text input id). Opens the given camera preview via
+ * executeCameraScan(), fills the given input with the decoded text,
+ * and optionally invokes triggerFunc() afterward (e.g.
+ * handleToolScan or handleAuditScan) to process the scan immediately.
+ */
+function startToolCameraScanner(readerId, inputId, triggerFunc = null) {
     executeCameraScan(readerId, (txt) => { 
         document.getElementById(inputId).value = txt; 
         if (triggerFunc) triggerFunc(); 
@@ -374,66 +550,416 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null) {
 // ==========================================
 // 7. GENERAL API ACTIONS (Transactions & Errors)
 // ==========================================
+/**
+ * Submits the current batchQueue as a checkout or check-in
+ * transaction to POST /api/transactions (action derived from
+ * pendingMode). Every checkout AND check-in now requires a universal
+ * Supervisor Sign-Off PIN, so when called with no managerPin this
+ * ALWAYS shows #override-modal (clearing/focusing #override-pin-input)
+ * and returns, rather than only doing so after a rejected attempt.
+ * submitTransactionWithOverride() re-invokes this same function with
+ * managerPin populated once the sign-off PIN has been entered.
+ *
+ * Error-handling branches inspected on a non-ok response (button is
+ * restored first in every case):
+ *   - BAD_TECH_PIN: the technician's own session PIN (activeUser.pin)
+ *     is stale/wrong — re-entering the sign-off PIN can't fix this,
+ *     so the kiosk is sent back to resetToIdle().
+ *   - SIGNOFF_REQUIRED: shouldn't normally happen since the modal
+ *     always collects the PIN first, but toast if the server disagrees.
+ *   - BAD_PIN: the sign-off PIN doesn't match an authorized user;
+ *     toast and keep the modal open for retry.
+ *   - SIGNOFF_SAME_PERSON: the sign-off PIN resolved to the same user
+ *     as the technician; toast and keep the modal open for retry.
+ *   - CAL_EXPIRED / TOOL_IN_TRANSFER: hard stops — toast the server's
+ *     message, close the modal, and return to the scan panel (no
+ *     retry can fix either).
+ *   - AUDIT_REQUIRED: the tool's home department hasn't been audited
+ *     today; close the sign-off modal and show #audit-gate-modal with
+ *     one "Audit <name> Now" button per pending toolbox.
+ *   - Any other error: shown as a generic toast.
+ * On success, the override modal (if open) is hidden, a success
+ * toast is shown, and the kiosk returns to the idle screen.
+ */
 async function submitTransaction(managerPin = null) {
     if (batchQueue.length === 0) return showToast('⚠️ Queue empty.');
-    
+
+    if (!managerPin) {
+        // Universal gate: always require sign-off before finalizing, for BOTH OUT and IN.
+        document.getElementById('override-pin-input').value = '';
+        document.getElementById('override-modal').style.display = 'flex';
+        document.getElementById('override-pin-input').focus();
+        return;
+    }
+
     // Lock the button to prevent double-clicks
     const submitBtn = document.getElementById('btn-submit-action');
     if(submitBtn) { submitBtn.textContent = 'Processing...'; submitBtn.disabled = true; }
-    
+
     try {
-        const response = await fetch('/api/transactions', { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ 
-                badge_id: activeUser.badgeId, 
-                action: pendingMode === 'OUT' ? 'CHECKOUT_TOOL' : 'CHECKIN_TOOL', 
+        const response = await fetch('/api/transactions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                badge_id: activeUser.badgeId,
+                pin: activeUser.pin,
+                action: pendingMode === 'OUT' ? 'CHECKOUT_TOOL' : 'CHECKIN_TOOL',
                 qr_codes: batchQueue,
                 manager_pin: managerPin
-            }) 
+            })
         });
-        
+
         const data = await response.json();
 
         if (!response.ok) {
             // Restore button
             if(submitBtn) { submitBtn.textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in'; submitBtn.disabled = false; }
-            
+
             // Handle Custom Hard-Stops
-            if (data.code === 'CAL_EXPIRED') {
-                return showToast('🛑 ' + data.error);
-            } 
-            else if (data.code === 'DEPT_RESTRICTED') {
-                document.getElementById('override-pin-input').value = '';
-                document.getElementById('override-modal').style.display = 'flex';
-                document.getElementById('override-pin-input').focus();
-                return;
-            } 
+            if (data.code === 'BAD_TECH_PIN') {
+                document.getElementById('override-modal').style.display = 'none';
+                showToast('❌ Your session PIN is invalid. Please sign in again.');
+                return resetToIdle();
+            }
+            else if (data.code === 'SIGNOFF_REQUIRED') {
+                return showToast('⚠️ ' + (data.error || 'Sign-off PIN is required.'));
+            }
             else if (data.code === 'BAD_PIN') {
-                return showToast('❌ Invalid Manager PIN.');
+                return showToast('❌ Invalid Supervisor PIN.');
+            }
+            else if (data.code === 'SIGNOFF_SAME_PERSON') {
+                return showToast('❌ Sign-off must be from a different person.');
+            }
+            else if (data.code === 'CAL_EXPIRED') {
+                document.getElementById('override-modal').style.display = 'none';
+                return showToast('🛑 ' + data.error);
+            }
+            else if (data.code === 'TOOL_IN_TRANSFER') {
+                document.getElementById('override-modal').style.display = 'none';
+                return showToast('🛑 ' + data.error);
+            }
+            else if (data.code === 'AUDIT_REQUIRED') {
+                document.getElementById('override-modal').style.display = 'none';
+                showAuditGateModal(data.pending_toolboxes || []);
+                return;
             }
             return showToast('❌ ' + (data.error || 'Transaction failed.'));
         }
-        
+
         document.getElementById('override-modal').style.display = 'none';
-        showToast(`✅ Successfully processed ${batchQueue.length} assets.`); 
+        showToast(`✅ Successfully processed ${batchQueue.length} assets.`);
         setTimeout(resetToIdle, 1500);
-    } catch (err) { 
+    } catch (err) {
         if(submitBtn) { submitBtn.textContent = 'Error'; submitBtn.disabled = false; }
-        showToast('❌ Connection error.'); 
+        showToast('❌ Connection error.');
     }
 }
 
+/**
+ * Supervisor sign-off retry flow: reads the PIN entered in
+ * #override-pin-input (shown unconditionally by submitTransaction())
+ * and, if present, re-runs submitTransaction() with that PIN so the
+ * exact same batch/action is resubmitted for authorization.
+ */
 function submitTransactionWithOverride() {
     const pin = document.getElementById('override-pin-input').value.trim();
     if (!pin) return showToast('⚠️ PIN is required.');
     submitTransaction(pin); // Re-run the exact same transaction, but pass the PIN this time
 }
 
+/**
+ * Audit-gate rejection UX: renders one "Audit <name> Now" button per
+ * toolbox in pendingToolboxes into #audit-gate-box-list and shows
+ * #audit-gate-modal. Each button calls jumpToAuditFromGate(name) so
+ * the tech can log today's audit without losing the in-progress
+ * checkout batch. The Cancel button (static markup in kiosk.html)
+ * just hides the modal, leaving batchQueue untouched for a retry.
+ */
+function showAuditGateModal(pendingToolboxes) {
+    document.getElementById('audit-gate-box-list').innerHTML = pendingToolboxes.map(box => `
+        <button class="btn btn-primary" onclick="jumpToAuditFromGate('${(box.name || '').replace(/'/g, "\\'")}')">Audit ${box.name} Now</button>
+    `).join('') || '<div style="color: var(--muted); font-size: 13px;">No specific toolboxes were listed.</div>';
+    document.getElementById('audit-gate-modal').style.display = 'flex';
+}
+
+/**
+ * Reads #report-qr / #report-type / #report-notes and routes to the
+ * correct backend action. For 'Broken' | 'Missing' | 'Worn', POSTs to
+ * POST /api/kiosk/report-issue. For 'NeedsCalibration', delegates to
+ * submitCalibrationTransfer() instead (a distinct QA-transfer flow,
+ * not a status flag). Locks the submit button and shows
+ * "Submitting..." while the request is in flight.
+ */
+async function submitProblemReport() {
+    const qr = document.getElementById('report-qr').value.trim().toUpperCase();
+    const issueType = document.getElementById('report-type').value; // Broken | Missing | Worn | NeedsCalibration
+    const notes = document.getElementById('report-notes').value.trim();
+
+    if (!qr) return showToast('⚠️ Tool barcode is required.');
+
+    if (issueType === 'NeedsCalibration') {
+        return submitCalibrationTransfer(qr, notes);
+    }
+
+    const btn = document.querySelector('#panel-report .btn-danger');
+    if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
+
+    try {
+        const response = await fetch('/api/kiosk/report-issue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                badge_id: activeUser.badgeId,
+                pin: activeUser.pin,
+                qr_code: qr,
+                issue_type: issueType,
+                notes: notes
+            })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
+            return showToast('❌ ' + (data.error || 'Failed to log report.'));
+        }
+
+        showToast(`✅ Reported ${qr} as ${issueType}. ID reserved.`);
+        setTimeout(resetToIdle, 1500);
+    } catch (err) {
+        if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
+        showToast('❌ Connection error.');
+    }
+}
+
+/**
+ * Outbound leg of the QA calibration-transfer workflow, invoked by
+ * submitProblemReport() when #report-type is 'NeedsCalibration'.
+ * POSTs to POST /api/transfers/initiate with the QA department chosen
+ * in #report-qa-dept. On success the tool flips to 'Pending Transfer'
+ * server-side and awaits QA acceptance (see the Transfers workflow).
+ */
+async function submitCalibrationTransfer(qr, notes) {
+    const qaDeptId = document.getElementById('report-qa-dept').value;
+    if (!qaDeptId) return showToast('⚠️ Select a QA department.');
+
+    const btn = document.querySelector('#panel-report .btn-danger');
+    if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
+
+    try {
+        const response = await fetch('/api/transfers/initiate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                badge_id: activeUser.badgeId,
+                pin: activeUser.pin,
+                qr_code: qr,
+                qa_dept_id: qaDeptId,
+                notes: notes
+            })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
+            return showToast('❌ ' + (data.error || 'Failed to initiate transfer.'));
+        }
+
+        showToast(`✅ ${qr} queued for QA pickup. Awaiting QA acceptance.`);
+        setTimeout(resetToIdle, 1500);
+    } catch (err) {
+        if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
+        showToast('❌ Connection error.');
+    }
+}
+
+/**
+ * Shows/hides #report-qa-dept-group depending on whether
+ * #report-type is currently set to 'NeedsCalibration'. Wired to
+ * #report-type's onchange and also called once when the Report panel
+ * is opened so the group starts in the correct state.
+ */
+function toggleReportQaDeptVisibility() {
+    const isCalTransfer = document.getElementById('report-type').value === 'NeedsCalibration';
+    document.getElementById('report-qa-dept-group').style.display = isCalTransfer ? 'block' : 'none';
+}
+
+/**
+ * Populates #report-qa-dept from GET /api/storage's departments array
+ * (same data source syncStorageHierarchyDropdowns() in admin.js uses),
+ * so the tech can pick which QA department a calibration transfer
+ * should be routed to.
+ */
+async function loadReportQaDeptDropdown() {
+    try {
+        const res = await fetch('/api/storage');
+        const data = await res.json();
+        const select = document.getElementById('report-qa-dept');
+        if (select) {
+            select.innerHTML = '<option value="">-- Select QA Department --</option>' + data.departments.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
+        }
+    } catch (e) {
+        showToast('❌ Failed to load departments.');
+    }
+}
+
+// ==========================================
+// 7B. TRANSFERS WORKFLOW (QA queue)
+// ==========================================
+/**
+ * Fetches both GET /api/transfers?...&direction=incoming and
+ * ...&direction=outgoing for the current activeUser and renders all
+ * three queue sections: #transfer-list-incoming (transfers awaiting
+ * this dept's QA acceptance), #transfer-list-inqa (transfers this
+ * dept's QA already accepted and can now complete/return, from the
+ * incoming-direction response's in_progress array), and
+ * #transfer-list-returning (transfers awaiting this (home) dept's
+ * acceptance of a completed return). Each section renders an explicit
+ * "Nothing pending." row when empty rather than being left blank.
+ */
+async function loadTransferQueue() {
+    const incomingEl = document.getElementById('transfer-list-incoming');
+    const inqaEl = document.getElementById('transfer-list-inqa');
+    const returningEl = document.getElementById('transfer-list-returning');
+
+    try {
+        const [incomingRes, outgoingRes] = await Promise.all([
+            fetch(`/api/transfers?badge_id=${encodeURIComponent(activeUser.badgeId)}&direction=incoming`),
+            fetch(`/api/transfers?badge_id=${encodeURIComponent(activeUser.badgeId)}&direction=outgoing`)
+        ]);
+        const incomingData = await incomingRes.json();
+        const outgoingData = await outgoingRes.json();
+
+        if (!incomingRes.ok || !outgoingRes.ok) {
+            showToast('❌ Failed to load transfer queue.');
+            return;
+        }
+
+        const incoming = incomingData.incoming || [];
+        const inProgress = incomingData.in_progress || [];
+        const outgoing = outgoingData.outgoing || [];
+
+        incomingEl.innerHTML = incoming.length ? incoming.map(t => `
+            <div class="batch-item" style="flex-direction: column; align-items: stretch; gap: 6px;">
+                <div><strong>${t.tool_name}</strong> <span style="color: var(--muted); font-family: monospace;">(${t.qr_code})</span></div>
+                <div style="font-size: 12px; color: var(--muted);">From: ${t.home_dept_name}${t.notes ? ' — ' + t.notes : ''}</div>
+                <button class="btn btn-primary" style="width: auto; align-self: flex-start;" onclick="acceptIncomingTransfer(${t.transfer_id})">Accept Incoming</button>
+            </div>
+        `).join('') : '<div style="color: var(--muted); font-size: 13px; padding: 10px 0;">Nothing pending.</div>';
+
+        inqaEl.innerHTML = inProgress.length ? inProgress.map(t => `
+            <div class="batch-item" style="flex-direction: column; align-items: stretch; gap: 6px;">
+                <div><strong>${t.tool_name}</strong> <span style="color: var(--muted); font-family: monospace;">(${t.qr_code})</span></div>
+                <div style="font-size: 12px; color: var(--muted);">Home Dept: ${t.home_dept_name}${t.notes ? ' — ' + t.notes : ''}</div>
+                <button class="btn btn-success" style="width: auto; align-self: flex-start;" onclick="completeAndReturnTransfer(${t.transfer_id})">Mark Calibration Complete & Return</button>
+            </div>
+        `).join('') : '<div style="color: var(--muted); font-size: 13px; padding: 10px 0;">Nothing pending.</div>';
+
+        returningEl.innerHTML = outgoing.length ? outgoing.map(t => `
+            <div class="batch-item" style="flex-direction: column; align-items: stretch; gap: 6px;">
+                <div><strong>${t.tool_name}</strong> <span style="color: var(--muted); font-family: monospace;">(${t.qr_code})</span></div>
+                <div style="font-size: 12px; color: var(--muted);">Status: ${t.status}${t.notes ? ' — ' + t.notes : ''}</div>
+                ${t.status === 'AWAITING_HOME_ACCEPT' ? `<button class="btn btn-primary" style="width: auto; align-self: flex-start;" onclick="acceptReturnedTransfer(${t.transfer_id})">Accept Returned Tool</button>` : '<div style="font-size: 12px; color: var(--muted); font-style: italic;">Still at QA.</div>'}
+            </div>
+        `).join('') : '<div style="color: var(--muted); font-size: 13px; padding: 10px 0;">Nothing pending.</div>';
+    } catch (err) {
+        showToast('❌ Connection error loading transfers.');
+    }
+}
+
+/**
+ * QA-side action: accepts physical receipt of an incoming transfer
+ * (POST /api/transfers/:id/qa-accept), then toasts and refreshes all
+ * three queue sections in place — the panel stays open so a tech can
+ * process several transfers in one session.
+ */
+async function acceptIncomingTransfer(transferId) {
+    try {
+        const res = await fetch(`/api/transfers/${transferId}/qa-accept`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ badge_id: activeUser.badgeId, pin: activeUser.pin })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast('❌ ' + (data.error || 'Failed to accept transfer.'));
+        } else {
+            showToast('✅ Transfer accepted — tool is now in calibration.');
+        }
+    } catch (err) {
+        showToast('❌ Connection error.');
+    }
+    loadTransferQueue();
+}
+
+/**
+ * QA-side action: finishes calibration on an in-progress transfer.
+ * Prompts inline (via prompt()) for last_cal_date and cal_due_date —
+ * the simplest reasonable UI for two small date inputs — then POSTs
+ * to POST /api/transfers/:id/complete-cal. Toasts and refreshes the
+ * queue in place regardless of outcome.
+ */
+async function completeAndReturnTransfer(transferId) {
+    const lastCalDate = prompt('Last Calibration Date (YYYY-MM-DD):', new Date().toISOString().slice(0, 10));
+    if (!lastCalDate) return;
+    const calDueDate = prompt('Calibration Due Date (YYYY-MM-DD):');
+    if (!calDueDate) return showToast('⚠️ Calibration due date is required.');
+
+    try {
+        const res = await fetch(`/api/transfers/${transferId}/complete-cal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                badge_id: activeUser.badgeId,
+                pin: activeUser.pin,
+                last_cal_date: lastCalDate,
+                cal_due_date: calDueDate
+            })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast('❌ ' + (data.error || 'Failed to complete calibration.'));
+        } else {
+            showToast('✅ Calibration logged — tool is on its way back.');
+        }
+    } catch (err) {
+        showToast('❌ Connection error.');
+    }
+    loadTransferQueue();
+}
+
+/**
+ * Home-department action: accepts physical receipt of a tool
+ * returning from QA (POST /api/transfers/:id/home-accept). Toasts and
+ * refreshes the queue in place regardless of outcome.
+ */
+async function acceptReturnedTransfer(transferId) {
+    try {
+        const res = await fetch(`/api/transfers/${transferId}/home-accept`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ badge_id: activeUser.badgeId, pin: activeUser.pin })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast('❌ ' + (data.error || 'Failed to accept returned tool.'));
+        } else {
+            showToast('✅ Tool accepted back into service.');
+        }
+    } catch (err) {
+        showToast('❌ Connection error.');
+    }
+    loadTransferQueue();
+}
+
 // ==========================================
 // 8. UTILITIES
 // ==========================================
-function showToast(msg) { 
+/**
+ * Displays a transient message in the #kiosk-toast element for 3.5
+ * seconds. Used throughout the file for success/error/warning
+ * feedback.
+ */
+function showToast(msg) {
     const el = document.getElementById('kiosk-toast'); 
     el.textContent = msg; 
     el.style.display = 'block'; 
@@ -441,12 +967,21 @@ function showToast(msg) {
 }
 
 // Auto-refocus logic
+// On initial page load, wires up blur listeners on the two
+// persistent scan inputs (#kiosk-scan-input for checkout/check-in,
+// #audit-scan-input for the audit workflow) so that if either input
+// loses focus (e.g. after a hardware scanner "types" a value and the
+// browser blurs it, or a stray tap elsewhere on the kiosk), focus is
+// automatically restored shortly after via focusScanInput(). The
+// short setTimeout lets any in-flight click/scan handling finish
+// first. focusScanInput() itself only refocuses while #screen-action
+// is visible, so this is a no-op once a workflow has ended.
 document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('kiosk-scan-input').addEventListener('blur', () => { 
-        setTimeout(() => focusScanInput('kiosk-scan-input'), 200); 
+    document.getElementById('kiosk-scan-input').addEventListener('blur', () => {
+        setTimeout(() => focusScanInput('kiosk-scan-input'), 200);
     });
-    
-    document.getElementById('audit-scan-input').addEventListener('blur', () => { 
-        setTimeout(() => focusScanInput('audit-scan-input'), 200); 
+
+    document.getElementById('audit-scan-input').addEventListener('blur', () => {
+        setTimeout(() => focusScanInput('audit-scan-input'), 200);
     });
 });

@@ -12,6 +12,7 @@
     <input type="file" id="global-photo-upload" style="display: none;" accept="image/*" onchange="handlePhotoUpload(event)">
     <a href="index.html" class="persistent-home no-print">🏠 Main Hub</a>
 
+    <!-- Auth wall: login gate shown before a badge/PIN session is established; hidden and swapped for #admin-app on successful loginAdmin() -->
     <div id="auth-wall">
         <h2 style="margin-bottom: 8px; text-align: center;">LTA Portal Login</h2>
         <p style="color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 24px;">Enter Badge ID or Username</p>
@@ -33,7 +34,8 @@
     </div>
 
     <div id="admin-app">
-        
+
+        <!-- Main app header: shown after login, displays current session identity and sign-out control -->
         <div class="header no-print">
             <div>
                 <h2>LTA Central Hub</h2>
@@ -42,23 +44,29 @@
             <div><button class="btn btn-secondary" style="width: auto;" onclick="window.location.reload()">Sign Out</button></div>
         </div>
 
+        <!-- Hub view: top-level landing grid with 4 cards (Account, Personnel, Inventory, Reports); each card calls openWorkspace() to reveal its panel below -->
         <div id="hub-view" class="grid-container no-print">
+            <!-- Card 1: Account -->
             <div class="hub-card" onclick="openWorkspace('ws-account')">
                 <div class="hub-icon">👤</div><div class="hub-title">My Account</div><div class="hub-desc">Update personal credentials.</div>
             </div>
+            <!-- Card 2: Personnel (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
             <div class="hub-card" id="hub-personnel" onclick="openWorkspace('ws-personnel')">
                 <div class="hub-icon">👥</div><div class="hub-title">Personnel</div><div class="hub-desc">View roster and manage accounts.</div>
             </div>
-            <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree();">
+            <!-- Card 3: Inventory & Infra (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
+            <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree(); loadAuditStatus();">
                 <div class="hub-icon">📦</div><div class="hub-title">Inventory & Infra</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
+            <!-- Card 4: Reports (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
             <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports')">
                 <div class="hub-icon">📊</div><div class="hub-title">Telemetry & Reports</div><div class="hub-desc">Custom queries and data export.</div>
             </div>
         </div>
 
         <div id="workspace-view">
-            
+
+            <!-- Workspace panel: My Account -->
             <div id="ws-account" class="workspace-panel no-print">
                 <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
                 <div class="card" style="max-width: 500px;">
@@ -69,6 +77,7 @@
                 </div>
             </div>
 
+            <!-- Workspace panel: Personnel, containing its own subhub plus two sub-panels (panel-manage-users, panel-view-roster) toggled via openSubPanel()/closeSubPanel() -->
             <div id="ws-personnel" class="workspace-panel no-print">
                 <div id="subhub-personnel">
                     <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
@@ -83,6 +92,7 @@
                     </div>
                 </div>
 
+                <!-- Sub-panel: Manage Accounts (create users, reset PINs, deactivate) -->
                 <div id="panel-manage-users" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-personnel', 'subhub-personnel')">← Back to Personnel Menu</button>
                     <div class="card">
@@ -106,6 +116,7 @@
                     </div>
                 </div>
 
+                <!-- Sub-panel: Company Roster (searchable read-only directory) -->
                 <div id="panel-view-roster" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-personnel', 'subhub-personnel')">← Back to Personnel Menu</button>
                     <div class="card">
@@ -123,12 +134,13 @@
                 </div>
             </div>
 
+            <!-- Workspace panel: Inventory & Infrastructure, containing its own subhub plus two sub-panels (panel-inv-tree, panel-inv-build) toggled via openSubPanel()/closeSubPanel() -->
             <div id="ws-inventory" class="workspace-panel no-print">
                 <div id="subhub-inventory">
                     <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
                     <h3 style="margin-bottom: 20px;">Global Inventory Management</h3>
                     <div class="grid-container">
-                        <div class="hub-card" onclick="openSubPanel('panel-inv-tree'); renderEditableInfraTree();">
+                        <div class="hub-card" onclick="openSubPanel('panel-inv-tree'); renderEditableInfraTree(); loadAuditStatus();">
                             <div class="hub-icon">🗺️</div><div class="hub-title">Master Directory</div><div class="hub-desc">View and edit the complete global structure.</div>
                         </div>
                         <div class="hub-card" onclick="openSubPanel('panel-inv-build'); syncStorageHierarchyDropdowns();">
@@ -137,12 +149,19 @@
                     </div>
                 </div>
 
+                <!-- Sub-panel: Master Directory (recursive department/toolbox/drawer/tool tree, see renderEditableInfraTree in admin.js) -->
                 <div id="panel-inv-tree" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
+                    <div class="card" id="audit-status-card">
+                        <h3 style="margin-bottom: 10px;">Today's Audit Status</h3>
+                        <div id="audit-status-body" style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <div style="color:var(--muted); font-size:12px;">Loading...</div>
+                        </div>
+                    </div>
                     <div class="card">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                             <h3>Master Storage & Asset Tree</h3>
-                            <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree()">🔄 Refresh Data</button>
+                            <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree(); loadAuditStatus();">🔄 Refresh Data</button>
                         </div>
                         <div id="editable-infra-tree-container">
                             <div style="text-align: center; color: var(--muted); padding: 20px;">Fetching structural data...</div>
@@ -150,6 +169,7 @@
                     </div>
                 </div>
 
+                <!-- Sub-panel: Deployment Builder (provision departments, toolboxes/drawers, and ingest new tools) -->
                 <div id="panel-inv-build" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
                     
@@ -179,6 +199,8 @@
                         <div class="flex-grid-3">
                             <div class="form-group" style="margin: 0;"><label class="form-label">Tool Name</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Detailed Description</label><input class="form-input" id="add-tool-desc" placeholder="e.g. Snap-on 72-tooth flex head"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Serial Number</label><input class="form-input" id="add-tool-serial" placeholder="Optional -- mainly for calibrated tools"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="add-tool-partnum" placeholder="Optional -- mfr/catalog part #"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Replacement URL</label><input class="form-input" id="add-tool-url" placeholder="https://mcmaster.com/..."></div>
                             
                             <div class="form-group" style="margin: 0;">
@@ -206,6 +228,7 @@
                 </div>
             </div>
 
+            <!-- Workspace panel: Reports (custom report builder + generated/printable results table) -->
             <div id="ws-reports" class="workspace-panel">
                 <button class="back-btn no-print" onclick="showMainHub()">← Return to Main Hub</button>
                 <div class="card no-print">
@@ -237,6 +260,7 @@
         </div>
     </div>
 
+    <!-- Universal entity modal: shared editor/viewer for toolbox, drawer, and tool records; populated per-type by openEntityModal() and toggled between read/edit views by toggleModalEditMode() -->
     <div id="entity-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 450px; position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
             <button onclick="closeEntityModal()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;">✕</button>
@@ -259,9 +283,26 @@
         </div>
     </div>
 
+    <!-- Image lightbox modal: full-screen preview for toolbox/drawer/tool photos, opened via openImageModal(url) -->
     <div id="image-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.9); z-index: 10000; justify-content: center; align-items: center; padding: 20px;" onclick="closeImageModal()">
         <span style="position: absolute; top: 20px; right: 30px; color: white; font-size: 30px; cursor: pointer;">✕</span>
         <img id="image-modal-content" style="max-width: 95%; max-height: 95%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+    </div>
+
+    <!-- Credentials handout modal: shown after creating a user or resetting a PIN, since email
+         delivery isn't configured -- gives the operator something to relay to the person directly.
+         Opened via showCredentialsModal(), explicit-close only (no click-outside-to-dismiss) since
+         it displays one-time-sensitive info the operator should consciously finish reading first. -->
+    <div id="cred-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div class="card" style="width: 100%; max-width: 420px; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+            <h3 id="cred-modal-title" style="margin-bottom: 6px;">Credentials</h3>
+            <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Email delivery isn't set up yet -- relay these to the person directly, then close this window.</p>
+            <div id="cred-modal-body"></div>
+            <div style="display: flex; gap: 10px; margin-top: 10px;">
+                <button class="btn btn-secondary" id="cred-modal-copy-btn" onclick="copyCredentialsToClipboard()">📋 Copy All</button>
+                <button class="btn btn-primary" onclick="closeCredentialsModal()">Done</button>
+            </div>
+        </div>
     </div>
 
     <script src="admin.js"></script>

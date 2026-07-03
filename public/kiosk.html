@@ -13,6 +13,12 @@
 
     <a href="index.html" class="persistent-home">🏠 Main Hub</a>
 
+    <!-- ============================================================
+         IDLE SCREEN (#screen-idle)
+         First screen shown on load. Displays the LTA logo and the
+         5 primary action buttons that kick off each workflow via
+         startWorkflow(mode) in kiosk.js.
+    ============================================================= -->
     <div id="screen-idle">
         <svg class="lta-logo-svg" version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 431.4 212.9">
             <path class="st0" d="M75.1,107c-0.1-64.8,76.8-92,84.8-94.6l0,0C83.9,28.9,38.9,73.5,21,95c-5.7,6.9-5.7,16.9,0,23.8c17.8,21.4,62.6,65.7,138,82.5C148.8,197.8,75.2,170.2,75.1,107z"/>
@@ -25,21 +31,36 @@
         <div class="idle-title">Select Kiosk Action</div>
         
         <div class="action-grid">
+            <!-- Action 1 of 5: begin the Check Out batch-scanning workflow -->
             <div class="action-btn" onclick="startWorkflow('OUT')">
                 <div class="action-icon">📤</div><div class="action-label">Check Out Tools</div>
             </div>
+            <!-- Action 2 of 5: begin the Check In batch-scanning workflow -->
             <div class="action-btn" onclick="startWorkflow('IN')">
                 <div class="action-icon">📥</div><div class="action-label">Check In Tools</div>
             </div>
+            <!-- Action 3 of 5: begin the Damage/Missing report workflow -->
             <div class="action-btn" onclick="startWorkflow('REPORT')" style="border-color: rgba(239,68,68,0.5);">
                 <div class="action-icon">⚠️</div><div class="action-label">Report Issue</div>
             </div>
+            <!-- Action 4 of 5: begin the Toolbox Audit workflow -->
             <div class="action-btn" onclick="startWorkflow('AUDIT')" style="border-color: rgba(59, 130, 246, 0.5);">
                 <div class="action-icon">📋</div><div class="action-label">Audit Toolbox</div>
+            </div>
+            <!-- Action 5 of 5: begin the QA Transfers queue workflow -->
+            <div class="action-btn" onclick="startWorkflow('TRANSFERS')" style="border-color: rgba(34, 197, 94, 0.5);">
+                <div class="action-icon">🔁</div><div class="action-label">Transfers</div>
             </div>
         </div>
     </div>
 
+    <!-- ============================================================
+         AUTH SCREEN (#screen-auth)
+         Badge/username + PIN entry shown after picking an action.
+         User can scan a badge (camera) or type an identifier, enters
+         their PIN, then authenticateUser() validates both and reveals
+         #screen-action.
+    ============================================================= -->
     <div id="screen-auth">
         <div class="auth-card">
             <div class="auth-header">
@@ -54,7 +75,11 @@
                 <input class="form-input" id="auth-badge-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Badge or Username..." onkeydown="if(event.key==='Enter')authenticateUser()">
                 <button class="btn-icon" onclick="startAuthCameraScanner()" title="Use Camera">📷</button>
             </div>
-            
+
+            <div class="form-group">
+                <input class="form-input" type="password" id="auth-pin-input" style="font-size: 18px; padding: 12px; text-align: center; letter-spacing: 4px;" placeholder="Enter Your PIN" onkeydown="if(event.key==='Enter')authenticateUser()">
+            </div>
+
             <div style="display: flex; gap: 10px; margin-top: 20px;">
                 <button class="btn btn-secondary" style="flex: 1;" onclick="resetToIdle()">Cancel</button>
                 <button class="btn btn-primary" style="flex: 2;" onclick="authenticateUser()">Next →</button>
@@ -62,8 +87,18 @@
         </div>
     </div>
 
+    <!-- ============================================================
+         ACTION SCREEN (#screen-action)
+         Main workspace shown after authentication. Contains the
+         topbar/user banner plus one of the four workflow sub-panels
+         below (only one is visible at a time, toggled in
+         setupActionScreen() based on pendingMode).
+    ============================================================= -->
     <div id="screen-action">
-        
+
+        <!-- Topbar: shows the authenticated user's avatar/name/meta
+             (populated by authenticateUser()) and a logout/cancel button
+             that returns to the idle screen via resetToIdle(). -->
         <div class="topbar">
             <div class="auth-banner">
                 <div class="avatar" id="user-avatar">--</div>
@@ -77,7 +112,10 @@
         <div class="accent-bar"></div>
 
         <div class="content">
-            
+
+            <!-- Sub-panel 1 of 4: Checkout / Check-in batch scanner
+                 (#panel-scanner). Shared by both the OUT and IN modes;
+                 labels/button text are swapped in setupActionScreen(). -->
             <div class="card" id="panel-scanner" style="width: 100%; max-width: 600px;">
                 <div class="section-title" id="action-title">📤 Scanning Tools...</div>
                 
@@ -101,6 +139,11 @@
                 <button class="btn btn-success" style="width: 100%; padding: 14px; font-size: 16px;" onclick="submitTransaction()" id="btn-submit-action">✓ Finalize Transaction</button>
             </div>
 
+            <!-- Sub-panel 2 of 4: Damage/Missing/Needs-Calibration report
+                 form (#panel-report), submitted via submitProblemReport().
+                 The 4th issue type (NeedsCalibration) reveals a QA
+                 department picker and routes to submitCalibrationTransfer()
+                 instead of the normal report-issue endpoint. -->
             <div class="card" id="panel-report" style="display: none; width: 100%; max-width: 600px;">
                 <div class="section-title">⚠️ Report Damaged or Missing Asset</div>
                 <div id="report-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
@@ -114,11 +157,16 @@
                 </div>
                 <div class="form-group">
                     <label class="form-label">Issue Type</label>
-                    <select class="form-select" id="report-type">
+                    <select class="form-select" id="report-type" onchange="toggleReportQaDeptVisibility()">
                         <option value="Broken">Broken / Damaged</option>
                         <option value="Missing">Missing / Lost</option>
                         <option value="Worn">Worn / Needs Cal</option>
+                        <option value="NeedsCalibration">Needs Calibration (Send to QA)</option>
                     </select>
+                </div>
+                <div class="form-group" id="report-qa-dept-group" style="display: none;">
+                    <label class="form-label">Send To (QA Department)</label>
+                    <select class="form-select" id="report-qa-dept"><option value="">Loading...</option></select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Condition Notes</label>
@@ -127,9 +175,15 @@
                 <button class="btn btn-danger" style="width: 100%; padding: 14px; font-size: 16px;" onclick="submitProblemReport()">Submit Registry Log</button>
             </div>
 
+            <!-- Sub-panel 3 of 4: Toolbox Audit workflow (#panel-audit).
+                 Two-step flow: pick a toolbox (#audit-step-1), then
+                 scan/reconcile its contents (#audit-step-2). -->
             <div class="card" id="panel-audit" style="display: none; max-width: 750px; width: 100%;">
                 <div class="section-title">📋 Audit Toolbox</div>
 
+                <!-- Audit Step 1: select which toolbox to inventory.
+                     startAudit() pulls the manifest and advances to
+                     audit-step-2. -->
                 <div id="audit-step-1">
                     <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">
                         Select the physical storage unit you wish to inventory. This will pull a manifest of everything that should currently be inside.
@@ -141,8 +195,11 @@
                     <button class="btn btn-primary" onclick="startAudit()">Begin Physical Audit</button>
                 </div>
 
+                <!-- Audit Step 2: scan tools to check them off the
+                     manifest and reconcile status/notes per tool.
+                     submitAudit() finalizes and logs the audit. -->
                 <div id="audit-step-2" style="display: none;">
-                    
+
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
                         <h4 id="audit-box-title">Box Name</h4>
                         <div style="background: rgba(34, 197, 94, 0.1); padding: 5px 10px; border-radius: 6px; color: var(--green); font-weight: 700; font-size: 14px;" id="audit-progress">
@@ -178,26 +235,79 @@
                 </div>
             </div>
 
+            <!-- Sub-panel 4 of 4: QA Transfers queue (#panel-transfers).
+                 Shows three sections (incoming/in-QA/returning) populated
+                 by loadTransferQueue() and stays open across multiple
+                 actions instead of auto-returning to idle. -->
+            <div class="card" id="panel-transfers" style="display: none; max-width: 750px; width: 100%;">
+                <div class="section-title">🔁 Tool Transfers</div>
+
+                <div style="margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 10px;">Incoming — Awaiting Your Acceptance</h4>
+                    <div id="transfer-list-incoming"></div>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 10px;">In QA — Ready to Send Back</h4>
+                    <div id="transfer-list-inqa"></div>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 10px;">Returning to You — Awaiting Your Acceptance</h4>
+                    <div id="transfer-list-returning"></div>
+                </div>
+
+                <button class="btn btn-secondary" style="width: 100%;" onclick="resetToIdle()">Back to Idle</button>
+            </div>
+
         </div>
     </div>
 
+    <!-- ============================================================
+         SUPERVISOR SIGN-OFF MODAL (#override-modal)
+         Hidden by default; now the ALWAYS-shown final gate before any
+         checkout/check-in is submitted (both actions require a
+         supervisor's PIN). The PIN entered here is submitted via
+         submitTransactionWithOverride().
+    ============================================================= -->
     <div id="override-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 400px; border-top: 3px solid var(--accent); text-align: center;">
             <div style="font-size: 40px; margin-bottom: 10px;">🛡️</div>
-            <h3 style="margin-bottom: 10px;">Manager Override Required</h3>
-            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">You are attempting to borrow an asset from outside your department. A Manager or Tool Rep must enter their PIN to authorize this transaction.</p>
-            
+            <h3 style="margin-bottom: 10px;">Supervisor Sign-Off Required</h3>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">A Tool Rep, Department Admin, or Super Admin must enter their PIN to authorize this transaction.</p>
+
             <div class="form-group">
-                <input class="form-input" type="password" id="override-pin-input" placeholder="Enter Manager PIN" style="text-align: center; font-size: 20px; letter-spacing: 5px;">
+                <input class="form-input" type="password" id="override-pin-input" placeholder="Enter Supervisor PIN" style="text-align: center; font-size: 20px; letter-spacing: 5px;">
             </div>
-            
+
             <div style="display: flex; gap: 10px; margin-top: 10px;">
                 <button class="btn btn-secondary" onclick="document.getElementById('override-modal').style.display='none'">Cancel</button>
-                <button class="btn btn-primary" onclick="submitTransactionWithOverride()">Authorize Borrowing</button>
+                <button class="btn btn-primary" onclick="submitTransactionWithOverride()">Authorize</button>
             </div>
         </div>
     </div>
 
+    <!-- ============================================================
+         DAILY AUDIT GATE MODAL (#audit-gate-modal)
+         Hidden by default; shown when a checkout is rejected with
+         code AUDIT_REQUIRED. Lets the tech jump directly into the
+         Audit workflow for one of the pending toolboxes without
+         losing the in-progress checkout batch.
+    ============================================================= -->
+    <div id="audit-gate-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div class="card" style="width: 100%; max-width: 420px; border-top: 3px solid var(--orange); text-align: center;">
+            <div style="font-size: 40px; margin-bottom: 10px;">📋</div>
+            <h3 style="margin-bottom: 10px;">Daily Audit Required</h3>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">The following toolbox(es) have not been audited today. A checkout cannot be completed until today's audit is logged.</p>
+
+            <div id="audit-gate-box-list" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
+
+            <button class="btn btn-secondary" style="width: 100%;" onclick="document.getElementById('audit-gate-modal').style.display='none'">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Toast notification element: shown/hidden by showToast() to
+         surface transient success/error/warning messages. -->
     <div class="toast" id="kiosk-toast">Toast Message</div>
 
     <script src="kiosk.js"></script>

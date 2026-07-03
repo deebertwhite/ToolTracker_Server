@@ -1,33 +1,39 @@
-version: '3.8'
+# ==========================================
+# ToolTracker Docker Compose
+# ==========================================
+# This file only stands up supporting infrastructure: the PostgreSQL
+# database. The Node/Express application itself (server.js) is NOT
+# containerized here -- it is run directly on the host machine (and, in
+# production, on the Raspberry Pi) via "node server.js", and it connects
+# to the "db" service below over the network (see the DATABASE
+# CONFIGURATION section in server.js).
+#
+# A Metabase reporting service used to live here too, but it was removed:
+# it shared this same Postgres database for its own internal metadata
+# (dashboards, users, job scheduler, etc.), which filled the database with
+# 150+ unrelated tables, and it wasn't being used for anything. If a
+# reporting dashboard is wanted again later, give it its own dedicated
+# database rather than pointing it at "tooltracker" directly.
 services:
   # 1. The Database
+  # PostgreSQL instance that stores all ToolTracker application data
+  # (tools, checkouts, users, etc.). server.js connects to this database
+  # directly using the pg Pool client; it is not started or managed by
+  # server.js in any way.
   db:
     image: postgres:15
     restart: always
     environment:
       POSTGRES_USER: tooladmin
+      # NOTE: This password is hardcoded here for local/dev convenience.
+      # Before production deployment, move this value into a .env file or
+      # a Docker secret instead of leaving it in source control.
       POSTGRES_PASSWORD: SuperSecretPassword123
       POSTGRES_DB: tooltracker
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-
-  # 2. The Boss's Dashboard
-  metabase:
-    image: metabase/metabase:latest
-    restart: always
-    ports:
-      - "3001:3000" # Metabase will run on localhost:3001
-    environment:
-      MB_DB_TYPE: postgres
-      MB_DB_DBNAME: tooltracker
-      MB_DB_PORT: 5432
-      MB_DB_USER: tooladmin
-      MB_DB_PASS: SuperSecretPassword123
-      MB_DB_HOST: db
-    depends_on:
-      - db
 
 volumes:
   pgdata:
