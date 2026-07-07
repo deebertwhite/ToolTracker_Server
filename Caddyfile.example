@@ -1,0 +1,15 @@
+# Copy this file to "Caddyfile" (no extension) and fill in your actual DuckDNS
+# domain + token. Caddyfile is gitignored since it will contain your token --
+# never commit the real one.
+#
+# What this does: serves your ToolTracker app over real, publicly-trusted HTTPS
+# (Let's Encrypt) at your DuckDNS name, proxying to the existing Node app on
+# port 3000. No certificate warnings, no per-device setup, works on any phone/
+# browser -- because it's a real certificate, not a self-signed one.
+
+your-subdomain.duckdns.org {
+    tls {
+        dns duckdns YOUR_DUCKDNS_TOKEN_HERE
+    }
+    reverse_proxy localhost:3000
+}

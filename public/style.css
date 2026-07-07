@@ -82,9 +82,13 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
 
 .form-group { margin-bottom: 16px; width: 100%; }
 .form-label { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; display: block; }
-.form-input, .form-select { 
-    width: 100%; background: var(--surface2); border: 1px solid var(--border); 
-    padding: 10px 14px; color: var(--text); border-radius: 6px; outline: none; font-size: 14px;
+.form-input, .form-select {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    padding: 10px 14px; color: var(--text); border-radius: 6px; outline: none;
+    /* iOS Safari auto-zooms the whole page on focus for any input under 16px, and never
+       zooms back out on blur -- that's a platform quirk with no "undo" after the fact, so
+       16px here is the actual fix, not a design preference. Do not drop this below 16px. */
+    font-size: 16px;
 }
 .form-input:focus, .form-select:focus { border-color: var(--accent); }
 
@@ -168,6 +172,18 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
 .scan-box { background: var(--surface2); border: 2px dashed var(--border); border-radius: 10px; padding: 20px; text-align: center; cursor: pointer; margin-bottom: 14px; }
 .scan-box.active { border-color: var(--accent); background: rgba(203,96,21,0.05); }
 .batch-item { display: flex; align-items: center; justify-content: space-between; padding: 10px; background: var(--surface2); border-radius: 6px; margin-bottom: 6px; border-left: 3px solid var(--accent); word-break: break-all; }
+
+/* Camera scanner preview containers (#reader, #audit-reader, etc. -- see .camera-reader
+   usages in kiosk.html/admin.html). html5-qrcode injects its own <video>/<canvas>
+   elements inside these divs; without a fixed aspect ratio here, the container's own
+   width:height shape flips dramatically when the phone rotates (tall and narrow in
+   portrait vs. short and wide in landscape), and an unconstrained video element inside it
+   ends up stretched or squished rather than just re-cropped. Locking to a 1:1 square
+   (matching the aspectRatio passed to .start() below) and forcing the video/canvas to
+   cover that fixed box keeps the preview stable and correctly proportioned in either
+   orientation. */
+.camera-reader { aspect-ratio: 1 / 1; max-height: 70vh; }
+.camera-reader video, .camera-reader canvas { width: 100% !important; height: 100% !important; object-fit: cover; }
 
 /* ==========================================
    9. INFRASTRUCTURE TREE & AVATARS

@@ -7,8 +7,20 @@
     <!-- Layout, sidebar, and nav styling all live in style.css section 7 (MODULE SPECIFIC: DASHBOARD SIDEBAR). -->
     <!-- No page-local <style> block here anymore -- keeping a single source of truth avoids the sidebar width/color drift that used to happen when this block overrode style.css. -->
     <link rel="stylesheet" href="style.css">
+
+    <!-- PWA: installing from this page creates an "LTA Dashboard" home-screen icon that
+         opens straight to the dashboard -- see manifest-dashboard.json. -->
+    <link rel="manifest" href="manifest-dashboard.json">
+    <meta name="theme-color" content="#111315">
+    <link rel="icon" href="icons/favicon-32.png">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="LTA Dashboard">
 </head>
 <body class="dashboard-layout">
+
+    <a href="index.html" class="persistent-home no-print">🏠 Main Hub</a>
 
     <!-- Sidebar navigation tree: global overview link + dynamically-populated storage directory tree -->
     <div class="sidebar no-print">
@@ -22,10 +34,7 @@
     </div>
 
     <div class="main-content">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
-            <h2>Live Telemetry</h2>
-            <a href="index.html" class="btn btn-secondary no-print" style="width: auto;">🏠 Main Hub</a>
-        </div>
+        <h2 style="margin-bottom: 30px;">Live Telemetry</h2>
 
         <div id="view-global">
             
@@ -152,5 +161,6 @@
     </div>
 
     <script src="dashboard.js"></script>
+    <script src="sw-register.js"></script>
 </body>
 </html>

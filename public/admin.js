@@ -125,66 +125,96 @@ function toggleTreeVisibility(containerId, headerElement) {
 // 3. AUTHENTICATION
 // ==========================================
 /**
- * Authenticates against POST /api/login with the badge/username + PIN entered on the
- * #auth-wall, then bootstraps the session: stores currentAdminBadge and derives
- * currentAdminWeight via getRoleWeight(). Swaps #auth-wall for #admin-app, and applies the
- * role-weight hierarchy gating pattern to hide UI the current role isn't entitled to:
+ * Shared post-authentication bootstrap, called after either a fresh /api/login or a
+ * restored /api/session on page load (see restoreAdminSession()). Stores
+ * currentAdminBadge/currentAdminWeight (display-only caches now -- the server derives
+ * authorization from the session cookie, not from anything sent by this client), swaps
+ * #auth-wall for #admin-app, and applies the role-weight hierarchy gating pattern to hide
+ * UI the current role isn't entitled to:
  *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes and #card-manage-users.
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Finally preloads data appropriate to the role (user list for dept_admin+, storage
  * dropdowns for everyone, next tool id for tool_rep+).
  */
+function bootstrapAdminUI(user) {
+    currentAdminBadge = user.badge_id;
+    currentAdminWeight = getRoleWeight(user.role);
+
+    document.getElementById('auth-wall').style.display = 'none';
+    document.getElementById('admin-app').style.display = 'block';
+    document.getElementById('admin-name').textContent = `Logged in as: ${user.full_name} (${user.role.toUpperCase()})`;
+
+    // Hide UI elements based on hierarchy
+    if (currentAdminWeight < 2) {
+        safeSetDisplay('hub-inventory', 'none');
+        safeSetDisplay('hub-reports', 'none');
+    }
+    if (currentAdminWeight < 4) {
+        safeSetDisplay('card-manage-depts', 'none');
+    }
+    if (currentAdminWeight < 3) {
+        safeSetDisplay('card-manage-boxes', 'none');
+        safeSetDisplay('card-manage-users', 'none');
+    }
+
+    if (currentAdminWeight >= 3) { loadUsers(); }
+    syncStorageHierarchyDropdowns();
+    if (currentAdminWeight >= 2) { fetchNextToolId(); }
+}
+
+/** Authenticates against POST /api/login with the badge/username + PIN entered on the #auth-wall. On success the server establishes a session cookie and bootstrapAdminUI() takes over from there. */
 async function loginAdmin() {
-    const loginId = document.getElementById('admin-badge').value.trim(); 
+    const loginId = document.getElementById('admin-badge').value.trim();
     const pin = document.getElementById('admin-pin').value.trim();
-    
+
     try {
-        const response = await fetch('/api/login', { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ login_id: loginId, pin: pin }) 
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login_id: loginId, pin: pin })
         });
         const data = await response.json();
-        
+
         if (!response.ok) {
             return alert('❌ ' + (data.error || 'Login failed'));
         }
-        
-        currentAdminBadge = data.user.badge_id; 
-        currentAdminWeight = getRoleWeight(data.user.role);
 
-        document.getElementById('auth-wall').style.display = 'none'; 
-        document.getElementById('admin-app').style.display = 'block'; 
-        document.getElementById('admin-name').textContent = `Logged in as: ${data.user.full_name} (${data.user.role.toUpperCase()})`;
-        
-        // Hide UI elements based on hierarchy
-        if (currentAdminWeight < 2) {
-            safeSetDisplay('hub-inventory', 'none');
-            safeSetDisplay('hub-reports', 'none');
-        }
-        if (currentAdminWeight < 4) {
-            safeSetDisplay('card-manage-depts', 'none');
-        }
-        if (currentAdminWeight < 3) {
-            safeSetDisplay('card-manage-boxes', 'none');
-            safeSetDisplay('card-manage-users', 'none');
-        }
+        bootstrapAdminUI(data.user);
+    } catch (err) {
+        alert('Server connection failure.');
+    }
+}
 
-        if (currentAdminWeight >= 3) { loadUsers(); }
-        await syncStorageHierarchyDropdowns(); 
-        if (currentAdminWeight >= 2) { fetchNextToolId(); } 
-        
-    } catch (err) { 
-        alert('Server connection failure.'); 
+/**
+ * Restores admin login state on page load via GET /api/session, so a reload doesn't force
+ * re-entering the badge/PIN every time (the session cookie already proves who this is).
+ * Silently leaves the login wall showing (the default state) if there's no active session
+ * -- this is the normal case for a first visit or after logging out, not an error.
+ */
+async function restoreAdminSession() {
+    try {
+        const res = await fetch('/api/session');
+        if (!res.ok) return;
+        const data = await res.json();
+        bootstrapAdminUI(data.user);
+    } catch (err) { /* no-op -- login wall is already showing by default */ }
+}
+
+/** Ends the admin session (POST /api/logout) and reloads to show the login wall fresh. */
+async function logoutAdmin() {
+    try {
+        await fetch('/api/logout', { method: 'POST' });
+    } finally {
+        window.location.reload();
     }
 }
 
 /** Submits the logged-in user's own username/PIN changes from the My Account panel to PUT /api/users/me/update, then clears the input fields on success. */
 async function updateMyAccount() {
-    const payload = { requester: currentAdminBadge, new_username: document.getElementById('my-new-username').value, new_pin: document.getElementById('my-new-pin').value };
-    const res = await fetch('/api/users/me/update', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    if (res.ok) { alert('✅ Account updated successfully.'); document.getElementById('my-new-username').value = ''; document.getElementById('my-new-pin').value = ''; } 
+    const payload = { new_username: document.getElementById('my-new-username').value, new_pin: document.getElementById('my-new-pin').value };
+    const res = await fetch('/api/users/me/update', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
+    if (res.ok) { alert('✅ Account updated successfully.'); document.getElementById('my-new-username').value = ''; document.getElementById('my-new-pin').value = ''; }
     else { const err = await res.json(); alert('❌ ' + err.error); }
 }
 
@@ -209,12 +239,11 @@ async function handlePhotoUpload(event) {
 
     const formData = new FormData();
     formData.append('photo', file);
-    formData.append('requester', currentAdminBadge);
     formData.append('entity_type', uploadTarget.type);
     formData.append('entity_id', uploadTarget.id);
 
     try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const res = await fetch('/api/upload', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
         const data = await res.json();
         if (res.ok) {
             alert('✅ Photo uploaded successfully!');
@@ -236,7 +265,7 @@ async function handlePhotoUpload(event) {
  */
 async function loadUsers() {
     try {
-        const response = await fetch(`/api/users?requester=${currentAdminBadge}`); const data = await response.json();
+        const response = await fetch('/api/users'); const data = await response.json();
         document.getElementById('user-manage-body').innerHTML = data.users.map(u => {
             const avatar = u.photo_url ? `<img src="${u.photo_url}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">` : `<div style="width: 40px; height: 40px; border-radius: 50%; background: var(--surface2); display: flex; align-items: center; justify-content: center;">👤</div>`;
             return `<tr>
@@ -270,11 +299,11 @@ function filterRoster() {
     document.querySelectorAll('.roster-row').forEach(row => { row.style.display = row.innerText.toUpperCase().includes(input) ? '' : 'none'; });
 }
 
-/** Validates and submits the "Provision New User" form (name, email, department, role) to POST /api/users, then refreshes both the manage-users table and the roster directory. Email delivery isn't configured, so the generated credentials are shown directly via showCredentialsModal() instead. */
+/** Validates and submits the "Provision New User" form (name, email, department, role) to POST /api/users, then refreshes both the manage-users table and the roster directory. There is no email delivery in this system, so the generated credentials are shown directly via showCredentialsModal() instead. */
 async function addUser() {
-    const payload = { requester: currentAdminBadge, full_name: document.getElementById('new-name').value, email: document.getElementById('new-email').value, dept_id: document.getElementById('new-user-dept').value, role: document.getElementById('new-role').value };
+    const payload = { full_name: document.getElementById('new-name').value, email: document.getElementById('new-email').value, dept_id: document.getElementById('new-user-dept').value, role: document.getElementById('new-role').value };
     if (!payload.full_name || !payload.email) return alert('Name and Email are required.');
-    const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
     if (res.ok) {
         const data = await res.json();
         document.getElementById('new-name').value = ''; document.getElementById('new-email').value = '';
@@ -283,10 +312,10 @@ async function addUser() {
     } else { const err = await res.json(); alert('❌ ' + err.error); }
 }
 
-/** Confirms with the operator, then triggers a PIN reset for the given badge id via POST /api/users/:id/reset-pin. Email delivery isn't configured, so the new PIN is shown directly via showCredentialsModal() instead. */
+/** Confirms with the operator, then triggers a PIN reset for the given badge id via POST /api/users/:id/reset-pin. There is no email delivery in this system, so the new PIN is shown directly via showCredentialsModal() instead. */
 async function resetUserPin(id) {
     if(!confirm(`Reset PIN for ${id}?`)) return;
-    const res = await fetch(`/api/users/${id}/reset-pin`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requester: currentAdminBadge }) });
+    const res = await fetch(`/api/users/${id}/reset-pin`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' } });
     if (res.ok) {
         const data = await res.json();
         showCredentialsModal({ title: 'PIN Reset', badgeId: id, pin: data.new_pin });
@@ -296,7 +325,7 @@ async function resetUserPin(id) {
 /** Confirms with the operator, then deactivates the given badge id via PUT /api/users/:id/deactivate and refreshes both personnel tables. */
 async function deactivateUser(id) {
     if(!confirm(`Deactivate ${id}?`)) return; 
-    await fetch(`/api/users/${id}/deactivate`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requester: currentAdminBadge }) }); 
+    await fetch(`/api/users/${id}/deactivate`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' } });
     loadUsers(); loadRosterDirectory(); 
 }
 
@@ -319,20 +348,20 @@ async function fetchNextBoxId() {
 
 /** Validates and submits the "Establish New Department" form to POST /api/departments, then clears the inputs and refreshes the storage dropdowns and infrastructure tree. Gated to currentAdminWeight >= 4 (super_admin) by the hidden #card-manage-depts card. */
 async function submitStructureDept() {
-    const payload = { name: document.getElementById('str-dept-name').value, prefix_code: document.getElementById('str-dept-prefix').value, requester: currentAdminBadge };
+    const payload = { name: document.getElementById('str-dept-name').value, prefix_code: document.getElementById('str-dept-prefix').value };
     if (!payload.name || !payload.prefix_code) return alert("⚠️ Required fields missing.");
-    const res = await fetch('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
+    const res = await fetch('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
     if (res.ok) { alert('✅ Department Established.'); document.getElementById('str-dept-name').value = ''; document.getElementById('str-dept-prefix').value = ''; syncStorageHierarchyDropdowns(); renderEditableInfraTree(); } 
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
 }
 
 /** Validates and submits the "Smart Box Builder" form to POST /api/toolboxes (which also provisions the requested drawer_count), giving inline button feedback while the request is in flight. Gated to currentAdminWeight >= 3 (dept_admin+) by the hidden #card-manage-boxes card. */
 async function submitSmartBox() {
-    const payload = { name: document.getElementById('str-box-name').value, dept_id: document.getElementById('str-box-dept-select').value, qr_code: document.getElementById('str-box-id').value, drawer_count: document.getElementById('str-box-drawers').value, requester: currentAdminBadge };
+    const payload = { name: document.getElementById('str-box-name').value, dept_id: document.getElementById('str-box-dept-select').value, qr_code: document.getElementById('str-box-id').value, drawer_count: document.getElementById('str-box-drawers').value };
     if (!payload.name || !payload.dept_id) return alert("⚠️ Required fields missing.");
     const btn = document.querySelector('button[onclick="submitSmartBox()"]');
     btn.textContent = "⏳ Building..."; btn.disabled = true;
-    const res = await fetch('/api/toolboxes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); 
+    const res = await fetch('/api/toolboxes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
     if (res.ok) { document.getElementById('str-box-name').value = ''; document.getElementById('str-box-drawers').value = ''; await syncStorageHierarchyDropdowns(); await fetchNextBoxId(); renderEditableInfraTree(); btn.textContent = "✅ Success!"; } 
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
     setTimeout(() => { btn.textContent = "🔨 Build Storage Structure"; btn.disabled = false; }, 2000);
@@ -516,7 +545,7 @@ async function renderEditableInfraTree() {
     } catch (e) { container.innerHTML = `<div style="color: var(--red); padding: 20px;">Error rendering map.</div>`; }
 }
 
-/** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory daily audit is already complete, or a red "-- Audit Pending" chip when it is not. */
+/** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory audit for the CURRENT shift window (morning 04:00-14:00 or afternoon 14:00-04:00, see getAuditWindowStart in server.js) is already complete, or a red "-- Audit Pending" chip when it is not. Also shows which window is currently active in #audit-status-window. */
 async function loadAuditStatus() {
     const container = document.getElementById('audit-status-body');
     if (!container) return;
@@ -526,6 +555,12 @@ async function loadAuditStatus() {
         if (!data.success || !data.departments || data.departments.length === 0) {
             container.innerHTML = `<div style="color:var(--muted); font-size:12px;">No departments found.</div>`;
             return;
+        }
+        const windowLabel = document.getElementById('audit-status-window');
+        if (windowLabel && data.departments[0] && data.departments[0].window_start) {
+            const windowStart = new Date(data.departments[0].window_start);
+            const isMorning = windowStart.getHours() === 4;
+            windowLabel.textContent = `Current window: ${isMorning ? 'Morning (04:00-14:00)' : 'Afternoon (14:00-04:00)'}, since ${windowStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
         }
         container.innerHTML = data.departments.map(d => {
             if (d.audit_completed) {
@@ -542,7 +577,7 @@ async function loadAuditStatus() {
 async function deleteInfraItem(type, id) {
     if (!confirm(`Are you sure you want to delete this structure? It will only succeed if it is empty.`)) return;
     try {
-        const res = await fetch(`/api/${type}/${id}`, { method: 'DELETE' });
+        const res = await fetch(`/api/${type}/${id}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
         if (res.ok) { renderEditableInfraTree(); syncStorageHierarchyDropdowns(); } 
         else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to delete.')); }
     } catch (err) { alert('❌ Network error.'); }
@@ -551,7 +586,7 @@ async function deleteInfraItem(type, id) {
 /** Confirms with the operator, then permanently deletes a single tool via DELETE /api/tools/:tool_id and refreshes the infrastructure tree. */
 async function removeToolPermanent(tool_id, qr_code) {
     if(!confirm(`WARNING: Permanently delete ${qr_code}?`)) return;
-    const res = await fetch(`/api/tools/${tool_id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requester: currentAdminBadge }) });
+    const res = await fetch(`/api/tools/${tool_id}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
     if (res.ok) { alert('✅ Tool removed.'); closeEntityModal(); renderEditableInfraTree(); }
     else alert('❌ Failed to delete tool.');
 }
@@ -579,7 +614,6 @@ async function fetchNextToolId() {
  */
 async function addNewTool() {
     const payload = {
-        requester: currentAdminBadge,
         name: document.getElementById('add-tool-name').value,
         description: document.getElementById('add-tool-desc').value,
         serial_number: document.getElementById('add-tool-serial').value || null,
@@ -590,7 +624,7 @@ async function addNewTool() {
     };
     if (!payload.name || !payload.qr_code) return alert('Name and ID required.');
 
-    const res = await fetch('/api/tools', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const res = await fetch('/api/tools', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
     if (res.ok) {
         alert(`✅ Asset saved: ${payload.qr_code}`);
         document.getElementById('add-tool-name').value = '';
@@ -603,16 +637,16 @@ async function addNewTool() {
     }
 }
 
-/** Shared html5-qrcode bootstrap: reveals the given reader element, tears down any previous scanner instance, starts the first available camera, and invokes callback(decodedText) once a code is read (stopping the scanner and hiding the reader first). Alerts the operator if no camera is available or the scanner fails to start. */
+/** Shared html5-qrcode bootstrap: reveals the given reader element, tears down any previous scanner instance, and starts scanning using the rear-facing camera specifically (`facingMode: "environment"`, requested directly rather than enumerating devices and guessing which index is the rear camera -- that order is unpredictable across phones/browsers, and iOS in particular often lists the front camera first). Falls back to whatever camera is available if no rear camera exists (e.g. a laptop webcam). Invokes callback(decodedText) once a code is read (stopping the scanner and hiding the reader first). Alerts the operator if the scanner fails to start (no camera, permission denied, etc). */
 function initCameraCore(elementId, callback) {
-    document.getElementById(elementId).style.display = 'block'; 
-    if(html5QrAdminInstance) { html5QrAdminInstance.clear(); } 
-    html5QrAdminInstance = new Html5Qrcode(elementId); 
-    Html5Qrcode.getCameras().then(devices => { 
-        if (devices && devices.length) { 
-            html5QrAdminInstance.start(devices[0].id, { fps: 12, qrbox: 250 }, (txt) => { html5QrAdminInstance.stop().then(() => { document.getElementById(elementId).style.display = 'none'; callback(txt); }); }).catch((err) => { alert("Camera Error"); document.getElementById(elementId).style.display = 'none'; }); 
-        } else { alert("No cameras found."); document.getElementById(elementId).style.display = 'none'; } 
-    }).catch(err => { document.getElementById(elementId).style.display = 'none'; }); 
+    document.getElementById(elementId).style.display = 'block';
+    if (html5QrAdminInstance) { html5QrAdminInstance.clear(); }
+    html5QrAdminInstance = new Html5Qrcode(elementId);
+    html5QrAdminInstance.start(
+        { facingMode: "environment" },
+        { fps: 12, qrbox: 250, aspectRatio: 1.0 }, // matches the .camera-reader CSS's fixed 1:1 box so the preview doesn't stretch/squish when the phone rotates
+        (txt) => { html5QrAdminInstance.stop().then(() => { document.getElementById(elementId).style.display = 'none'; callback(txt); }); }
+    ).catch((err) => { alert("Camera Error"); document.getElementById(elementId).style.display = 'none'; });
 }
 /** Opens the login-screen scanner and writes the decoded badge id into #admin-badge. */
 function startAdminLoginCamera() { initCameraCore('admin-auth-reader', (txt) => { document.getElementById('admin-badge').value = txt; }); }
@@ -630,9 +664,9 @@ function startAdminAssetCamera(readerId, inputId) { initCameraCore(readerId, (tx
  * (barcode/description/department/status/reason).
  */
 async function generateCustomReport() {
-    const payload = { requester: currentAdminBadge, report_type: document.getElementById('rep-type').value, dept_id: document.getElementById('rep-dept').value, start_date: document.getElementById('rep-start').value || new Date().toISOString().split('T')[0], end_date: document.getElementById('rep-end').value || new Date().toISOString().split('T')[0] };
+    const payload = { report_type: document.getElementById('rep-type').value, dept_id: document.getElementById('rep-dept').value, start_date: document.getElementById('rep-start').value || new Date().toISOString().split('T')[0], end_date: document.getElementById('rep-end').value || new Date().toISOString().split('T')[0] };
     try {
-        const res = await fetch('/api/reports/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json();
+        const res = await fetch('/api/reports/generate', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) }); const data = await res.json();
         if (!res.ok) return alert('❌ ' + data.error);
         const thead = document.getElementById('report-thead'); const tbody = document.getElementById('report-tbody');
         if (data.data.length === 0) { tbody.innerHTML = `<tr><td colspan="6" style="text-align: center;">No data found.</td></tr>`; return; }
@@ -842,7 +876,7 @@ async function saveEntityUpdates() {
     const id = document.getElementById('em-target-id').value;
     const nameVal = document.getElementById('em-input-name').value;
     
-    let payload = { requester: currentAdminBadge, name: nameVal };
+    let payload = { name: nameVal };
     let endpoint = '';
 
     if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
@@ -860,7 +894,7 @@ async function saveEntityUpdates() {
     }
 
     try {
-        const res = await fetch(endpoint, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+        const res = await fetch(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
         if(res.ok) { closeEntityModal(); renderEditableInfraTree(); }
         else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to save.')); }
     } catch(e) { alert('Network Error.'); }
@@ -886,7 +920,7 @@ function closeImageModal() {
 // ==========================================
 /**
  * Shows the badge id / username / PIN for a just-created or just-reset account so the
- * operator can relay it to the person directly (email delivery isn't configured yet).
+ * operator can relay it to the person directly -- this system has no email delivery.
  * Accepts { title, fullName?, username?, badgeId, pin }; fullName/username are optional
  * since a PIN reset only has a badge id on hand client-side.
  */
@@ -929,3 +963,6 @@ function closeCredentialsModal() {
     document.getElementById('cred-modal-overlay').style.display = 'none';
     document.getElementById('cred-modal-body').innerHTML = '';
 }
+
+// Restore an existing admin session on page load, if there is one (see restoreAdminSession()).
+restoreAdminSession();

@@ -1,19 +1,66 @@
-require('dotenv').config();
+// quiet: true suppresses dotenv's startup console message, which as of v17 rotates in
+// promotional "tips" for the maintainer's other products -- unrelated noise in server logs.
+require('dotenv').config({ quiet: true });
 
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
+const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const nodemailer = require('nodemailer');
+const bcrypt = require('bcrypt');
 
 const app = express();
 
 // ==========================================
 // MIDDLEWARE
 // ==========================================
-app.use(cors());
+// Every real request from this app's own frontend is same-origin (relative /api/... fetches
+// from whatever host served the page) -- CORS doesn't even apply to those. This allowlist is
+// defense-in-depth against a hypothetical future separate frontend, not a fix for an active
+// same-origin problem. credentials:true is required now that session cookies exist -- a
+// wildcard origin can't be combined with credentialed requests, browsers will refuse it.
+const ALLOWED_ORIGINS = [
+    'https://lta-tooltracker.duckdns.org',
+    'http://localhost:3000',
+];
+app.use(cors({
+    origin: (origin, callback) => {
+        // No Origin header at all (same-origin requests, curl, server-to-server) -- always allowed.
+        // A disallowed origin resolves to callback(null, false), NOT an Error -- CORS is
+        // enforced by the requesting browser refusing to read a response with no matching
+        // Access-Control-Allow-Origin header, not by the server refusing to respond at all
+        // (non-browser clients like curl aren't CORS-bound regardless). Passing an Error
+        // here instead would fall through to Express's default error handler and leak a
+        // full stack trace (including filesystem paths) in the response body.
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+        callback(null, false);
+    },
+    credentials: true,
+}));
+
+// helmet's defaults are used as-is except for the CSP's script-src, which is deliberately
+// relaxed to allow: (1) 'unsafe-inline', since admin.html/kiosk.html use inline onclick=
+// handlers throughout (33 and 23 respectively) that a strict default CSP would silently
+// break with no visible error besides a browser console warning; and (2) unpkg.com, which
+// both pages load the html5-qrcode camera-scanning library from. Refactoring every inline
+// handler to addEventListener so a fully strict CSP is possible is a legitimate future
+// improvement, but it's a large, separable, non-security-driven refactor -- not this pass.
+// The rest of helmet's defaults still apply, including X-Frame-Options (real clickjacking
+// protection for the admin panel) and X-Content-Type-Options.
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+            'script-src': ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
+        },
+    },
+}));
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -34,33 +81,58 @@ const LOG_DIR = path.join(BASE_STORAGE_PATH, 'logs');
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 // ==========================================
-// EMAIL (SMTP) CONFIGURATION
-// ==========================================
-// Built once at startup from process.env.SMTP_* (see .env.example). If SMTP_HOST/SMTP_USER
-// are not set, simulateEmail() below falls back to console-logging instead of using this.
-const mailTransport = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT, 10) || 587,
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: (process.env.SMTP_USER && process.env.SMTP_PASS)
-        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-        : undefined,
-});
-
-// ==========================================
 // DATABASE CONFIGURATION
 // ==========================================
-// NOTE: 'dotenv' is already listed as a dependency in package.json but is never
-// required or used anywhere in this file. Before deploying this app to the
-// Raspberry Pi, these hardcoded credentials should be moved into a .env file
-// (loaded here via require('dotenv').config()) and docker-compose.yml should be
-// updated to match, rather than shipping plaintext credentials in source control.
+// Before deploying this app to the Raspberry Pi, these hardcoded credentials should be
+// moved into environment variables and docker-compose.yml should be updated to match,
+// rather than shipping plaintext credentials in source control.
 const pool = new Pool({
     user: 'tooladmin',
     host: 'localhost',
     database: 'tooltracker',
     password: 'SuperSecretPassword123',
     port: 5432,
+});
+
+// ==========================================
+// ADMIN SESSIONS
+// ==========================================
+// Postgres-backed sessions for the admin panel only -- the kiosk stays sessionless by
+// design (its security model is "prove it's you, right now" per transaction via badge+PIN,
+// which persistent login would defeat). connect-pg-simple stores sessions in this same
+// database (createTableIfMissing auto-creates a "session" table) rather than in-memory, so
+// logins survive a server restart and there's no separate store to stand up.
+if (!process.env.SESSION_SECRET) {
+    console.error('FATAL: SESSION_SECRET is not set. Copy .env.example to .env and generate a real secret.');
+    process.exit(1);
+}
+app.use(session({
+    store: new pgSession({ pool, createTableIfMissing: true, tableName: 'session' }),
+    secret: process.env.SESSION_SECRET,
+    name: 'tt.sid',
+    resave: false,
+    saveUninitialized: false,
+    rolling: true, // sliding expiry -- each request while active extends the session
+    cookie: {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production', // Caddy terminates real TLS in front of this app
+        sameSite: 'lax',
+        maxAge: 8 * 60 * 60 * 1000, // 8 hours -- one work shift
+    },
+}));
+
+// IP-based brute-force throttle for every PIN-checking endpoint. Deliberately generous
+// (the kiosk is a single shared walk-up device -- many legitimate people share one IP all
+// day) since the precise, per-badge defense is the DB-backed lockout below; this just
+// catches raw volume regardless of which badge is being targeted. In-memory store is fine
+// here (unlike sessions) -- losing counters on a restart just means a few more free
+// attempts, not a loss of durable state.
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
 });
 
 // ==========================================
@@ -78,36 +150,213 @@ const getRoleWeight = (role) => {
 };
 
 /**
+ * Express middleware factory: rejects the request (401/403) unless the current admin
+ * session belongs to an active user whose role weight meets minWeight. On success,
+ * attaches the authenticated user to req.authUser for the handler to use.
+ *
+ * The role is re-checked against the DB on every request rather than trusted from the
+ * session's cached snapshot -- a deactivated or demoted admin loses access immediately
+ * this way, not after the session naturally expires. This is also the sole source of
+ * truth for authorization from here on: handlers must never use a client-supplied
+ * `requester` field from req.body/req.query to decide what someone is allowed to do,
+ * only req.authUser (sourced from the verified, server-side session).
+ * @param {number} minWeight - minimum getRoleWeight() the session's user must have
+ */
+function requireRole(minWeight) {
+    return async (req, res, next) => {
+        if (!req.session.user) return res.status(401).json({ error: 'Not logged in.' });
+        try {
+            const result = await pool.query(
+                'SELECT role, dept_id, is_active FROM users WHERE badge_id = $1',
+                [req.session.user.badge_id]
+            );
+            if (result.rows.length === 0 || !result.rows[0].is_active) {
+                req.session.destroy(() => {});
+                return res.status(403).json({ error: 'Account no longer active.' });
+            }
+            const weight = getRoleWeight(result.rows[0].role);
+            if (weight < minWeight) return res.status(403).json({ error: 'Insufficient permissions.' });
+            req.authUser = { badge_id: req.session.user.badge_id, role: result.rows[0].role, dept_id: result.rows[0].dept_id, weight };
+            next();
+        } catch (err) {
+            res.status(500).json({ error: 'Authorization check failed.' });
+        }
+    };
+}
+
+/**
+ * Lightweight CSRF defense for the session-cookie-based admin endpoints: requires a
+ * custom header that cross-site <form>/<img> CSRF vectors cannot set, only same-origin
+ * fetch() calls can (which is all admin.js ever does). Combined with the session
+ * cookie's sameSite:'lax' (which already blocks the cookie from being sent on cross-site
+ * POST/PUT/DELETE), this covers the realistic CSRF surface for this app without a full
+ * token-issuance flow.
+ */
+function requireFetchHeader(req, res, next) {
+    if (req.get('X-Requested-With') !== 'ToolTracker') {
+        return res.status(403).json({ error: 'Invalid request origin.' });
+    }
+    next();
+}
+
+/**
  * Generates a random 6-digit numeric PIN (as a string), used for login
  * and manager-override authentication.
  * @returns {string} a 6-digit PIN, e.g. "042817"
  */
 const generatePin = () => Math.floor(100000 + Math.random() * 900000).toString();
 
+// PINs are hashed with bcrypt (see users.pin_hash) rather than stored in the plaintext
+// pin column, which is kept temporarily as a rollback safety net during rollout (see
+// migrations/002_pin_hashing.sql). Cost factor 12 is a reasonable balance for a 6-digit
+// numeric PIN checked at login time on modest hardware (a few hundred ms per check).
+const PIN_HASH_COST_FACTOR = 12;
+const hashPin = (pin) => bcrypt.hash(pin, PIN_HASH_COST_FACTOR);
+
+// Per-badge brute-force lockout, backed by users.failed_pin_attempts/locked_until (see
+// migrations/002_pin_hashing.sql) rather than in-memory, so it survives a restart and is
+// shared correctly even if this app is ever run behind a load balancer with multiple
+// instances. Complements the IP-based authLimiter above -- this catches sustained
+// targeting of one specific (publicly-discoverable via /api/roster) badge_id regardless
+// of source IP; authLimiter catches raw volume regardless of which badge is targeted.
+const MAX_FAILED_PIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
+/**
+ * Checks whether badgeId is currently locked out from failed PIN attempts.
+ * @returns {Promise<{locked: boolean, until?: Date}>}
+ */
+async function checkLockout(badgeId) {
+    const res = await pool.query('SELECT locked_until FROM users WHERE badge_id = $1', [badgeId]);
+    const lockedUntil = res.rows[0]?.locked_until;
+    if (lockedUntil && new Date(lockedUntil) > new Date()) {
+        return { locked: true, until: lockedUntil };
+    }
+    return { locked: false };
+}
+
+/**
+ * Increments failed_pin_attempts for badgeId; sets locked_until once
+ * MAX_FAILED_PIN_ATTEMPTS is reached. Call after every failed PIN check where the
+ * badge_id is known to exist. Logs a LOCKOUT_TRIGGERED audit_logs row the moment the
+ * threshold is actually crossed (not on every attempt while already locked -- callers
+ * check checkLockout() first and never reach this again until the lockout expires and
+ * a fresh attempt fails) -- otherwise there is zero visibility into brute-force attempts
+ * against the system. user_id is left NULL rather than attributed to the targeted
+ * account, since a failed PIN attempt does not prove who the actual caller is.
+ */
+async function recordFailedPinAttempt(badgeId) {
+    const res = await pool.query(
+        `UPDATE users SET failed_pin_attempts = failed_pin_attempts + 1,
+                locked_until = CASE WHEN failed_pin_attempts + 1 >= $2 THEN NOW() + ($3 || ' milliseconds')::interval ELSE locked_until END
+         WHERE badge_id = $1 RETURNING failed_pin_attempts`,
+        [badgeId, MAX_FAILED_PIN_ATTEMPTS, LOCKOUT_DURATION_MS]
+    );
+    // Exact equality, not >= -- logs once at the moment the threshold is crossed, not
+    // again on every attempt thereafter (e.g. concurrent requests racing past checkLockout).
+    if (res.rows[0]?.failed_pin_attempts === MAX_FAILED_PIN_ATTEMPTS) {
+        await pool.query(
+            "INSERT INTO audit_logs (user_id, action, notes) VALUES (NULL, 'LOCKOUT_TRIGGERED', $1)",
+            [`Badge ${badgeId} locked out after ${MAX_FAILED_PIN_ATTEMPTS} failed PIN attempts.`]
+        );
+    }
+}
+
+/** Clears the failed-attempt counter and any active lockout for badgeId. Call after every successful PIN check. */
+async function resetFailedPinAttempts(badgeId) {
+    await pool.query('UPDATE users SET failed_pin_attempts = 0, locked_until = NULL WHERE badge_id = $1', [badgeId]);
+}
+
+const LOCKOUT_RESPONSE = { error: 'Account temporarily locked due to repeated failed attempts. Try again later.', code: 'LOCKED' };
+
+// Two mandatory audit windows per day: "morning" begins at 04:00 and runs until the
+// afternoon window begins at 14:00; "afternoon" begins at 14:00 and runs overnight until
+// the next morning window begins at 04:00 -- it spans midnight, which is why this is
+// plain JS date math rather than a SQL check against ::date. A naive calendar-day match
+// would incorrectly split the overnight portion of the afternoon window into "yesterday"
+// and "today", making it impossible to satisfy across the midnight boundary.
+const AUDIT_MORNING_START_HOUR = 4;
+const AUDIT_AFTERNOON_START_HOUR = 14;
+
+/**
+ * Returns the Date marking when the mandatory-audit window containing `asOf` began.
+ * @param {Date} [asOf] - defaults to right now
+ */
+function getAuditWindowStart(asOf = new Date()) {
+    const hour = asOf.getHours();
+    const windowStart = new Date(asOf);
+    windowStart.setMinutes(0, 0, 0);
+    if (hour >= AUDIT_MORNING_START_HOUR && hour < AUDIT_AFTERNOON_START_HOUR) {
+        windowStart.setHours(AUDIT_MORNING_START_HOUR);
+    } else if (hour >= AUDIT_AFTERNOON_START_HOUR) {
+        windowStart.setHours(AUDIT_AFTERNOON_START_HOUR);
+    } else {
+        // hour < AUDIT_MORNING_START_HOUR -- still inside the afternoon window that began yesterday
+        windowStart.setDate(windowStart.getDate() - 1);
+        windowStart.setHours(AUDIT_AFTERNOON_START_HOUR);
+    }
+    return windowStart;
+}
+
 /**
  * AUDIT GATE: returns the list of toolboxes in the given department that still
- * need an AUDIT today. A toolbox only counts if it currently has at least one
- * non-retired, non-transferred tool in it. Empty array => department passes.
+ * need an AUDIT since windowStart. A toolbox only counts if it currently has at
+ * least one non-retired, non-transferred tool in it. Empty array => department passes.
  * @param {import('pg').PoolClient|import('pg').Pool} client - DB client/pool to query with
  * @param {number} deptId - department to check
- * @returns {Promise<Array<{box_id: number, name: string}>>} pending toolboxes (empty = audited today)
+ * @param {Date} [windowStart] - defaults to the start of the CURRENT mandatory-audit window (see getAuditWindowStart)
+ * @returns {Promise<Array<{box_id: number, name: string}>>} pending toolboxes (empty = audited since windowStart)
  */
-const getAuditGatePendingToolboxes = async (client, deptId) => {
+const getAuditGatePendingToolboxes = async (client, deptId, windowStart = getAuditWindowStart()) => {
     const query = `
         WITH auditable_boxes AS (
           SELECT b.box_id, b.name FROM toolboxes b WHERE b.dept_id = $1
             AND EXISTS (SELECT 1 FROM tools t JOIN drawers dr ON t.drawer_id = dr.drawer_id
                         WHERE dr.box_id = b.box_id AND t.status NOT IN ('Retired','Pending Transfer','In Calibration'))
-        ), audited_today AS (
+        ), audited_in_window AS (
           SELECT DISTINCT b.box_id FROM audit_logs a
             JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
-            WHERE a.action='AUDIT' AND a.timestamp::date = CURRENT_DATE AND b.dept_id = $1
+            WHERE a.action='AUDIT' AND a.timestamp >= $2 AND b.dept_id = $1
         )
-        SELECT ab.box_id, ab.name FROM auditable_boxes ab LEFT JOIN audited_today at ON ab.box_id = at.box_id WHERE at.box_id IS NULL;
+        SELECT ab.box_id, ab.name FROM auditable_boxes ab LEFT JOIN audited_in_window at ON ab.box_id = at.box_id WHERE at.box_id IS NULL;
     `;
-    const result = await client.query(query, [deptId]);
+    const result = await client.query(query, [deptId, windowStart]);
     return result.rows;
 };
+
+/**
+ * Shared core of the audit-gate completion check: which toolboxes are still pending for
+ * a window, and -- only if none are -- who completed the most recent AUDIT in it. Both
+ * the admin-panel status endpoint and the daily log formatter build their own output
+ * shape from this single query pair instead of each re-running it independently.
+ * @returns {Promise<{pending: Array<{box_id: number, name: string}>, completion: {timestamp: Date, full_name: string, badge_id: string}|null}>}
+ */
+async function getAuditWindowCompletionInfo(deptId, windowStart) {
+    const pending = await getAuditGatePendingToolboxes(pool, deptId, windowStart);
+    if (pending.length > 0) return { pending, completion: null };
+    const completedRes = await pool.query(
+        `SELECT a.timestamp, u.full_name, u.badge_id
+         FROM audit_logs a JOIN users u ON a.user_id = u.user_id
+         JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
+         WHERE a.action = 'AUDIT' AND a.timestamp >= $2 AND b.dept_id = $1
+         ORDER BY a.timestamp DESC LIMIT 1`,
+        [deptId, windowStart]
+    );
+    return { pending, completion: completedRes.rows[0] || null };
+}
+
+/**
+ * Describes a department's audit status for one specific window (used by the daily log to
+ * report on both the morning and afternoon windows, not just whichever is active "now").
+ * @returns {Promise<string>} e.g. "Completed at 06:15 by Jane Doe (AVI001)" or "NOT audited"
+ */
+async function describeAuditWindowStatus(deptId, windowStart) {
+    const { pending, completion } = await getAuditWindowCompletionInfo(deptId, windowStart);
+    if (pending.length > 0) return 'NOT audited';
+    if (!completion) return 'Completed (no auditable toolboxes)';
+    const completedTime = new Date(completion.timestamp).toTimeString().slice(0, 5);
+    return `Completed at ${completedTime} by ${completion.full_name} (${completion.badge_id})`;
+}
 
 /**
  * TOOL STATUS STATE MACHINE: validates whether an admin-driven status change
@@ -143,40 +392,6 @@ const checkToolStatusTransition = (currentStatus, requestedStatus) => {
     if (currentStatus === 'Retired') return { allowed: false, code: 'INVALID_STATUS_TRANSITION' };
 
     return { allowed: false, code: 'INVALID_STATUS_TRANSITION' };
-};
-
-/**
- * Sends an outbound notification email (new-user welcome + PIN reset) via the SMTP
- * transport configured from process.env.SMTP_*. If SMTP_HOST or SMTP_USER is not set
- * (i.e. .env hasn't been configured yet), falls back to the original console-log-only
- * behavior instead of attempting to send. Never throws -- a down mail server or missing
- * config must never fail user-creation or PIN-reset.
- * @param {string} email - recipient address
- * @param {string} subject - email subject line
- * @param {string} body - email body text
- */
-const simulateEmail = async (email, subject, body) => {
-    if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
-        console.log(`[Email] SMTP is not configured (see .env.example) -- logging instead of sending.`);
-        console.log(`\n=================================================`);
-        console.log(`📧 EMAIL SENT TO: ${email}`);
-        console.log(`Subject: ${subject}`);
-        console.log(`Body:\n${body}`);
-        console.log(`=================================================\n`);
-        return;
-    }
-
-    try {
-        await mailTransport.sendMail({
-            from: process.env.SMTP_FROM || process.env.SMTP_USER,
-            to: email,
-            subject: subject,
-            text: body,
-        });
-        console.log(`[Email] Sent "${subject}" to ${email}.`);
-    } catch (err) {
-        console.error(`[Email] Failed to send "${subject}" to ${email}:`, err.message);
-    }
 };
 
 // ==========================================
@@ -255,39 +470,90 @@ app.get('/api/tools/next-id', async (req, res) => {
 // 2. AUTHENTICATION
 // ==========================================
 // Standard login: verify badge_id/username + PIN and that the account is active.
-app.post('/api/login', async (req, res) => {
-    const { login_id, pin } = req.body; 
-    try {
-        const query = `
-            SELECT user_id, badge_id, full_name, username, role, is_active 
-            FROM users WHERE (badge_id ILIKE $1 OR username ILIKE $1) AND pin = $2
-        `;
-        const result = await pool.query(query, [login_id, pin]);
-        
-        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid Credentials.' });
-        if (!result.rows[0].is_active) return res.status(403).json({ error: 'Profile deactivated.' });
-        
-        res.json({ success: true, user: result.rows[0] });
-    } catch (err) { 
-        res.status(500).json({ error: 'Server error during login.' }); 
-    }
-});
-
-// Kiosk login: identify a user by badge_id/username + PIN for quick kiosk access.
-app.post('/api/kiosk-auth', async (req, res) => {
+app.post('/api/login', authLimiter, async (req, res) => {
     const { login_id, pin } = req.body;
     try {
         const query = `
-            SELECT user_id, badge_id, full_name, role, is_active, dept_id
-            FROM users WHERE (badge_id ILIKE $1 OR username ILIKE $1) AND pin = $2
+            SELECT user_id, badge_id, full_name, username, role, is_active, pin_hash
+            FROM users WHERE (badge_id ILIKE $1 OR username ILIKE $1)
         `;
-        const result = await pool.query(query, [login_id, pin]);
+        const result = await pool.query(query, [login_id]);
+        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid Credentials.' });
+        const candidate = result.rows[0];
+
+        const lockout = await checkLockout(candidate.badge_id);
+        if (lockout.locked) return res.status(423).json(LOCKOUT_RESPONSE);
+
+        if (!(await bcrypt.compare(pin, candidate.pin_hash))) {
+            await recordFailedPinAttempt(candidate.badge_id);
+            return res.status(401).json({ error: 'Invalid Credentials.' });
+        }
+        if (!candidate.is_active) return res.status(403).json({ error: 'Profile deactivated.' });
+
+        await resetFailedPinAttempts(candidate.badge_id);
+        const { pin_hash, ...user } = candidate;
+        req.session.user = { badge_id: user.badge_id };
+        res.json({ success: true, user });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error during login.' });
+    }
+});
+
+// Restores admin login state on page reload -- admin.js calls this on load instead of
+// always showing the login wall. req.session.user only ever holds badge_id (see
+// /api/login); role/dept/name are re-fetched fresh here rather than trusted from a
+// stale session snapshot, same reasoning as requireRole().
+app.get('/api/session', async (req, res) => {
+    if (!req.session.user) return res.status(401).json({ error: 'Not logged in.' });
+    try {
+        const result = await pool.query(
+            'SELECT user_id, badge_id, full_name, username, role, is_active FROM users WHERE badge_id = $1',
+            [req.session.user.badge_id]
+        );
+        if (result.rows.length === 0 || !result.rows[0].is_active) {
+            req.session.destroy(() => {});
+            return res.status(401).json({ error: 'Not logged in.' });
+        }
+        res.json({ success: true, user: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error.' });
+    }
+});
+
+app.post('/api/logout', (req, res) => {
+    req.session.destroy((err) => {
+        res.clearCookie('tt.sid');
+        if (err) return res.status(500).json({ error: 'Logout failed.' });
+        res.json({ success: true });
+    });
+});
+
+// Kiosk login: identify a user by badge_id/username + PIN for quick kiosk access.
+app.post('/api/kiosk-auth', authLimiter, async (req, res) => {
+    const { login_id, pin } = req.body;
+    try {
+        const query = `
+            SELECT user_id, badge_id, full_name, role, is_active, dept_id, pin_hash
+            FROM users WHERE (badge_id ILIKE $1 OR username ILIKE $1)
+        `;
+        const result = await pool.query(query, [login_id]);
 
         // Same message whether login_id is unknown or the pin is wrong, to avoid enumeration.
         if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid Credentials.', code: 'BAD_CREDENTIALS' });
-        if (!result.rows[0].is_active) return res.status(403).json({ error: 'Profile deactivated.', code: 'INACTIVE_USER' });
+        const candidate = result.rows[0];
 
-        res.json({ success: true, user: result.rows[0] });
+        const lockout = await checkLockout(candidate.badge_id);
+        if (lockout.locked) return res.status(423).json(LOCKOUT_RESPONSE);
+
+        if (!(await bcrypt.compare(pin, candidate.pin_hash))) {
+            await recordFailedPinAttempt(candidate.badge_id);
+            return res.status(401).json({ error: 'Invalid Credentials.', code: 'BAD_CREDENTIALS' });
+        }
+        if (!candidate.is_active) return res.status(403).json({ error: 'Profile deactivated.', code: 'INACTIVE_USER' });
+
+        await resetFailedPinAttempts(candidate.badge_id);
+        const { pin_hash, ...user } = candidate;
+        res.json({ success: true, user });
     } catch (err) {
         res.status(500).json({ error: 'Server error.' });
     }
@@ -297,29 +563,20 @@ app.post('/api/kiosk-auth', async (req, res) => {
 // 3. USER MANAGEMENT & SELF-SERVICE
 // ==========================================
 // List active users with a lower role weight than the requester (any authenticated requester).
-app.get('/api/users', async (req, res) => {
-    const requesterBadge = req.query.requester;
-    if (!requesterBadge) return res.status(401).json({ error: 'Unauthorized.' });
-    
+app.get('/api/users', requireRole(1), async (req, res) => {
     try {
-        const reqUser = await pool.query('SELECT role, dept_id FROM users WHERE badge_id = $1 AND is_active = true', [requesterBadge]);
-        if (reqUser.rows.length === 0) return res.status(403).json({ error: 'Invalid account.' });
-        
-        const requester = reqUser.rows[0];
-        const reqWeight = getRoleWeight(requester.role);
-
         // Fetching photo_url for the UI
         const query = `
-            SELECT u.user_id, u.badge_id, u.username, u.email, u.full_name, u.role, d.name AS department_name, u.photo_url 
-            FROM users u LEFT JOIN departments d ON u.dept_id = d.dept_id 
+            SELECT u.user_id, u.badge_id, u.username, u.email, u.full_name, u.role, d.name AS department_name, u.photo_url
+            FROM users u LEFT JOIN departments d ON u.dept_id = d.dept_id
             WHERE u.is_active = true ORDER BY u.full_name ASC
         `;
         const result = await pool.query(query);
-        const filteredUsers = result.rows.filter(u => getRoleWeight(u.role) < reqWeight);
-        
+        const filteredUsers = result.rows.filter(u => getRoleWeight(u.role) < req.authUser.weight);
+
         res.json({ success: true, users: filteredUsers });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to fetch users.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch users.' });
     }
 });
 
@@ -341,17 +598,18 @@ app.get('/api/roster', async (req, res) => {
 
 // Create a new user account. Requester must outrank the target role (getRoleWeight hierarchy check);
 // generates badge_id/username/PIN and "sends" a welcome email.
-app.post('/api/users', async (req, res) => {
-    const { full_name, email, dept_id, role, requester } = req.body;
-    const client = await pool.connect(); 
-    
+app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
+    const { full_name, email, dept_id, role } = req.body;
+    const client = await pool.connect();
+
     try {
         await client.query('BEGIN');
-        const auth = await client.query('SELECT role, dept_id FROM users WHERE badge_id = $1', [requester]);
-        if (auth.rows.length === 0) throw new Error('Access Denied.');
-        if (getRoleWeight(auth.rows[0].role) <= getRoleWeight(role)) throw new Error('Hierarchy Violation.');
+        if (!['super_admin', 'dept_admin', 'tool_rep', 'technician'].includes(role)) {
+            throw new Error('Invalid role.');
+        }
+        if (req.authUser.weight <= getRoleWeight(role)) throw new Error('Hierarchy Violation.');
 
-        const finalDeptId = auth.rows[0].role === 'super_admin' ? dept_id : auth.rows[0].dept_id;
+        const finalDeptId = req.authUser.role === 'super_admin' ? dept_id : req.authUser.dept_id;
         if (!email || !email.includes('@')) throw new Error('Valid email address required.');
         const username = email.split('@')[0].toLowerCase();
 
@@ -363,12 +621,15 @@ app.post('/api/users', async (req, res) => {
         const badge_id = prefix + String((maxRes.rows[0].max_num || 0) + 1).padStart(3, '0');
 
         const newPin = generatePin();
-        const insertQuery = `INSERT INTO users (badge_id, full_name, email, username, dept_id, role, pin) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`;
-        const result = await client.query(insertQuery, [badge_id, full_name, email, username, finalDeptId, role, newPin]);
+        const insertQuery = `INSERT INTO users (badge_id, full_name, email, username, dept_id, role, pin_hash) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`;
+        const result = await client.query(insertQuery, [badge_id, full_name, email, username, finalDeptId, role, await hashPin(newPin)]);
 
         await client.query('COMMIT');
-        simulateEmail(email, 'Welcome to LTA Tracker', `Username: ${username}\nBadge ID: ${badge_id}\nTemporary PIN: ${newPin}`);
-        res.json({ success: true, user: result.rows[0] });
+        // The plaintext PIN only ever exists in memory for this one response -- it's never
+        // stored (pin_hash is what was inserted above). There's no email delivery, so the
+        // admin panel shows it directly via showCredentialsModal() for manual handout.
+        const { pin_hash, ...newUser } = result.rows[0];
+        res.json({ success: true, user: { ...newUser, pin: newPin } });
     } catch (err) {
         await client.query('ROLLBACK');
         res.status(400).json({ error: err.message || 'Failed to create user.' });
@@ -378,21 +639,21 @@ app.post('/api/users', async (req, res) => {
 });
 
 // Reset a user's PIN. Requester must outrank the target user (getRoleWeight hierarchy check).
-app.post('/api/users/:badge_id/reset-pin', async (req, res) => {
-    const { badge_id } = req.params; 
-    const { requester } = req.body;
+app.post('/api/users/:badge_id/reset-pin', requireFetchHeader, requireRole(1), async (req, res) => {
+    const { badge_id } = req.params;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        const target = await pool.query('SELECT role, email, full_name FROM users WHERE badge_id = $1', [badge_id]);
-        
+        const target = await pool.query('SELECT role FROM users WHERE badge_id = $1', [badge_id]);
+
         if (target.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
-        if (getRoleWeight(auth.rows[0].role) <= getRoleWeight(target.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
+        if (req.authUser.weight <= getRoleWeight(target.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
 
         const newPin = generatePin();
-        await pool.query('UPDATE users SET pin = $1 WHERE badge_id = $2', [newPin, badge_id]);
-        simulateEmail(target.rows[0].email, 'PIN Reset', `New temporary PIN: ${newPin}`);
-        // Return the new PIN so the admin panel can display it directly -- email delivery
-        // isn't configured yet, so this is currently the only way an admin can relay it.
+        await pool.query(
+            'UPDATE users SET pin_hash = $1, failed_pin_attempts = 0, locked_until = NULL WHERE badge_id = $2',
+            [await hashPin(newPin), badge_id]
+        );
+        // Return the new PIN so the admin panel can display it directly -- there is no
+        // email delivery; relaying credentials to the person is a manual admin step.
         res.json({ success: true, new_pin: newPin });
     } catch (err) {
         res.status(500).json({ error: 'Failed to reset PIN.' });
@@ -400,31 +661,39 @@ app.post('/api/users/:badge_id/reset-pin', async (req, res) => {
 });
 
 // Deactivate a user account. Requester must outrank the target user (getRoleWeight hierarchy check).
-app.put('/api/users/:badge_id/deactivate', async (req, res) => {
-    const { badge_id } = req.params; 
-    const { requester } = req.body;
+app.put('/api/users/:badge_id/deactivate', requireFetchHeader, requireRole(1), async (req, res) => {
+    const { badge_id } = req.params;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
         const target = await pool.query('SELECT role FROM users WHERE badge_id = $1', [badge_id]);
-        
-        if (getRoleWeight(auth.rows[0].role) <= getRoleWeight(target.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
+        if (target.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+        if (req.authUser.weight <= getRoleWeight(target.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
 
         await pool.query('UPDATE users SET is_active = false WHERE badge_id = $1', [badge_id]);
         res.json({ success: true });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed.' });
     }
 });
 
-// Self-service: let the requester update their own username and/or PIN (no role check).
-app.put('/api/users/me/update', async (req, res) => {
-    const { requester, new_username, new_pin } = req.body;
+// Self-service: let the logged-in admin update their own username and/or PIN. Scoped to
+// req.authUser.badge_id (the verified session), never a client-supplied badge -- this
+// used to let anyone change *any* badge's credentials by passing it as `requester`.
+app.put('/api/users/me/update', requireFetchHeader, requireRole(1), async (req, res) => {
+    const { new_username, new_pin } = req.body;
     try {
-        if (new_username) await pool.query('UPDATE users SET username = $1 WHERE badge_id = $2', [new_username, requester]);
-        if (new_pin) await pool.query('UPDATE users SET pin = $1 WHERE badge_id = $2', [new_pin, requester]);
+        if (new_username) await pool.query('UPDATE users SET username = $1 WHERE badge_id = $2', [new_username, req.authUser.badge_id]);
+        if (new_pin) {
+            if (!/^\d{4,10}$/.test(new_pin)) {
+                return res.status(400).json({ error: 'PIN must be 4-10 digits.' });
+            }
+            await pool.query(
+                'UPDATE users SET pin_hash = $1, failed_pin_attempts = 0, locked_until = NULL WHERE badge_id = $2',
+                [await hashPin(new_pin), req.authUser.badge_id]
+            );
+        }
         res.json({ success: true });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to update account.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update account.' });
     }
 });
 
@@ -446,12 +715,9 @@ app.get('/api/storage', async (req, res) => {
 });
 
 // Create a new department. Requires super_admin (getRoleWeight >= 4).
-app.post('/api/departments', async (req, res) => {
-    const { name, prefix_code, requester } = req.body;
+app.post('/api/departments', requireFetchHeader, requireRole(4), async (req, res) => {
+    const { name, prefix_code } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 4) return res.status(403).json({ error: 'Super Admin clearance required.' });
-        
         const result = await pool.query('INSERT INTO departments (name, prefix_code) VALUES ($1, $2) RETURNING *', [name, prefix_code.toUpperCase()]);
         res.json({ success: true, department: result.rows[0] });
     } catch (err) { 
@@ -479,16 +745,13 @@ app.get('/api/toolboxes/next-id', async (req, res) => {
 });
 
 // Smart Builder: Create Box AND its Drawers in one transaction. Requires dept_admin+ (getRoleWeight >= 3).
-app.post('/api/toolboxes', async (req, res) => {
-    const { name, dept_id, qr_code, drawer_count, requester } = req.body;
+app.post('/api/toolboxes', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { name, dept_id, qr_code, drawer_count } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
-        
-        const auth = await client.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 3) throw new Error('Admin required.');
-        
+
         // 1. Create the Toolbox with its Barcode ID
         const boxRes = await client.query(
             'INSERT INTO toolboxes (dept_id, name, qr_code) VALUES ($1, $2, $3) RETURNING *', 
@@ -517,12 +780,9 @@ app.post('/api/toolboxes', async (req, res) => {
 });
 
 // Create a new drawer inside a toolbox. Requires dept_admin+ (getRoleWeight >= 3).
-app.post('/api/drawers', async (req, res) => {
-    const { box_id, name, requester } = req.body;
+app.post('/api/drawers', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { box_id, name } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Admin required.' });
-        
         const result = await pool.query('INSERT INTO drawers (box_id, name) VALUES ($1, $2) RETURNING *', [box_id, name]);
         res.json({ success: true, drawer: result.rows[0] });
     } catch (err) { 
@@ -531,8 +791,8 @@ app.post('/api/drawers', async (req, res) => {
     }
 });
 
-// Delete a department, but only if it has no toolboxes assigned to it. No role check.
-app.delete('/api/departments/:id', async (req, res) => {
+// Delete a department, but only if it has no toolboxes assigned to it. Requires super_admin.
+app.delete('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, res) => {
     try {
         const check = await pool.query('SELECT COUNT(*) FROM toolboxes WHERE dept_id = $1', [req.params.id]);
         if (parseInt(check.rows[0].count) > 0) return res.status(400).json({ error: 'Cannot delete: Not empty.' });
@@ -543,8 +803,8 @@ app.delete('/api/departments/:id', async (req, res) => {
     }
 });
 
-// Delete a toolbox, but only if it has no drawers and no tools assigned to it. No role check.
-app.delete('/api/toolboxes/:id', async (req, res) => {
+// Delete a toolbox, but only if it has no drawers and no tools assigned to it. Requires dept_admin+.
+app.delete('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req, res) => {
     try {
         const checkDrawers = await pool.query('SELECT COUNT(*) FROM drawers WHERE box_id = $1', [req.params.id]);
         // FIX: tools has no box_id column; tools relate to toolboxes only via drawer_id -> drawers.box_id.
@@ -558,8 +818,8 @@ app.delete('/api/toolboxes/:id', async (req, res) => {
     }
 });
 
-// Delete a drawer, but only if it has no tools assigned to it. No role check.
-app.delete('/api/drawers/:id', async (req, res) => {
+// Delete a drawer, but only if it has no tools assigned to it. Requires dept_admin+.
+app.delete('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res) => {
     try {
         const checkTools = await pool.query('SELECT COUNT(*) FROM tools WHERE drawer_id = $1', [req.params.id]);
         if (parseInt(checkTools.rows[0].count) > 0) return res.status(400).json({ error: 'Cannot delete: Not empty.' });
@@ -574,12 +834,9 @@ app.delete('/api/drawers/:id', async (req, res) => {
 // 5. ASSET CREATION & DELETION
 // ==========================================
 // Create a new tool, optionally retiring/replacing an existing tool_id. Requires tool_rep+ (getRoleWeight >= 2).
-app.post('/api/tools', async (req, res) => {
-    const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, requester, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
+app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep clearance required.' });
-
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
@@ -607,13 +864,9 @@ app.post('/api/tools', async (req, res) => {
 });
 
 // Delete a tool and its audit log history. Requires tool_rep+ (getRoleWeight >= 2).
-app.delete('/api/tools/:tool_id', async (req, res) => {
+app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req, res) => {
     const { tool_id } = req.params;
-    const { requester } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep clearance required.' });
-
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
@@ -632,34 +885,27 @@ app.delete('/api/tools/:tool_id', async (req, res) => {
 });
 
 // Update a Toolbox. Requires dept_admin+ (getRoleWeight >= 3).
-app.put('/api/toolboxes/:id', async (req, res) => {
-    const { name, requester } = req.body;
+app.put('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { name } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Admin required.' });
         await pool.query('UPDATE toolboxes SET name = $1 WHERE box_id = $2', [name, req.params.id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Failed to update toolbox.' }); }
 });
 
 // Update a Drawer. Requires dept_admin+ (getRoleWeight >= 3).
-app.put('/api/drawers/:id', async (req, res) => {
-    const { name, requester } = req.body;
+app.put('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { name } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Admin required.' });
         await pool.query('UPDATE drawers SET name = $1 WHERE drawer_id = $2', [name, req.params.id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Failed to update drawer.' }); }
 });
 
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
-app.put('/api/tools/:id', async (req, res) => {
-    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, requester, serial_number, part_number } = req.body;
+app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (getRoleWeight(auth.rows[0].role) < 2) return res.status(403).json({ error: 'Tool Rep required.' });
-
         // If they checked the box but didn't provide a due date, throw an error
         if (is_calibrated && !cal_due_date) {
             return res.status(400).json({ error: 'Calibration Due Date is required.' });
@@ -695,23 +941,17 @@ app.put('/api/tools/:id', async (req, res) => {
 // ==========================================
 // Upload a photo and attach it to a user/tool/toolbox/drawer record. Requires tool_rep+ (getRoleWeight >= 2)
 // for tool photos, and dept_admin+ (getRoleWeight >= 3) for user/toolbox/drawer photos.
-app.post('/api/upload', upload.single('photo'), async (req, res) => {
-    const { requester, entity_type, entity_id } = req.body;
-    
+app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo'), async (req, res) => {
+    const { entity_type, entity_id } = req.body;
+
     if (!req.file) return res.status(400).json({ error: 'No image file provided.' });
-    if (!requester || !entity_type || !entity_id) {
+    if (!entity_type || !entity_id) {
         fs.unlinkSync(req.file.path);
         return res.status(400).json({ error: 'Missing required fields.' });
     }
 
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1', [requester]);
-        if (auth.rows.length === 0) throw new Error('Unauthorized.');
-        
-        const weight = getRoleWeight(auth.rows[0].role);
-        
-        if (weight < 2) throw new Error('Insufficient permissions to upload images.');
-        if (weight < 3 && (entity_type === 'user' || entity_type === 'toolbox' || entity_type === 'drawer')) {
+        if (req.authUser.weight < 3 && (entity_type === 'user' || entity_type === 'toolbox' || entity_type === 'drawer')) {
             throw new Error('You only have permission to upload tool assets.');
         }
 
@@ -742,7 +982,7 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 // Process Tool Check-in / Check-out. Requires dual-PIN sign-off for every transaction (technician
 // badge+pin, PLUS a manager/tool_rep+ sign-off PIN belonging to a different person) and, for
 // checkouts, a same-day AUDIT of the tool's home department (see getAuditGatePendingToolboxes).
-app.post('/api/transactions', async (req, res) => {
+app.post('/api/transactions', authLimiter, async (req, res) => {
     const { badge_id, pin, action, qr_codes, manager_pin } = req.body;
     const client = await pool.connect();
 
@@ -750,12 +990,17 @@ app.post('/api/transactions', async (req, res) => {
         await client.query('BEGIN');
 
         // 1. Authenticate the Technician (badge_id + pin)
-        const userRes = await client.query('SELECT user_id, dept_id, role, full_name, badge_id FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, dept_id, role, full_name, badge_id, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         // 2. Manager/sign-off PIN is now always required, for both checkout and check-in.
         if (!manager_pin) {
@@ -763,12 +1008,24 @@ app.post('/api/transactions', async (req, res) => {
             return res.status(400).json({ error: 'Manager sign-off PIN is required.', code: 'SIGNOFF_REQUIRED' });
         }
 
-        const mgrRes = await client.query("SELECT user_id, full_name, badge_id, role FROM users WHERE pin = $1 AND role IN ('super_admin', 'dept_admin', 'tool_rep') AND is_active = true", [manager_pin]);
-        if (mgrRes.rows.length === 0) {
+        // Hashed PINs can't be matched via a SQL WHERE clause (no signer badge_id is known
+        // ahead of time -- the sign-off is identified purely by whoever's PIN matches), so
+        // every active qualifying candidate is fetched and checked in turn. Shop-scale
+        // candidate counts (dozens at most) make this negligible at bcrypt's cost factor.
+        const candidatesRes = await client.query(
+            "SELECT user_id, full_name, badge_id, role, pin_hash FROM users WHERE role IN ('super_admin', 'dept_admin', 'tool_rep') AND is_active = true"
+        );
+        let signoff = null;
+        for (const candidate of candidatesRes.rows) {
+            if (await bcrypt.compare(manager_pin, candidate.pin_hash)) {
+                signoff = candidate;
+                break;
+            }
+        }
+        if (!signoff) {
             await client.query('ROLLBACK');
             return res.status(403).json({ error: 'Invalid Manager PIN or insufficient permissions.', code: 'BAD_PIN' });
         }
-        const signoff = mgrRes.rows[0];
 
         // 3. The sign-off person cannot be the same person as the technician.
         if (signoff.user_id === user.user_id) {
@@ -813,7 +1070,9 @@ app.post('/api/transactions', async (req, res) => {
                     return res.status(403).json({ error: `Checkout Blocked: ${tool.name} is currently in a QA transfer.`, code: 'TOOL_IN_TRANSFER' });
                 }
 
-                // C. AUDIT GATE (skip if the tool has no resolvable home department)
+                // C. AUDIT GATE (skip if the tool has no resolvable home department) --
+                // uses getAuditGatePendingToolboxes()'s default windowStart (the current
+                // morning-or-afternoon window, see getAuditWindowStart), not a calendar day.
                 if (tool.tool_dept_id != null) {
                     if (!(tool.tool_dept_id in auditGateCache)) {
                         auditGateCache[tool.tool_dept_id] = await getAuditGatePendingToolboxes(client, tool.tool_dept_id);
@@ -821,7 +1080,7 @@ app.post('/api/transactions', async (req, res) => {
                     const pendingToolboxes = auditGateCache[tool.tool_dept_id];
                     if (pendingToolboxes.length > 0) {
                         await client.query('ROLLBACK');
-                        return res.status(403).json({ error: `Checkout Blocked: department has not completed today's audit.`, code: 'AUDIT_REQUIRED', pending_toolboxes: pendingToolboxes });
+                        return res.status(403).json({ error: `Checkout Blocked: department has not completed the required audit for this shift.`, code: 'AUDIT_REQUIRED', pending_toolboxes: pendingToolboxes });
                     }
                 }
 
@@ -847,14 +1106,8 @@ app.post('/api/transactions', async (req, res) => {
 });
 
 // Fetch the 50 most recent audit log entries. Requires dept_admin+ (getRoleWeight >= 3).
-app.get('/api/audit', async (req, res) => {
-    const requesterBadge = req.query.requester;
-    if (!requesterBadge) return res.status(401).json({ error: 'Unauthorized.' });
-    
+app.get('/api/audit', requireRole(3), async (req, res) => {
     try {
-        const auth = await pool.query('SELECT role FROM users WHERE badge_id = $1 AND is_active = true', [requesterBadge]);
-        if (getRoleWeight(auth.rows[0].role) < 3) return res.status(403).json({ error: 'Access Denied.' });
-        
         const query = `
             SELECT a.log_id, a.action, a.timestamp, a.notes, u.full_name AS user_name, u.badge_id, t.qr_code, t.name AS tool_name 
             FROM audit_logs a LEFT JOIN users u ON a.user_id = u.user_id LEFT JOIN tools t ON a.tool_id = t.tool_id 
@@ -908,31 +1161,23 @@ app.post('/api/audits/submit', async (req, res) => {
     }
 });
 
-// Admin-panel-facing: today's audit-gate status for every department, reusing the same
-// AUDIT GATE helper the checkout flow relies on (empty pending-toolbox list => audited today).
+// Admin-panel-facing: current-audit-window status for every department, reusing the same
+// AUDIT GATE helper the checkout flow relies on (empty pending-toolbox list => audited
+// since the current window began -- see getAuditWindowStart for the morning/afternoon split).
 app.get('/api/audits/today-status', async (req, res) => {
     try {
         const depts = await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC');
+        const windowStart = getAuditWindowStart();
 
         const departments = await Promise.all(depts.rows.map(async (dept) => {
-            const pending = await getAuditGatePendingToolboxes(pool, dept.dept_id);
-            const audit_completed = pending.length === 0;
-
-            let completed_at = null;
-            if (audit_completed) {
-                const completedRes = await pool.query(
-                    `SELECT MAX(a.timestamp) AS completed_at
-                     FROM audit_logs a
-                     JOIN tools t ON a.tool_id = t.tool_id
-                     JOIN drawers dr ON t.drawer_id = dr.drawer_id
-                     JOIN toolboxes b ON dr.box_id = b.box_id
-                     WHERE a.action = 'AUDIT' AND a.timestamp::date = CURRENT_DATE AND b.dept_id = $1`,
-                    [dept.dept_id]
-                );
-                completed_at = completedRes.rows[0].completed_at;
-            }
-
-            return { dept_id: dept.dept_id, name: dept.name, audit_completed, completed_at };
+            const { pending, completion } = await getAuditWindowCompletionInfo(dept.dept_id, windowStart);
+            return {
+                dept_id: dept.dept_id,
+                name: dept.name,
+                audit_completed: pending.length === 0,
+                completed_at: completion ? completion.timestamp : null,
+                window_start: windowStart,
+            };
         }));
 
         res.json({ success: true, departments });
@@ -951,7 +1196,7 @@ app.get('/api/audits/today-status', async (req, res) => {
 
 // Report a tool issue from the kiosk (Broken/Missing/Worn). Requires a valid technician badge+pin;
 // tool must currently be 'In'.
-app.post('/api/kiosk/report-issue', async (req, res) => {
+app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
     const { badge_id, pin, qr_code, issue_type, notes } = req.body;
 
     if (!['Broken', 'Missing', 'Worn'].includes(issue_type)) {
@@ -963,12 +1208,17 @@ app.post('/api/kiosk/report-issue', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const userRes = await client.query('SELECT user_id FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         const toolRes = await client.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [qr_code]);
         if (toolRes.rows.length === 0) {
@@ -998,19 +1248,24 @@ app.post('/api/kiosk/report-issue', async (req, res) => {
 
 // Initiate a QA transfer for a tool. Home department is resolved server-side from the tool's
 // drawer_id -> drawers.box_id -> toolboxes.dept_id; never trusts a client-supplied home dept.
-app.post('/api/transfers/initiate', async (req, res) => {
+app.post('/api/transfers/initiate', authLimiter, async (req, res) => {
     const { badge_id, pin, qr_code, qa_dept_id, notes } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        const userRes = await client.query('SELECT user_id FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         const toolQuery = `
             SELECT t.tool_id, t.status, t.drawer_id, b.dept_id AS home_dept_id
@@ -1117,7 +1372,7 @@ app.get('/api/transfers', async (req, res) => {
 });
 
 // QA side accepts an incoming transfer and begins calibration.
-app.post('/api/transfers/:transfer_id/qa-accept', async (req, res) => {
+app.post('/api/transfers/:transfer_id/qa-accept', authLimiter, async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin } = req.body;
     const client = await pool.connect();
@@ -1125,12 +1380,17 @@ app.post('/api/transfers/:transfer_id/qa-accept', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const userRes = await client.query('SELECT user_id, dept_id, role FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -1171,7 +1431,7 @@ app.post('/api/transfers/:transfer_id/qa-accept', async (req, res) => {
 });
 
 // QA side marks calibration complete and sends the tool back to its home department.
-app.post('/api/transfers/:transfer_id/complete-cal', async (req, res) => {
+app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin, last_cal_date, cal_due_date } = req.body;
     const client = await pool.connect();
@@ -1179,12 +1439,17 @@ app.post('/api/transfers/:transfer_id/complete-cal', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const userRes = await client.query('SELECT user_id, dept_id, role FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -1235,7 +1500,7 @@ app.post('/api/transfers/:transfer_id/complete-cal', async (req, res) => {
 });
 
 // Home department accepts the returned, calibrated tool back.
-app.post('/api/transfers/:transfer_id/home-accept', async (req, res) => {
+app.post('/api/transfers/:transfer_id/home-accept', authLimiter, async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin } = req.body;
     const client = await pool.connect();
@@ -1243,12 +1508,17 @@ app.post('/api/transfers/:transfer_id/home-accept', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const userRes = await client.query('SELECT user_id, dept_id, role FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -1290,7 +1560,7 @@ app.post('/api/transfers/:transfer_id/home-accept', async (req, res) => {
 });
 
 // Cancel a transfer. Only legal while still AWAITING_QA_ACCEPT (before QA has taken possession).
-app.post('/api/transfers/:transfer_id/cancel', async (req, res) => {
+app.post('/api/transfers/:transfer_id/cancel', authLimiter, async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin, reason } = req.body;
     const client = await pool.connect();
@@ -1298,12 +1568,17 @@ app.post('/api/transfers/:transfer_id/cancel', async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const userRes = await client.query('SELECT user_id, role FROM users WHERE badge_id = $1 AND pin = $2 AND is_active = true', [badge_id, pin]);
-        if (userRes.rows.length === 0) {
+        const lockout = await checkLockout(badge_id);
+        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
+
+        const userRes = await client.query('SELECT user_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
+        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
+            await recordFailedPinAttempt(badge_id);
             await client.query('ROLLBACK');
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
         const user = userRes.rows[0];
+        await resetFailedPinAttempts(badge_id);
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -1396,16 +1671,11 @@ app.get('/api/dashboard', async (req, res) => {
 
 // Generate an AUDIT or FLAGGED report, scoped to a department if the requester is a dept_admin.
 // No explicit minimum role check (getRoleWeight is used only to derive queryDept), any authenticated user may call this.
-app.post('/api/reports/generate', async (req, res) => {
-    const { requester, report_type, dept_id, start_date, end_date } = req.body;
+app.post('/api/reports/generate', requireFetchHeader, requireRole(1), async (req, res) => {
+    const { report_type, dept_id, start_date, end_date } = req.body;
     try {
-        const auth = await pool.query('SELECT role, dept_id FROM users WHERE badge_id = $1', [requester]);
-        if (auth.rows.length === 0) return res.status(403).json({ error: 'Unauthorized.' });
-        
-        const user = auth.rows[0];
-        const weight = getRoleWeight(user.role);
         let queryDept = dept_id;
-        if (weight === 3) queryDept = user.dept_id;
+        if (req.authUser.weight === 3) queryDept = req.authUser.dept_id;
 
         let data = [];
         if (report_type === 'AUDIT') {
@@ -1718,32 +1988,20 @@ async function generateDailyLog() {
                 [deptId]
             );
 
-            // AUDIT STATUS (reuse the audit-gate helper from stage 1)
-            const pendingToolboxes = await getAuditGatePendingToolboxes(pool, deptId);
-            let auditStatusLine;
-            if (pendingToolboxes.length === 0) {
-                const completedRes = await pool.query(
-                    `SELECT a.timestamp, u.full_name, u.badge_id
-                     FROM audit_logs a
-                     JOIN users u ON a.user_id = u.user_id
-                     JOIN tools t ON a.tool_id = t.tool_id
-                     JOIN drawers dr ON t.drawer_id = dr.drawer_id
-                     JOIN toolboxes b ON dr.box_id = b.box_id
-                     WHERE a.action = 'AUDIT' AND a.timestamp::date = CURRENT_DATE AND b.dept_id = $1
-                     ORDER BY a.timestamp DESC LIMIT 1`,
-                    [deptId]
-                );
-                if (completedRes.rows.length > 0) {
-                    const completion = completedRes.rows[0];
-                    const completedTime = new Date(completion.timestamp).toTimeString().slice(0, 5);
-                    auditStatusLine = `Completed today at ${completedTime} by ${completion.full_name} (${completion.badge_id})`;
-                } else {
-                    // No auditable toolboxes in this department at all -> gate trivially passes.
-                    auditStatusLine = `Completed today at N/A (no auditable toolboxes)`;
-                }
-            } else {
-                auditStatusLine = `NOT audited today`;
-            }
+            // AUDIT STATUS -- report BOTH mandatory windows for the day being logged (morning
+            // 04:00-14:00, afternoon 14:00-04:00 overnight), not just whichever is active right
+            // now. Built from `now`'s own local date components (not the UTC-derived dateString
+            // string above) so this lines up exactly with getAuditWindowStart()'s local-time math.
+            // Note: since this job runs at midnight, the afternoon window (which continues until
+            // 04:00 the next day) is only partially elapsed at that point -- its status here is
+            // an honest snapshot of "as of midnight", not a final verdict on the whole window.
+            const morningWindowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), AUDIT_MORNING_START_HOUR, 0, 0, 0);
+            const afternoonWindowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), AUDIT_AFTERNOON_START_HOUR, 0, 0, 0);
+            const [morningStatus, afternoonStatus] = await Promise.all([
+                describeAuditWindowStatus(deptId, morningWindowStart),
+                describeAuditWindowStatus(deptId, afternoonWindowStart),
+            ]);
+            const auditStatusLine = `Morning (04:00-14:00): ${morningStatus} | Afternoon (14:00-04:00): ${afternoonStatus}`;
 
             // Build the log block
             let block = `\n[DAILY SNAPSHOT] ${dateString} -- DEPT=${prefix}\n`;
@@ -1810,6 +2068,13 @@ setInterval(() => {
 // ==========================================
 // SERVER STARTUP
 // ==========================================
-app.listen(3000, '0.0.0.0', () => { 
-    console.log(`Backend API running on port 3000.`); 
+// Plain HTTP on 3000 -- fine for same-machine access (http://localhost:3000, where camera
+// access still works since browsers special-case "localhost" as a secure context) and for
+// Caddy (see Caddyfile) to reverse-proxy from. Real HTTPS for every other device (phones,
+// etc. -- required for camera access anywhere other than localhost) is handled by Caddy in
+// front of this app, using a genuinely trusted Let's Encrypt certificate via DNS-01 against
+// a DuckDNS name, rather than a self-signed dev certificate that would need installing on
+// every device by hand. Run Caddy alongside this process: ./caddy.exe run
+app.listen(3000, '0.0.0.0', () => {
+    console.log(`Backend API running on port 3000 (HTTP).`);
 });

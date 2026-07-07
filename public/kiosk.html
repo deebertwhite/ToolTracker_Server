@@ -4,10 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LTA Kiosk — Tool Tracking</title>
-    
+
     <link rel="stylesheet" href="style.css">
-    
+
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <!-- PWA: installing from this page creates a "Kiosk" home-screen icon that opens
+         straight to the kiosk screen -- see manifest-kiosk.json. -->
+    <link rel="manifest" href="manifest-kiosk.json">
+    <meta name="theme-color" content="#111315">
+    <link rel="icon" href="icons/favicon-32.png">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Kiosk">
 </head>
 <body class="kiosk-layout">
 
@@ -69,7 +79,7 @@
                 <div class="auth-sub">Scan Badge or Enter Username</div>
             </div>
             
-            <div id="auth-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+            <div id="auth-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
 
             <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
                 <input class="form-input" id="auth-badge-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Badge or Username..." onkeydown="if(event.key==='Enter')authenticateUser()">
@@ -124,8 +134,9 @@
                     <div style="font-weight: 600;" id="scan-prompt">Ready to Scan Tool</div>
                 </div>
 
-                <div id="reader" style="width: 100%; max-width: 600px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
-                <button class="btn btn-secondary" style="width: 100%; margin-bottom: 14px;" onclick="startToolCameraScanner('reader', 'kiosk-scan-input', handleToolScan)">📱 Open Camera Scanner</button>
+                <div id="reader" class="camera-reader" style="width: 100%; max-width: 600px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+                <button class="btn btn-secondary" id="btn-open-scanner" style="width: 100%; margin-bottom: 14px;" onclick="startToolCameraScanner('reader', 'kiosk-scan-input', handleToolScan, true)">📱 Open Camera Scanner</button>
+                <button class="btn btn-success" id="btn-done-scanner" style="width: 100%; margin-bottom: 14px; display: none;" onclick="stopContinuousScanner('reader')">✅ Done Scanning (<span id="queue-count-live">0</span> added)</button>
 
                 <div class="form-group">
                     <input class="form-input" id="kiosk-scan-input" placeholder="Scan hardware or type serial..." onkeydown="if(event.key==='Enter')handleToolScan()">
@@ -146,7 +157,7 @@
                  instead of the normal report-issue endpoint. -->
             <div class="card" id="panel-report" style="display: none; width: 100%; max-width: 600px;">
                 <div class="section-title">⚠️ Report Damaged or Missing Asset</div>
-                <div id="report-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+                <div id="report-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
                 
                 <div class="form-group">
                     <label class="form-label">Tool Barcode / Serial</label>
@@ -207,13 +218,14 @@
                         </div>
                     </div>
 
-                    <div id="audit-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+                    <div id="audit-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
 
                     <div class="form-group">
                         <label class="form-label">Scan Tool to Check Off List</label>
                         <div style="display: flex; gap: 8px;">
                             <input class="form-input" id="audit-scan-input" placeholder="Scan barcode..." onkeydown="if(event.key==='Enter')handleAuditScan()">
-                            <button class="btn-icon" onclick="startToolCameraScanner('audit-reader', 'audit-scan-input', handleAuditScan)">📷</button>
+                            <button class="btn-icon" id="btn-open-audit-scanner" onclick="startToolCameraScanner('audit-reader', 'audit-scan-input', handleAuditScan, true)">📷</button>
+                            <button class="btn-icon" id="btn-done-audit-scanner" style="display: none; color: var(--green);" onclick="stopContinuousScanner('audit-reader')" title="Done Scanning">✅</button>
                         </div>
                     </div>
 
@@ -297,8 +309,8 @@
     <div id="audit-gate-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 420px; border-top: 3px solid var(--orange); text-align: center;">
             <div style="font-size: 40px; margin-bottom: 10px;">📋</div>
-            <h3 style="margin-bottom: 10px;">Daily Audit Required</h3>
-            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">The following toolbox(es) have not been audited today. A checkout cannot be completed until today's audit is logged.</p>
+            <h3 style="margin-bottom: 10px;">Shift Audit Required</h3>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">The following toolbox(es) have not been audited yet this shift (morning 04:00-14:00 or afternoon 14:00-04:00). A checkout cannot be completed until this shift's audit is logged.</p>
 
             <div id="audit-gate-box-list" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
 
@@ -311,5 +323,6 @@
     <div class="toast" id="kiosk-toast">Toast Message</div>
 
     <script src="kiosk.js"></script>
+    <script src="sw-register.js"></script>
 </body>
 </html>

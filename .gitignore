@@ -1,2 +1,9 @@
 node_modules/
 .env
+tool_labels/
+certs/
+caddy.exe
+caddy-for-raspberry-pi/
+Caddyfile
+logs/
+.claude/

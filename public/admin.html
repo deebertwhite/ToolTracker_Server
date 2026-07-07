@@ -6,6 +6,16 @@
     <title>LTA Admin Portal</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <!-- PWA: installing from this page creates an "LTA Admin" home-screen icon that opens
+         straight to the admin portal -- see manifest-admin.json. -->
+    <link rel="manifest" href="manifest-admin.json">
+    <meta name="theme-color" content="#111315">
+    <link rel="icon" href="icons/favicon-32.png">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="LTA Admin">
 </head>
 <body class="admin-layout">
 
@@ -17,7 +27,7 @@
         <h2 style="margin-bottom: 8px; text-align: center;">LTA Portal Login</h2>
         <p style="color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 24px;">Enter Badge ID or Username</p>
         
-        <div id="admin-auth-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+        <div id="admin-auth-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
         
         <div class="form-group">
             <label class="form-label">Identifier (Badge or Username)</label>
@@ -41,7 +51,7 @@
                 <h2>LTA Central Hub</h2>
                 <div style="color: var(--muted); font-size: 13px;" id="admin-name">Logged in as: ---</div>
             </div>
-            <div><button class="btn btn-secondary" style="width: auto;" onclick="window.location.reload()">Sign Out</button></div>
+            <div><button class="btn btn-secondary" style="width: auto;" onclick="logoutAdmin()">Sign Out</button></div>
         </div>
 
         <!-- Hub view: top-level landing grid with 4 cards (Account, Personnel, Inventory, Reports); each card calls openWorkspace() to reveal its panel below -->
@@ -153,7 +163,8 @@
                 <div id="panel-inv-tree" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
                     <div class="card" id="audit-status-card">
-                        <h3 style="margin-bottom: 10px;">Today's Audit Status</h3>
+                        <h3 style="margin-bottom: 4px;">Current Shift Audit Status</h3>
+                        <div id="audit-status-window" style="font-size:11px; color:var(--muted); margin-bottom: 10px;"></div>
                         <div id="audit-status-body" style="display:flex; gap:10px; flex-wrap:wrap;">
                             <div style="color:var(--muted); font-size:12px;">Loading...</div>
                         </div>
@@ -195,7 +206,7 @@
 
                     <div class="card">
                         <h3 style="margin-bottom: 16px;">3. Ingest New Asset (Tools)</h3>
-                        <div id="admin-reader-add" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+                        <div id="admin-reader-add" class="camera-reader" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
                         <div class="flex-grid-3">
                             <div class="form-group" style="margin: 0;"><label class="form-label">Tool Name</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Detailed Description</label><input class="form-input" id="add-tool-desc" placeholder="e.g. Snap-on 72-tooth flex head"></div>
@@ -289,14 +300,14 @@
         <img id="image-modal-content" style="max-width: 95%; max-height: 95%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
     </div>
 
-    <!-- Credentials handout modal: shown after creating a user or resetting a PIN, since email
-         delivery isn't configured -- gives the operator something to relay to the person directly.
+    <!-- Credentials handout modal: shown after creating a user or resetting a PIN. This system
+         has no email delivery by design -- credentials are always relayed by the operator directly.
          Opened via showCredentialsModal(), explicit-close only (no click-outside-to-dismiss) since
          it displays one-time-sensitive info the operator should consciously finish reading first. -->
     <div id="cred-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 420px; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
             <h3 id="cred-modal-title" style="margin-bottom: 6px;">Credentials</h3>
-            <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Email delivery isn't set up yet -- relay these to the person directly, then close this window.</p>
+            <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Relay these to the person directly, then close this window.</p>
             <div id="cred-modal-body"></div>
             <div style="display: flex; gap: 10px; margin-top: 10px;">
                 <button class="btn btn-secondary" id="cred-modal-copy-btn" onclick="copyCredentialsToClipboard()">📋 Copy All</button>
@@ -306,5 +317,6 @@
     </div>
 
     <script src="admin.js"></script>
+    <script src="sw-register.js"></script>
 </body>
 </html>

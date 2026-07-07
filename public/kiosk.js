@@ -171,16 +171,30 @@ function setupActionScreen() {
 // ==========================================
 // 4. SCANNING (IN/OUT)
 // ==========================================
+/** True while #override-modal or #audit-gate-modal is open on top of #screen-action. */
+function isAnyKioskModalOpen() {
+    const overrideModal = document.getElementById('override-modal');
+    const auditGateModal = document.getElementById('audit-gate-modal');
+    return (overrideModal && overrideModal.style.display === 'flex') ||
+           (auditGateModal && auditGateModal.style.display === 'flex');
+}
+
 /**
  * Focuses the given scan input, but only while #screen-action is
  * actually visible (guards against stealing focus after navigating
- * away). Used both directly (scan-box click) and by the
- * auto-refocus blur listeners set up on DOMContentLoaded.
+ * away) AND no modal is currently open on top of it -- without that
+ * second check, the auto-refocus blur listeners below would yank
+ * focus back to the scan input the instant an operator clicked into
+ * the Supervisor Sign-Off PIN field (its own focus blurs the scan
+ * input, which re-triggers this function 200ms later), making the
+ * PIN field appear to "immediately unclick" itself. Used both
+ * directly (scan-box click) and by the auto-refocus blur listeners
+ * set up on DOMContentLoaded.
  */
 function focusScanInput(inputId) {
     const input = document.getElementById(inputId);
-    if(input && document.getElementById('screen-action').style.display === 'flex') {
-        input.focus(); 
+    if (input && document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen()) {
+        input.focus();
     }
 }
 
@@ -210,9 +224,13 @@ function handleToolScan() {
 /**
  * Redraws the #queue-count and #queue-list UI from the current
  * batchQueue array, including each item's remove ("✕") control.
+ * Also updates #queue-count-live, the same count shown on the
+ * "Done Scanning" button while a continuous scan session is open.
  */
 function renderQueue() {
     document.getElementById('queue-count').textContent = batchQueue.length;
+    const liveCount = document.getElementById('queue-count-live');
+    if (liveCount) liveCount.textContent = batchQueue.length;
     document.getElementById('queue-list').innerHTML = batchQueue.map((qr, index) => `
         <div class="batch-item">
             <div>🔧 <strong>${qr}</strong></div>
@@ -473,49 +491,101 @@ async function jumpToAuditFromGate(boxName) {
  */
 function killActiveCamera() {
     if (html5QrScannerInstance && html5QrScannerInstance.isScanning) {
-        html5QrScannerInstance.stop().then(() => { 
-            document.getElementById('reader').style.display = 'none'; 
-            document.getElementById('auth-reader').style.display = 'none'; 
-            document.getElementById('report-reader').style.display = 'none'; 
-            document.getElementById('audit-reader').style.display = 'none'; 
+        html5QrScannerInstance.stop().then(() => {
+            document.getElementById('reader').style.display = 'none';
+            document.getElementById('auth-reader').style.display = 'none';
+            document.getElementById('report-reader').style.display = 'none';
+            document.getElementById('audit-reader').style.display = 'none';
         }).catch(e => { console.error("Error stopping camera", e); });
     }
+    // Always resync both continuous-scan button pairs, not just when isScanning was true --
+    // callers like resetToIdle() should never leave a stray "Done Scanning" button visible.
+    setContinuousScanUI('reader', false);
+    setContinuousScanUI('audit-reader', false);
+}
+
+// Maps each reader element that supports continuous (batch) scanning to its Open/Done
+// button pair, so the UI can toggle which one is visible without threading extra
+// parameters through every call site. Readers not listed here (auth-reader,
+// report-reader) are single-shot only and have no Done button to manage.
+const CONTINUOUS_SCAN_BUTTONS = {
+    'reader': { openBtn: 'btn-open-scanner', doneBtn: 'btn-done-scanner' },
+    'audit-reader': { openBtn: 'btn-open-audit-scanner', doneBtn: 'btn-done-audit-scanner' },
+};
+
+/** Shows the "Done Scanning" control and hides "Open Camera Scanner" (or vice versa) for a given reader, if it has a registered button pair in CONTINUOUS_SCAN_BUTTONS. */
+function setContinuousScanUI(readerId, isScanning) {
+    const buttons = CONTINUOUS_SCAN_BUTTONS[readerId];
+    if (!buttons) return;
+    const openBtn = document.getElementById(buttons.openBtn);
+    const doneBtn = document.getElementById(buttons.doneBtn);
+    if (openBtn) openBtn.style.display = isScanning ? 'none' : '';
+    if (doneBtn) doneBtn.style.display = isScanning ? '' : 'none';
+}
+
+/** Stops a continuous batch-scanning session (the "Done Scanning" button's handler) and restores the Open Camera Scanner button. */
+function stopContinuousScanner(readerId) {
+    killActiveCamera();
+    setContinuousScanUI(readerId, false);
 }
 
 /**
  * Camera lifecycle: shared low-level driver behind all camera scan
  * buttons. Reveals the given preview element, (re)creates the
- * html5QrScannerInstance against it, picks the first available
- * camera device, and starts scanning. On a successful decode it
- * stops the camera, hides the preview, and invokes successCallback
- * with the decoded text. Surfaces toasts for no-camera and
- * permission-denied failure paths. Used by startAuthCameraScanner()
- * and startToolCameraScanner() to implement their specific flows.
+ * html5QrScannerInstance against it, and starts scanning using the
+ * rear-facing camera specifically (`facingMode: "environment"`,
+ * requested directly rather than enumerating devices and guessing
+ * which index is the rear camera -- that order is unpredictable
+ * across phones/browsers, and iOS in particular often lists the
+ * front camera first, which is what was happening before this).
+ * If no rear camera exists (e.g. a laptop webcam), the browser
+ * falls back to whatever camera is available rather than failing.
+ *
+ * By default (continuous=false) a successful decode stops the
+ * camera, hides the preview, and invokes successCallback once --
+ * used for one-off scans (badge login, a single report/asset code).
+ * With continuous=true the camera keeps running after each decode
+ * so several tools can be scanned back-to-back without reopening
+ * it, debounced so the same code lingering in frame doesn't
+ * re-fire; setContinuousScanUI() reveals that reader's "Done
+ * Scanning" button so the operator has a way to close it explicitly.
+ * Surfaces toasts for no-camera and permission-denied failure paths.
  */
-function executeCameraScan(elementId, successCallback) {
+function executeCameraScan(elementId, successCallback, continuous = false) {
     document.getElementById(elementId).style.display = 'block';
-    
-    if(html5QrScannerInstance) { html5QrScannerInstance.clear(); }
+
+    if (html5QrScannerInstance) { html5QrScannerInstance.clear(); }
     html5QrScannerInstance = new Html5Qrcode(elementId);
-    
-    Html5Qrcode.getCameras().then(devices => {
-        if (devices && devices.length) {
-            html5QrScannerInstance.start(devices[0].id, { fps: 14, qrbox: { width: 260, height: 260 } }, (text) => {
-                html5QrScannerInstance.stop().then(() => { 
-                    document.getElementById(elementId).style.display = 'none'; 
-                    successCallback(text); 
+
+    // Tracks the last code seen by this scan session so the same barcode sitting in
+    // frame for a couple of seconds doesn't fire successCallback dozens of times while
+    // the operator is moving the phone to the next tool. Scoped to this call (rather
+    // than module-level) since a fresh session always starts debounce state clean.
+    let lastContinuousScanCode = null;
+    let lastContinuousScanTime = 0;
+
+    html5QrScannerInstance.start(
+        { facingMode: "environment" },
+        { fps: 14, qrbox: { width: 260, height: 260 }, aspectRatio: 1.0 }, // matches the .camera-reader CSS's fixed 1:1 box so the preview doesn't stretch/squish when the phone rotates
+        (text) => {
+            if (continuous) {
+                const now = Date.now();
+                if (text === lastContinuousScanCode && (now - lastContinuousScanTime) < 2000) return;
+                lastContinuousScanCode = text;
+                lastContinuousScanTime = now;
+                successCallback(text);
+            } else {
+                html5QrScannerInstance.stop().then(() => {
+                    document.getElementById(elementId).style.display = 'none';
+                    successCallback(text);
                 });
-            }).catch(err => { 
-                showToast('❌ Camera Error'); 
-                document.getElementById(elementId).style.display = 'none'; 
-            });
-        } else { 
-            showToast("⚠️ No cameras found."); 
-            document.getElementById(elementId).style.display = 'none'; 
+            }
         }
-    }).catch(err => { 
-        showToast("❌ Camera permission denied."); 
-        document.getElementById(elementId).style.display = 'none'; 
+    ).then(() => {
+        if (continuous) setContinuousScanUI(elementId, true);
+    }).catch(err => {
+        showToast('❌ Camera Error');
+        document.getElementById(elementId).style.display = 'none';
     });
 }
 
@@ -539,12 +609,15 @@ function startAuthCameraScanner() {
  * executeCameraScan(), fills the given input with the decoded text,
  * and optionally invokes triggerFunc() afterward (e.g.
  * handleToolScan or handleAuditScan) to process the scan immediately.
+ * Pass continuous=true (checkout/check-in and audit scanning both
+ * do) to keep the camera open across multiple scans instead of
+ * closing it after the first one -- see executeCameraScan().
  */
-function startToolCameraScanner(readerId, inputId, triggerFunc = null) {
-    executeCameraScan(readerId, (txt) => { 
-        document.getElementById(inputId).value = txt; 
-        if (triggerFunc) triggerFunc(); 
-    }); 
+function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuous = false) {
+    executeCameraScan(readerId, (txt) => {
+        document.getElementById(inputId).value = txt;
+        if (triggerFunc) triggerFunc();
+    }, continuous);
 }
 
 // ==========================================
