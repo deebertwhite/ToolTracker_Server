@@ -43,20 +43,29 @@ app.use(cors({
     credentials: true,
 }));
 
-// helmet's defaults are used as-is except for the CSP's script-src, which is deliberately
-// relaxed to allow: (1) 'unsafe-inline', since admin.html/kiosk.html use inline onclick=
-// handlers throughout (33 and 23 respectively) that a strict default CSP would silently
-// break with no visible error besides a browser console warning; and (2) unpkg.com, which
-// both pages load the html5-qrcode camera-scanning library from. Refactoring every inline
-// handler to addEventListener so a fully strict CSP is possible is a legitimate future
-// improvement, but it's a large, separable, non-security-driven refactor -- not this pass.
-// The rest of helmet's defaults still apply, including X-Frame-Options (real clickjacking
-// protection for the admin panel) and X-Content-Type-Options.
+// helmet's defaults are used as-is except for the CSP's script-src (and script-src-attr,
+// see below), which is deliberately relaxed to allow: (1) 'unsafe-inline', since
+// admin.html/kiosk.html use inline onclick= handlers throughout (33 and 23 respectively)
+// that a strict default CSP would silently break with no visible error besides a browser
+// console warning; and (2) unpkg.com, which both pages load the html5-qrcode
+// camera-scanning library from. Refactoring every inline handler to addEventListener so a
+// fully strict CSP is possible is a legitimate future improvement, but it's a large,
+// separable, non-security-driven refactor -- not this pass. The rest of helmet's defaults
+// still apply, including X-Frame-Options (real clickjacking protection for the admin
+// panel) and X-Content-Type-Options.
+//
+// IMPORTANT: script-src-attr is a SEPARATE directive from script-src that specifically
+// governs inline event-handler attributes (onclick=, onchange=, etc.) -- CSP Level 3 does
+// not fall back to script-src for it. Helmet's own defaults set script-src-attr to 'none'
+// unconditionally, which silently blocked every onclick= in the app (i.e. every button in
+// admin.html and kiosk.html) even with 'unsafe-inline' already added to script-src above.
+// This one shipped broken once already for exactly that reason -- do not drop this override.
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             ...helmet.contentSecurityPolicy.getDefaultDirectives(),
             'script-src': ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
+            'script-src-attr': ["'self'", "'unsafe-inline'"],
         },
     },
 }));
@@ -720,9 +729,23 @@ app.post('/api/departments', requireFetchHeader, requireRole(4), async (req, res
     try {
         const result = await pool.query('INSERT INTO departments (name, prefix_code) VALUES ($1, $2) RETURNING *', [name, prefix_code.toUpperCase()]);
         res.json({ success: true, department: result.rows[0] });
-    } catch (err) { 
+    } catch (err) {
         console.error("Department POST Error:", err);
-        res.status(500).json({ error: err.message }); 
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Rename a department. prefix_code is intentionally not editable here -- it's already
+// baked into every existing toolbox/tool barcode ID under this department, so changing it
+// after creation would desync those IDs from the department's current prefix. Requires
+// super_admin (getRoleWeight >= 4), matching create/delete.
+app.put('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, res) => {
+    const { name } = req.body;
+    try {
+        await pool.query('UPDATE departments SET name = $1 WHERE dept_id = $2', [name, req.params.id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update department.' });
     }
 });
 

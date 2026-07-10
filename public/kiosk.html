@@ -117,6 +117,12 @@
                     <div style="font-size: 11px; color: var(--muted);" id="user-meta">Authorized</div>
                 </div>
             </div>
+            <!-- Shift audit-gate status for the logged-in tech's own home department,
+                 populated by loadKioskAuditStatus() right after authenticateUser() --
+                 a heads-up before scanning, not the actual enforcement (that's still the
+                 server-side AUDIT_REQUIRED gate on checkout, unchanged). Hidden for users
+                 with no resolvable department (e.g. an admin badge with no dept_id). -->
+            <div id="kiosk-audit-banner" style="display: none; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 20px; background: rgba(255,255,255,0.05);"></div>
             <button class="btn btn-secondary" style="width: auto;" onclick="resetToIdle()">Cancel & Log Out</button>
         </div>
         <div class="accent-bar"></div>

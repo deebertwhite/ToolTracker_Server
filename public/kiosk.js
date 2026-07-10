@@ -69,6 +69,7 @@ function resetToIdle() {
     document.getElementById('screen-action').style.display = 'none';
     document.getElementById('screen-auth').style.display = 'none';
     document.getElementById('screen-idle').style.display = 'flex';
+    document.getElementById('kiosk-audit-banner').style.display = 'none';
 }
 
 // ==========================================
@@ -109,7 +110,8 @@ async function authenticateUser() {
             badgeId: data.user.badge_id,
             name: data.user.full_name,
             initials: data.user.full_name.split(' ').map(n => n[0]).join(''),
-            pin: pin
+            pin: pin,
+            deptId: data.user.dept_id
         };
 
         if (data.user.photo_url) {
@@ -126,8 +128,40 @@ async function authenticateUser() {
         document.getElementById('screen-action').style.display = 'flex';
 
         setupActionScreen();
+        loadKioskAuditStatus();
     } catch (err) {
         showToast('❌ Server error.');
+    }
+}
+
+/**
+ * Populates #kiosk-audit-banner with the current shift's audit-gate status for the
+ * logged-in tech's own home department (activeUser.deptId), fetched from the same
+ * GET /api/audits/today-status endpoint the admin panel already uses. This is a
+ * heads-up shown right after login, before any scanning starts -- the actual
+ * enforcement is unchanged and still happens server-side at checkout (AUDIT_REQUIRED).
+ * Hidden entirely for a badge with no resolvable department (e.g. an admin account).
+ */
+async function loadKioskAuditStatus() {
+    const banner = document.getElementById('kiosk-audit-banner');
+    if (!activeUser.deptId) { banner.style.display = 'none'; return; }
+
+    try {
+        const res = await fetch('/api/audits/today-status');
+        const data = await res.json();
+        const dept = data.departments && data.departments.find(d => d.dept_id === activeUser.deptId);
+        if (!dept) { banner.style.display = 'none'; return; }
+
+        banner.style.display = 'block';
+        if (dept.audit_completed) {
+            banner.style.color = 'var(--green)';
+            banner.textContent = `✅ ${dept.name} audited this shift`;
+        } else {
+            banner.style.color = 'var(--red)';
+            banner.textContent = `⚠️ ${dept.name} audit pending this shift`;
+        }
+    } catch (err) {
+        banner.style.display = 'none';
     }
 }
 

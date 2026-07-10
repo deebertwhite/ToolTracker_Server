@@ -7,6 +7,7 @@ let html5QrAdminInstance = null;
 let uploadTarget = { type: null, id: null };
 
 // Global caches for the Universal Modal
+let globalDeptsCache = [];
 let globalBoxesCache = [];
 let globalDrawersCache = [];
 let globalToolsCache = [];
@@ -399,8 +400,8 @@ async function syncStorageHierarchyDropdowns() {
 /**
  * Recursively renders the full department -> toolbox -> drawer -> tool hierarchy into
  * #editable-infra-tree-container. Fetches GET /api/storage and GET /api/tools in parallel,
- * caches the results in globalBoxesCache/globalDrawersCache/globalToolsCache (consumed later
- * by openEntityModal), then builds nested HTML level by level:
+ * caches the results in globalDeptsCache/globalBoxesCache/globalDrawersCache/globalToolsCache
+ * (consumed later by openEntityModal), then builds nested HTML level by level:
  *   - one collapsible card per department, filtering storage.toolboxes by dept_id;
  *   - one collapsible .tree-node per toolbox within that department, filtering
  *     storage.drawers by box_id (and tools by cross-referencing each tool's drawer_id back
@@ -408,24 +409,24 @@ async function syncStorageHierarchyDropdowns() {
  *   - one collapsible .tree-child per drawer within that toolbox, filtering tools.tools by
  *     drawer_id, sorted numerically by name;
  *   - one row per tool within that drawer, with a status-colored badge.
- * Each level's action buttons (Edit/Photo/Delete) are only emitted when the role-weight
- * gate for that level is satisfied: canEditInfra = currentAdminWeight >= 3 for
- * departments/toolboxes/drawers, canEditTools = currentAdminWeight >= 2 for individual tools.
- * Collapse state per node is driven by toggleTreeVisibility() via the generated
- * dept-content-/box-content-/drawer-content- element ids.
+ * This tree itself is click-to-view only -- there are no inline Edit/Photo/Delete buttons at
+ * any level. Clicking a department/toolbox/drawer/tool's name opens openEntityModal(), which
+ * is the only place those actions live now (gated there by role weight, same thresholds as
+ * before: canEditDepts >= 4, canEditInfra >= 3, canEditTools >= 2). Departments/toolboxes/
+ * drawers additionally have a small toggle-icon (separate click target) for expand/collapse,
+ * driven by toggleTreeVisibility() via the generated dept-content-/box-content-/
+ * drawer-content- element ids; tools are leaves, so their whole row just opens the modal.
  */
 async function renderEditableInfraTree() {
     const container = document.getElementById('editable-infra-tree-container');
     if(!container) return;
     container.innerHTML = `<div style="text-align: center; color: var(--muted); padding: 20px;">Fetching structural data...</div>`;
     
-    const canEditInfra = currentAdminWeight >= 3;
-    const canEditTools = currentAdminWeight >= 2;
-
     try {
         const [storageRes, toolsRes] = await Promise.all([fetch('/api/storage'), fetch('/api/tools')]);
         const storage = await storageRes.json(); const tools = await toolsRes.json();
-        
+
+        globalDeptsCache = storage.departments;
         globalBoxesCache = storage.toolboxes;
         globalDrawersCache = storage.drawers;
         globalToolsCache = tools.tools;
@@ -433,46 +434,38 @@ async function renderEditableInfraTree() {
         let html = '';
         storage.departments.forEach(dept => {
             const deptContentId = `dept-content-${dept.dept_id}`;
-            const deptActions = canEditInfra ? `<button onclick="deleteInfraItem('departments', '${dept.dept_id}')" style="background:none; border:none; color:var(--red); cursor:pointer; font-size: 12px; font-weight:bold;">✕ Delete Dept</button>` : '';
 
+            // Clicking the toggle-icon expands/collapses; clicking the name opens the entity
+            // modal (view details, or edit/delete if permitted) -- see openEntityModal().
             html += `<div class="card" style="border-left: 4px solid var(--accent); margin-bottom: 15px; padding: 15px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                            <h4 style="margin: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;" onclick="toggleTreeVisibility('${deptContentId}', this)">
-                                <span class="toggle-icon" style="color: var(--muted);">▼</span> 
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; user-select: none;">
+                            <span class="toggle-icon" style="color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)">▼</span>
+                            <h4 style="margin: 0; cursor: pointer;" onclick="openEntityModal('department', '${dept.dept_id}')">
                                 🏢 ${dept.name} <span style="font-weight:normal; color:var(--muted); font-size:13px;">(${dept.prefix_code})</span>
                             </h4>
-                            ${deptActions}
                         </div>
                         <div id="${deptContentId}">`;
-            
+
             const deptBoxes = storage.toolboxes.filter(b => b.dept_id === dept.dept_id);
             if(deptBoxes.length === 0) html += `<div class="tree-item" style="color:var(--muted);">No storage installed.</div>`;
-            
+
             deptBoxes.forEach(box => {
                 const boxTools = tools.tools.filter(t => { const dr = storage.drawers.find(d => d.drawer_id === t.drawer_id); return dr && dr.box_id === box.box_id; });
                 const thumb = box.photo_url ? `<img src="${box.photo_url}" onclick="openImageModal('${box.photo_url}')" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : `🧰`;
                 const boxContentId = `box-content-${box.box_id}`;
-                
-                const boxActions = canEditInfra ? `
-                    <button onclick="openEntityModal('toolbox', '${box.box_id}')" style="background:none; border:none; color:var(--text); cursor:pointer; font-weight:bold; font-size: 12px; margin-right: 15px;">✏️ Edit</button>
-                    <button onclick="triggerPhotoUpload('toolbox', '${box.box_id}')" style="background:none; border:none; color:var(--accent); cursor:pointer; font-weight:bold; font-size: 12px; margin-right: 15px;">📸 Photo</button>
-                    <button onclick="deleteInfraItem('toolboxes', '${box.box_id}')" style="background:none; border:none; color:var(--red); cursor:pointer; font-weight:bold; font-size: 12px;">✕ Delete</button>` : '';
 
                 html += `<div class="tree-node" style="padding: 10px;">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div style="display: flex; align-items: center; gap: 10px; user-select: none;">
-                                    ${thumb} 
-                                    <span onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                                        <span class="toggle-icon" style="font-size: 12px; color: var(--muted);">▼</span>
-                                        <strong>${box.name}</strong> 
-                                        <span style="background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 10px; color: var(--accent); font-family: monospace;">${box.qr_code || 'NO-ID'}</span>
-                                        <span style="font-size:12px; color:var(--muted);">(${boxTools.length} Assets)</span>
-                                    </span>
-                                </div>
-                                <div>${boxActions}</div>
+                            <div style="display: flex; align-items: center; gap: 10px; user-select: none;">
+                                ${thumb}
+                                <span class="toggle-icon" style="font-size: 12px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)">▼</span>
+                                <span onclick="openEntityModal('toolbox', '${box.box_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                                    <strong>${box.name}</strong>
+                                    <span style="background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 10px; color: var(--accent); font-family: monospace;">${box.qr_code || 'NO-ID'}</span>
+                                    <span style="font-size:12px; color:var(--muted);">(${boxTools.length} Assets)</span>
+                                </span>
                             </div>
                             <div id="${boxContentId}" style="margin-top: 10px;">`;
-                
+
                 const boxDrawers = storage.drawers.filter(d => d.box_id === box.box_id).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
                 if(boxDrawers.length > 0) {
@@ -480,35 +473,22 @@ async function renderEditableInfraTree() {
                         const drToolsList = tools.tools.filter(t => t.drawer_id === dr.drawer_id);
                         const drThumb = dr.photo_url ? `<img src="${dr.photo_url}" onclick="openImageModal('${dr.photo_url}')" style="width: 20px; height: 20px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : `📂`;
                         const drawerContentId = `drawer-content-${dr.drawer_id}`;
-                        
-                        const drActions = canEditInfra ? `
-                            <button onclick="openEntityModal('drawer', '${dr.drawer_id}')" style="background:none; border:none; color:var(--text); cursor:pointer; font-weight:bold; font-size: 11px; margin-right: 15px;">✏️ Edit</button>
-                            <button onclick="triggerPhotoUpload('drawer', '${dr.drawer_id}')" style="background:none; border:none; color:var(--accent); cursor:pointer; font-weight:bold; font-size: 11px; margin-right: 15px;">📸 Photo</button>
-                            <button onclick="deleteInfraItem('drawers', '${dr.drawer_id}')" style="background:none; border:none; color:var(--red); cursor:pointer; font-weight:bold; font-size: 11px;">✕ Delete</button>` : '';
 
                         html += `<div class="tree-child" style="padding: 6px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center; user-select: none;">
-                                        <div style="display: flex; align-items: center; gap: 8px;">
-                                            ${drThumb} 
-                                            <span onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                                                <span class="toggle-icon" style="font-size: 10px; color: var(--muted);">▼</span>
-                                                <span style="font-weight: bold;">${dr.name}</span>
-                                                <span style="font-size:11px; color:var(--muted); margin-left: 5px;">(${drToolsList.length} tools)</span>
-                                            </span>
-                                        </div>
-                                        <div>${drActions}</div>
+                                    <div style="display: flex; align-items: center; gap: 8px; user-select: none;">
+                                        ${drThumb}
+                                        <span class="toggle-icon" style="font-size: 10px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)">▼</span>
+                                        <span onclick="openEntityModal('drawer', '${dr.drawer_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                                            <span style="font-weight: bold;">${dr.name}</span>
+                                            <span style="font-size:11px; color:var(--muted); margin-left: 5px;">(${drToolsList.length} tools)</span>
+                                        </span>
                                     </div>
                                     <div id="${drawerContentId}" style="margin-top: 8px; padding-left: 20px; border-left: 1px dashed var(--border);">`;
-                        
+
                         if (drToolsList.length === 0) {
                             html += `<div style="font-size: 12px; color: var(--muted); padding: 4px 0;">Drawer is empty.</div>`;
                         } else {
                             drToolsList.forEach(tool => {
-                                const toolActions = canEditTools ? `
-                                    <button onclick="openEntityModal('tool', '${tool.qr_code}')" style="background:none; border:none; color:var(--text); cursor:pointer; font-size: 11px; margin-right:15px; font-weight:bold;">✏️ Edit</button>
-                                    <button onclick="triggerPhotoUpload('tool', '${tool.qr_code}')" style="background:none; border:none; color:var(--accent); cursor:pointer; font-size: 11px; margin-right:15px; font-weight:bold;">📸 Photo</button>
-                                    <button onclick="removeToolPermanent('${tool.tool_id}', '${tool.qr_code}')" style="background:none; border:none; color:var(--red); cursor:pointer; font-size: 11px; font-weight:bold;">✕ Delete</button>` : '';
-
                                 const statusColor = tool.status === 'In' ? 'var(--green)' : (tool.status === 'Out' ? 'var(--accent)' : 'var(--red)');
                                 const serialDisplay = tool.serial_number
                                     ? `<span style="font-size: 11px; color: var(--text);">S/N: <span style="font-family: monospace;">${tool.serial_number}</span></span>`
@@ -517,20 +497,19 @@ async function renderEditableInfraTree() {
                                     ? `<span style="font-size: 11px; color: ${tool.cal_due_date ? 'var(--text)' : 'var(--muted)'};">Cal Due: ${tool.cal_due_date ? tool.cal_due_date.split('T')[0] : 'Unknown'}</span>`
                                     : `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`;
 
+                                // Whole row opens the entity modal -- there's nothing to expand/collapse
+                                // at this level (tools are leaves), so no separate toggle icon is needed.
                                 html += `
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02);">
-                                        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-                                            <span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: ${statusColor};">${tool.status}</span>
-                                            <span style="font-size: 13px; font-weight:bold;">${tool.name}</span>
-                                            <span style="font-family: monospace; font-size: 10px; color: var(--muted);">${tool.qr_code}</span>
-                                            ${serialDisplay}
-                                            ${calDueDisplay}
-                                        </div>
-                                        <div>${toolActions}</div>
+                                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02); cursor: pointer;" onclick="openEntityModal('tool', '${tool.qr_code}')">
+                                        <span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: ${statusColor};">${tool.status}</span>
+                                        <span style="font-size: 13px; font-weight:bold;">${tool.name}</span>
+                                        <span style="font-family: monospace; font-size: 10px; color: var(--muted);">${tool.qr_code}</span>
+                                        ${serialDisplay}
+                                        ${calDueDisplay}
                                     </div>`;
                             });
                         }
-                        
+
                         html += `   </div>
                                 </div>`;
                     });
@@ -695,20 +674,26 @@ function exportTableToCSV(filename) {
 // ==========================================
 /**
  * Populates and opens the universal entity modal (#entity-modal-overlay) for a single
- * toolbox, drawer, or tool record, dispatching on `type`:
- *   - 'toolbox': looks up globalBoxesCache by box_id, shows a name-only edit field.
- *   - 'drawer': looks up globalDrawersCache by drawer_id, shows a name-only edit field.
+ * department, toolbox, drawer, or tool record, dispatching on `type`. This is the only way
+ * to reach Edit/Photo/Delete now -- the infrastructure tree itself (renderEditableInfraTree)
+ * is click-to-view only, with a separate toggle-icon for expand/collapse where applicable.
+ *   - 'department': looks up globalDeptsCache by dept_id, shows a name-only edit field
+ *     (prefix_code is immutable -- it's baked into existing barcode IDs) plus Delete.
+ *   - 'toolbox' / 'drawer': looks up globalBoxesCache/globalDrawersCache, shows a
+ *     name-only edit field plus Photo/Delete.
  *   - 'tool': looks up globalToolsCache by qr_code, builds a richer read view (description,
  *     status, calibration due date, replacement link) plus a fuller edit view (name,
- *     description, replacement URL, status select, calibration checkbox + dates).
- * For each type, the "Edit Details"/"Save Changes" action buttons are only rendered when
- * the caller's role weight clears that type's threshold (canEditInfra = currentAdminWeight
- * >= 3 for toolbox/drawer, canEditTools = currentAdminWeight >= 2 for tool) -- if the
- * threshold isn't met, #em-actions is left empty and the modal is effectively read-only.
- * The modal always opens via toggleModalEditMode(false), i.e. read view first, even when
- * edit is permitted.
+ *     description, replacement URL, status select, calibration checkbox + dates) and
+ *     Photo/Delete.
+ * For each type, the action buttons are only rendered when the caller's role weight clears
+ * that type's threshold (canEditDepts = currentAdminWeight >= 4 for department, canEditInfra
+ * = currentAdminWeight >= 3 for toolbox/drawer, canEditTools = currentAdminWeight >= 2 for
+ * tool -- matching each type's requireRole() minimum server-side) -- if the threshold isn't
+ * met, #em-actions is left empty and the modal is effectively read-only. The modal always
+ * opens via toggleModalEditMode(false), i.e. read view first, even when edit is permitted.
  */
 function openEntityModal(type, id) {
+    const canEditDepts = currentAdminWeight >= 4; // matches requireRole(4) on the department PUT/DELETE endpoints
     const canEditInfra = currentAdminWeight >= 3;
     const canEditTools = currentAdminWeight >= 2;
     let entity = null; let titleHtml = ''; let fieldsHtml = ''; let readHtml = ''; let actionsHtml = '';
@@ -716,19 +701,46 @@ function openEntityModal(type, id) {
     document.getElementById('em-target-type').value = type;
     document.getElementById('em-target-id').value = id;
 
-    if (type === 'toolbox') {
+    if (type === 'department') {
+        entity = globalDeptsCache.find(d => d.dept_id == id);
+        if(!entity) return;
+        document.getElementById('em-type-badge').textContent = `DEPARTMENT [ID: ${entity.dept_id}]`;
+        document.getElementById('em-thumb').innerHTML = '🏢';
+
+        titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
+        readHtml = `<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Prefix Code</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.prefix_code}</div></div>`;
+        fieldsHtml = `
+            <div class="form-group"><label class="form-label">Department Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
+            <div class="form-group">
+                <label class="form-label">Prefix Code</label>
+                <div style="padding:8px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; font-size:13px; font-family:monospace; color:var(--muted);">${entity.prefix_code}</div>
+                <div style="font-size:11px; color: var(--muted); margin-top:4px;">Can't be changed after creation -- it's embedded in every existing barcode ID under this department.</div>
+            </div>
+        `;
+
+        if (canEditDepts) {
+            actionsHtml = `
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
+                <button class="btn btn-secondary" onclick="deleteInfraItem('departments', '${entity.dept_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
+            `;
+        }
+
+    } else if (type === 'toolbox') {
         entity = globalBoxesCache.find(b => b.box_id == id);
         if(!entity) return;
         document.getElementById('em-type-badge').textContent = `STORAGE UNIT [ID: ${entity.box_id}]`;
         document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '🧰';
-        
+
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         fieldsHtml = `<div class="form-group"><label class="form-label">Unit Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
-        
+
         if (canEditInfra) {
             actionsHtml = `
                 <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
                 <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
+                <button class="btn btn-secondary" onclick="triggerPhotoUpload('toolbox', '${entity.box_id}')" style="width:auto;">📸 Photo</button>
+                <button class="btn btn-secondary" onclick="deleteInfraItem('toolboxes', '${entity.box_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
             `;
         }
 
@@ -737,14 +749,16 @@ function openEntityModal(type, id) {
         if(!entity) return;
         document.getElementById('em-type-badge').textContent = `STORAGE DRAWER [ID: ${entity.drawer_id}]`;
         document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '📂';
-        
+
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         fieldsHtml = `<div class="form-group"><label class="form-label">Drawer Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
-        
+
         if (canEditInfra) {
             actionsHtml = `
                 <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
                 <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
+                <button class="btn btn-secondary" onclick="triggerPhotoUpload('drawer', '${entity.drawer_id}')" style="width:auto;">📸 Photo</button>
+                <button class="btn btn-secondary" onclick="deleteInfraItem('drawers', '${entity.drawer_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
             `;
         }
 
@@ -879,7 +893,8 @@ async function saveEntityUpdates() {
     let payload = { name: nameVal };
     let endpoint = '';
 
-    if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
+    if (type === 'department') { endpoint = `/api/departments/${id}`; }
+    else if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
     else if (type === 'drawer') { endpoint = `/api/drawers/${id}`; }
     else if (type === 'tool') {
         endpoint = `/api/tools/${id}`;
