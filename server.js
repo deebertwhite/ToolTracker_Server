@@ -13,6 +13,8 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcrypt');
+const { parse: parseCsv } = require('csv-parse/sync');
+const { stringify: stringifyCsv } = require('csv-stringify/sync');
 
 const app = express();
 
@@ -308,6 +310,24 @@ function getAuditWindowStart(asOf = new Date()) {
 }
 
 /**
+ * Returns the Date the given audit window (as returned by getAuditWindowStart) ends --
+ * i.e. when the next window begins. Used to show "time remaining in this window" on the
+ * dashboard/kiosk audit-status widgets; kept as one shared helper rather than duplicating
+ * this date math in both client files.
+ * @param {Date} windowStart - a value returned by getAuditWindowStart()
+ */
+function getAuditWindowEnd(windowStart) {
+    const windowEnd = new Date(windowStart);
+    if (windowStart.getHours() === AUDIT_MORNING_START_HOUR) {
+        windowEnd.setHours(AUDIT_AFTERNOON_START_HOUR);
+    } else {
+        windowEnd.setDate(windowEnd.getDate() + 1);
+        windowEnd.setHours(AUDIT_MORNING_START_HOUR);
+    }
+    return windowEnd;
+}
+
+/**
  * AUDIT GATE: returns the list of toolboxes in the given department that still
  * need an AUDIT since windowStart. A toolbox only counts if it currently has at
  * least one non-retired, non-transferred tool in it. Empty array => department passes.
@@ -458,20 +478,32 @@ app.get('/api/tools', async (req, res) => {
 });
 
 // Compute the next sequential numeric suffix for a tool QR code with the given prefix.
+// Finds the lowest unused sequence number for the given prefix, not just MAX+1 -- so a
+// deleted tool's number (e.g. AVI-000002) gets reused on the next ingest instead of being
+// permanently skipped while numbering marches on past the current max. Retired/replaced
+// tools keep their original number suffixed with '-RET-<tool_id>' (see POST /api/tools) --
+// those are excluded from the used-number set entirely, since blindly stripping non-digits
+// from a mangled code like "AVI-000002-RET-45" would concatenate both number groups into
+// garbage (e.g. "00000245") and corrupt the gap calculation.
 app.get('/api/tools/next-id', async (req, res) => {
     const { prefix } = req.query;
     if (!prefix) return res.status(400).json({ error: 'Prefix required.' });
 
     try {
         const query = `
-            SELECT COALESCE(MAX(CAST(NULLIF(regexp_replace(qr_code, '\\D', '', 'g'), '') AS INTEGER)), 0) + 1 AS next_number 
-            FROM tools WHERE qr_code LIKE $1;
+            WITH used_numbers AS (
+                SELECT CAST(NULLIF(regexp_replace(qr_code, '\\D', '', 'g'), '') AS INTEGER) AS num
+                FROM tools WHERE qr_code LIKE $1 AND qr_code NOT LIKE '%-RET-%'
+            )
+            SELECT MIN(gs.num) AS next_number
+            FROM generate_series(1, (SELECT COALESCE(MAX(num), 0) FROM used_numbers) + 1) AS gs(num)
+            WHERE NOT EXISTS (SELECT 1 FROM used_numbers u WHERE u.num = gs.num);
         `;
         const result = await pool.query(query, [`${prefix}%`]);
         const nextSequence = String(result.rows[0].next_number).padStart(6, '0');
         res.json({ success: true, next_sequence: nextSequence });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to calculate ID.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to calculate ID.' });
     }
 });
 
@@ -750,20 +782,27 @@ app.put('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, 
 });
 
 // Auto-generate a Barcode ID for Toolboxes (e.g. AVI-BOX-001). No role check.
+// Same lowest-unused-number logic as /api/tools/next-id -- reuses a deleted box's number
+// instead of always incrementing past the historical max.
 app.get('/api/toolboxes/next-id', async (req, res) => {
     const { prefix } = req.query;
     if (!prefix) return res.status(400).json({ error: 'Prefix required.' });
 
     try {
         const query = `
-            SELECT COALESCE(MAX(CAST(NULLIF(regexp_replace(qr_code, '\\D', '', 'g'), '') AS INTEGER)), 0) + 1 AS next_number 
-            FROM toolboxes WHERE qr_code LIKE $1;
+            WITH used_numbers AS (
+                SELECT CAST(NULLIF(regexp_replace(qr_code, '\\D', '', 'g'), '') AS INTEGER) AS num
+                FROM toolboxes WHERE qr_code LIKE $1
+            )
+            SELECT MIN(gs.num) AS next_number
+            FROM generate_series(1, (SELECT COALESCE(MAX(num), 0) FROM used_numbers) + 1) AS gs(num)
+            WHERE NOT EXISTS (SELECT 1 FROM used_numbers u WHERE u.num = gs.num);
         `;
         const result = await pool.query(query, [`${prefix}BOX-%`]);
         const nextSequence = String(result.rows[0].next_number).padStart(3, '0');
         res.json({ success: true, next_sequence: `${prefix}BOX-${nextSequence}` });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to calculate Box ID.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to calculate Box ID.' });
     }
 });
 
@@ -957,6 +996,206 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         console.error("Tool Update Error:", err);
         res.status(500).json({ error: 'Failed to update tool.' });
     }
+});
+
+// ==========================================
+// 5.5 BULK INVENTORY BACKUP / IMPORT / EXPORT
+// ==========================================
+// Column set matches exactly what the regular tool create/edit UI already manages (see
+// addNewTool()/saveEntityUpdates() in admin.js) -- no more, no less -- so a round trip
+// through this CSV never touches a field the normal edit screen wouldn't. Department/
+// Toolbox/Drawer are flattened into columns rather than raw ids so the file is directly
+// Excel-editable; Barcode ID is the natural key tying a row back to a specific tool.
+const TOOLS_CSV_COLUMNS = ['Department', 'Toolbox', 'Drawer', 'Barcode ID', 'Tool Name', 'Description', 'Serial Number', 'Part Number', 'Status', 'Requires Calibration', 'Last Calibrated', 'Calibration Due', 'Replacement URL'];
+
+/** Formats a DATE column (returned by pg as a JS Date or null) as YYYY-MM-DD for CSV, or '' if null. */
+const formatCsvDate = (d) => d ? d.toISOString().split('T')[0] : '';
+
+// Full inventory export: one row per tool, hierarchy flattened into columns. Requires
+// tool_rep+ (getRoleWeight >= 2) -- same threshold as viewing the inventory tree itself,
+// since this is just that same data packaged as a file.
+app.get('/api/tools/export', requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT d.name AS department, b.name AS toolbox, dr.name AS drawer,
+                   t.qr_code, t.name, t.description, t.serial_number, t.part_number, t.status,
+                   t.is_calibrated, t.last_cal_date, t.cal_due_date, t.replacement_url
+            FROM tools t
+            LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+            LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
+            ORDER BY d.name ASC, b.name ASC, dr.name ASC, t.name ASC
+        `);
+
+        const rows = result.rows.map(t => ({
+            'Department': t.department || '',
+            'Toolbox': t.toolbox || '',
+            'Drawer': t.drawer || '',
+            'Barcode ID': t.qr_code,
+            'Tool Name': t.name,
+            'Description': t.description || '',
+            'Serial Number': t.serial_number || '',
+            'Part Number': t.part_number || '',
+            'Status': t.status,
+            'Requires Calibration': t.is_calibrated ? 'TRUE' : 'FALSE',
+            'Last Calibrated': formatCsvDate(t.last_cal_date),
+            'Calibration Due': formatCsvDate(t.cal_due_date),
+            'Replacement URL': t.replacement_url || '',
+        }));
+
+        const csv = stringifyCsv(rows, { header: true, columns: TOOLS_CSV_COLUMNS });
+        const filename = `tooltracker-inventory-${new Date().toISOString().split('T')[0]}.csv`;
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(csv);
+    } catch (err) {
+        console.error("Tools Export Error:", err);
+        res.status(500).json({ error: 'Failed to export inventory.' });
+    }
+});
+
+// Toolbox/drawer structure export: one row per drawer, independent of whether it has any
+// tools in it. This is what actually captures an empty toolbox/drawer for backup purposes
+// -- the tools export above only lists structure that currently has at least one tool
+// assigned. Export only in this pass (no matching import) -- see plan notes.
+app.get('/api/toolboxes/export', requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT d.name AS department, b.name AS toolbox, b.qr_code AS toolbox_barcode, dr.name AS drawer
+            FROM drawers dr
+            JOIN toolboxes b ON dr.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
+            ORDER BY d.name ASC, b.name ASC, dr.name ASC
+        `);
+
+        const columns = ['Department', 'Toolbox', 'Toolbox Barcode', 'Drawer'];
+        const rows = result.rows.map(r => ({
+            'Department': r.department || '',
+            'Toolbox': r.toolbox,
+            'Toolbox Barcode': r.toolbox_barcode || '',
+            'Drawer': r.drawer,
+        }));
+
+        const csv = stringifyCsv(rows, { header: true, columns });
+        const filename = `tooltracker-structure-${new Date().toISOString().split('T')[0]}.csv`;
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(csv);
+    } catch (err) {
+        console.error("Structure Export Error:", err);
+        res.status(500).json({ error: 'Failed to export structure.' });
+    }
+});
+
+// Memory storage for the CSV import upload -- the file only needs to be parsed once, never
+// persisted to disk (unlike the photo-upload multer instance below, which does need to keep
+// the uploaded file).
+const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
+
+/** Lenient boolean parser for the "Requires Calibration" CSV column: accepts true/false/yes/no/1/0 case-insensitively. */
+const parseCsvBoolean = (val) => ['true', 'yes', '1'].includes(String(val || '').trim().toLowerCase());
+
+/**
+ * Bulk tool import from the Tools CSV format (see TOOLS_CSV_COLUMNS). Best-effort, not
+ * all-or-nothing -- one bad row (typo'd department/toolbox/drawer, illegal status change)
+ * is reported and skipped, every other valid row in the same file still goes through, and
+ * the full per-row report is returned so the operator can see exactly what happened.
+ * Requires dept_admin+ (getRoleWeight >= 3) -- one tier above plain tool creation, since a
+ * single file can create or change many tools at once.
+ *
+ * A row's Department/Toolbox/Drawer must already exist (looked up by exact name, scoped
+ * correctly at each level) -- structure is never auto-created from a CSV row. A typo would
+ * otherwise silently create a phantom duplicate toolbox, exactly the class of bug the
+ * ingest-form cascade fix (see fetchNextToolId/populateBoxSelect in admin.js) just closed.
+ * If Barcode ID matches an existing tool, that tool is updated (status changes still go
+ * through the same checkToolStatusTransition() state machine PUT /api/tools/:id enforces);
+ * otherwise a new tool is created.
+ */
+app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.single('csv'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No CSV file provided.' });
+
+    let records;
+    try {
+        records = parseCsv(req.file.buffer, { columns: true, skip_empty_lines: true, trim: true });
+    } catch (err) {
+        return res.status(400).json({ error: 'Could not parse CSV file: ' + err.message });
+    }
+
+    const results = [];
+    let created = 0, updated = 0, errors = 0;
+
+    for (let i = 0; i < records.length; i++) {
+        const row = records[i];
+        const rowNum = i + 2; // +2: 1-indexed, plus the header row itself
+        const qr_code = (row['Barcode ID'] || '').trim();
+
+        try {
+            if (!qr_code) throw new Error('Barcode ID is required.');
+            if (!row['Tool Name']?.trim()) throw new Error('Tool Name is required.');
+
+            const deptRes = await pool.query('SELECT dept_id FROM departments WHERE name = $1', [(row['Department'] || '').trim()]);
+            if (deptRes.rows.length === 0) throw new Error(`No department named "${row['Department']}" -- check for typos, or create it first.`);
+            const deptId = deptRes.rows[0].dept_id;
+
+            const boxRes = await pool.query('SELECT box_id FROM toolboxes WHERE name = $1 AND dept_id = $2', [(row['Toolbox'] || '').trim(), deptId]);
+            if (boxRes.rows.length === 0) throw new Error(`No toolbox named "${row['Toolbox']}" in department "${row['Department']}" -- check for typos, or create it first.`);
+            const boxId = boxRes.rows[0].box_id;
+
+            const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE name = $1 AND box_id = $2', [(row['Drawer'] || '').trim(), boxId]);
+            if (drawerRes.rows.length === 0) throw new Error(`No drawer named "${row['Drawer']}" in toolbox "${row['Toolbox']}" -- check for typos, or create it first.`);
+            const drawerId = drawerRes.rows[0].drawer_id;
+
+            const is_calibrated = parseCsvBoolean(row['Requires Calibration']);
+            const cal_due_date = row['Calibration Due']?.trim() || null;
+            if (is_calibrated && !cal_due_date) throw new Error('Calibration Due is required when Requires Calibration is TRUE.');
+
+            const fields = {
+                name: row['Tool Name'].trim(),
+                description: row['Description']?.trim() || null,
+                serial_number: row['Serial Number']?.trim() || null,
+                part_number: row['Part Number']?.trim() || null,
+                replacement_url: row['Replacement URL']?.trim() || null,
+                is_calibrated,
+                last_cal_date: row['Last Calibrated']?.trim() || null,
+                cal_due_date,
+            };
+            const requestedStatus = row['Status']?.trim() || 'In';
+
+            const existingRes = await pool.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [qr_code]);
+
+            if (existingRes.rows.length > 0) {
+                const existing = existingRes.rows[0];
+                const transition = checkToolStatusTransition(existing.status, requestedStatus);
+                if (!transition.allowed) throw new Error(`Status change from "${existing.status}" to "${requestedStatus}" is not allowed (${transition.code}).`);
+
+                await pool.query(
+                    `UPDATE tools SET name = $1, description = $2, replacement_url = $3, status = $4,
+                            is_calibrated = $5, last_cal_date = $6, cal_due_date = $7,
+                            serial_number = $8, part_number = $9
+                     WHERE tool_id = $10`,
+                    [fields.name, fields.description, fields.replacement_url, requestedStatus,
+                     fields.is_calibrated, fields.last_cal_date, fields.cal_due_date,
+                     fields.serial_number, fields.part_number, existing.tool_id]
+                );
+                updated++;
+                results.push({ row: rowNum, barcode: qr_code, result: 'updated', message: 'Updated existing tool.' });
+            } else {
+                await pool.query(
+                    `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+                    [qr_code, fields.name, fields.description, fields.replacement_url, drawerId, 'In',
+                     fields.is_calibrated, fields.last_cal_date, fields.cal_due_date, fields.serial_number, fields.part_number]
+                );
+                created++;
+                results.push({ row: rowNum, barcode: qr_code, result: 'created', message: 'Created new tool.' });
+            }
+        } catch (err) {
+            errors++;
+            results.push({ row: rowNum, barcode: qr_code || '(missing)', result: 'error', message: err.message });
+        }
+    }
+
+    res.json({ success: true, results, summary: { created, updated, errors } });
 });
 
 // ==========================================
@@ -1191,6 +1430,7 @@ app.get('/api/audits/today-status', async (req, res) => {
     try {
         const depts = await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC');
         const windowStart = getAuditWindowStart();
+        const windowEnd = getAuditWindowEnd(windowStart);
 
         const departments = await Promise.all(depts.rows.map(async (dept) => {
             const { pending, completion } = await getAuditWindowCompletionInfo(dept.dept_id, windowStart);
@@ -1203,7 +1443,7 @@ app.get('/api/audits/today-status', async (req, res) => {
             };
         }));
 
-        res.json({ success: true, departments });
+        res.json({ success: true, departments, window_start: windowStart, window_end: windowEnd });
     } catch (err) {
         console.error("Audit Today-Status Error:", err);
         res.status(500).json({ error: 'Failed to fetch audit status.' });

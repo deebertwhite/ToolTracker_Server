@@ -37,7 +37,18 @@
         <h2 style="margin-bottom: 30px;">Live Telemetry</h2>
 
         <div id="view-global">
-            
+
+            <!-- Shift audit status: current mandatory-audit window (see getAuditWindowStart in
+                 server.js) with time remaining, plus a pass/fail chip per department. Populated
+                 and kept live by loadAuditStatusWidget() in dashboard.js. -->
+            <div class="card" style="margin-bottom: 30px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+                    <h3 style="margin: 0;">🕐 Shift Audit Status</h3>
+                    <div id="audit-widget-window" style="font-size: 13px; color: var(--muted);">Loading...</div>
+                </div>
+                <div id="audit-widget-chips" style="display: flex; flex-wrap: wrap; gap: 8px;"></div>
+            </div>
+
             <!-- KPI summary card row: assets in use, action-required flags, calibration due, total inventory -->
             <div class="grid-container" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: 30px;">
                 <div class="card" style="border-top: 3px solid var(--accent); margin: 0;">

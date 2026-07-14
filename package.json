@@ -17,6 +17,8 @@
     "bwip-js": "^4.11.2",
     "connect-pg-simple": "^10.0.0",
     "cors": "^2.8.6",
+    "csv-parse": "^7.0.1",
+    "csv-stringify": "^6.8.1",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",

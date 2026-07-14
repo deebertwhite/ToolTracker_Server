@@ -39,7 +39,16 @@
         </svg>
         
         <div class="idle-title">Select Kiosk Action</div>
-        
+
+        <!-- Shift audit status for every department, always visible on the idle screen (not
+             just after login, unlike #kiosk-audit-banner which is scoped to the logged-in
+             tech's own department). Populated and kept fresh by loadIdleAuditStatus() in
+             kiosk.js. -->
+        <div id="idle-audit-status" style="display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 4px 0 18px;">
+            <div id="idle-audit-window" style="font-size: 12px; color: var(--muted);">Loading audit status...</div>
+            <div id="idle-audit-chips" style="display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;"></div>
+        </div>
+
         <div class="action-grid">
             <!-- Action 1 of 5: begin the Check Out batch-scanning workflow -->
             <div class="action-btn" onclick="startWorkflow('OUT')">

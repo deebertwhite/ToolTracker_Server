@@ -15,11 +15,77 @@ let globalCalTools = [];
 // ==========================================
 /**
  * Kicks off the dashboard page: loads the storage tree sidebar, then the
- * global dashboard view. Called once on window load (see bottom of file).
+ * global dashboard view, then the shift audit status widget (which keeps itself
+ * live afterward -- see loadAuditStatusWidget()). Called once on window load
+ * (see bottom of file).
  */
 async function bootDashboard() {
     await fetchStorageTree();
     await loadGlobalDashboard();
+    await loadAuditStatusWidget();
+}
+
+// ==========================================
+// 2.5 SHIFT AUDIT STATUS WIDGET
+// ==========================================
+// Window end, cached from the last fetch so the on-screen countdown can tick every 30s
+// without re-fetching the department list each time -- only a fresh fetch (every 5 min, or
+// immediately once the cached window has actually elapsed) can learn about a newly
+// completed audit or a window changeover.
+let auditWidgetWindowEnd = null;
+
+/**
+ * Fetches GET /api/audits/today-status and renders the dashboard's "Shift Audit Status"
+ * card: the current window's end time (#audit-widget-window) and one chip per department
+ * (#audit-widget-chips), matching the same visual language as the equivalent admin.js/
+ * kiosk.js widgets. Caches window_end into auditWidgetWindowEnd for
+ * updateAuditWindowCountdown() to tick between fetches.
+ */
+async function loadAuditStatusWidget() {
+    const chipsEl = document.getElementById('audit-widget-chips');
+    const windowEl = document.getElementById('audit-widget-window');
+    if (!chipsEl || !windowEl) return;
+
+    try {
+        const res = await fetch('/api/audits/today-status');
+        const data = await res.json();
+        if (!data.success) throw new Error('Failed to load audit status.');
+
+        auditWidgetWindowEnd = new Date(data.window_end);
+        updateAuditWindowCountdown();
+
+        // Same chip convention as loadAuditStatus() in admin.js -- flat background, only the
+        // text color and label change between the completed/pending states.
+        chipsEl.innerHTML = data.departments.map(d => {
+            if (d.audit_completed) {
+                return `<span style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--muted);">${d.name}</span>`;
+            }
+            return `<span style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--red);">${d.name} -- Audit Pending</span>`;
+        }).join('');
+    } catch (e) {
+        windowEl.textContent = 'Unavailable';
+        chipsEl.innerHTML = `<span style="color: var(--red); font-size: 12px;">Failed to load audit status.</span>`;
+    }
+}
+
+/**
+ * Ticks #audit-widget-window's "time remaining" text from the cached
+ * auditWidgetWindowEnd, without a network call. If the cached window has actually
+ * elapsed (should be rare -- the 5-minute refresh in bootDashboard's setInterval normally
+ * catches the changeover first), triggers an immediate re-fetch instead of showing a
+ * negative/stale countdown.
+ */
+function updateAuditWindowCountdown() {
+    const windowEl = document.getElementById('audit-widget-window');
+    if (!windowEl || !auditWidgetWindowEnd) return;
+
+    const msRemaining = auditWidgetWindowEnd - new Date();
+    if (msRemaining <= 0) { loadAuditStatusWidget(); return; }
+
+    const hours = Math.floor(msRemaining / 3600000);
+    const minutes = Math.floor((msRemaining % 3600000) / 60000);
+    const endLabel = auditWidgetWindowEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    windowEl.textContent = `Window ends ${endLabel} (${hours}h ${minutes}m remaining)`;
 }
 
 // ==========================================
@@ -379,3 +445,10 @@ function closeToolDetailModal() { document.getElementById('tool-detail-overlay')
 // ==========================================
 // Initialize on load
 window.onload = bootDashboard;
+
+// Keeps the Shift Audit Status widget live on an unattended/all-day display: the
+// countdown ticks every 30s from cached data (no network call), and a full re-fetch every
+// 5 minutes picks up a newly-completed audit or a window changeover without needing a
+// manual page reload.
+setInterval(updateAuditWindowCountdown, 30 * 1000);
+setInterval(loadAuditStatusWidget, 5 * 60 * 1000);

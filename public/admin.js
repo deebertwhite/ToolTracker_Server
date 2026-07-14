@@ -133,7 +133,8 @@ function toggleTreeVisibility(containerId, headerElement) {
  * #auth-wall for #admin-app, and applies the role-weight hierarchy gating pattern to hide
  * UI the current role isn't entitled to:
  *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
- *   - weight < 3 (below dept_admin): hides #card-manage-boxes and #card-manage-users.
+ *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
+ *     #card-manage-users, and #card-inventory-import (bulk CSV import).
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Finally preloads data appropriate to the role (user list for dept_admin+, storage
  * dropdowns for everyone, next tool id for tool_rep+).
@@ -156,7 +157,9 @@ function bootstrapAdminUI(user) {
     }
     if (currentAdminWeight < 3) {
         safeSetDisplay('card-manage-boxes', 'none');
+        safeSetDisplay('card-manage-drawers', 'none');
         safeSetDisplay('card-manage-users', 'none');
+        safeSetDisplay('card-inventory-import', 'none');
     }
 
     if (currentAdminWeight >= 3) { loadUsers(); }
@@ -363,32 +366,94 @@ async function submitSmartBox() {
     const btn = document.querySelector('button[onclick="submitSmartBox()"]');
     btn.textContent = "⏳ Building..."; btn.disabled = true;
     const res = await fetch('/api/toolboxes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-    if (res.ok) { document.getElementById('str-box-name').value = ''; document.getElementById('str-box-drawers').value = ''; await syncStorageHierarchyDropdowns(); await fetchNextBoxId(); renderEditableInfraTree(); btn.textContent = "✅ Success!"; } 
+    if (res.ok) { document.getElementById('str-box-name').value = ''; document.getElementById('str-box-drawers').value = ''; await syncStorageHierarchyDropdowns(); await fetchNextBoxId(); renderEditableInfraTree(); btn.textContent = "✅ Success!"; }
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
     setTimeout(() => { btn.textContent = "🔨 Build Storage Structure"; btn.disabled = false; }, 2000);
 }
 
+/** Cascade handler for the Add Drawer form's Department select: repopulates the Toolbox select filtered to that department (populateBoxSelect). */
+function onNewDrawerDeptChange() {
+    populateBoxSelect(document.getElementById('new-drawer-box'), document.getElementById('new-drawer-dept').value);
+}
+
+/** Validates and submits the "Add Drawer to Existing Toolbox" form to POST /api/drawers -- for adding a single drawer to an already-provisioned toolbox, as opposed to Smart Box Builder which only creates drawers alongside a brand-new toolbox. Gated to currentAdminWeight >= 3 (dept_admin+) by the hidden #card-manage-drawers card, matching the server's requireRole(3) on this endpoint. */
+async function submitNewDrawer() {
+    const box_id = document.getElementById('new-drawer-box').value;
+    const name = document.getElementById('new-drawer-name').value.trim();
+    if (!box_id || !name) return alert('⚠️ Select a toolbox and enter a drawer name.');
+
+    const res = await fetch('/api/drawers', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({ box_id, name }) });
+    if (res.ok) {
+        document.getElementById('new-drawer-name').value = '';
+        await syncStorageHierarchyDropdowns();
+        renderEditableInfraTree();
+        alert('✅ Drawer added.');
+    } else {
+        const data = await res.json();
+        alert('❌ ' + (data.error || 'Failed to add drawer.'));
+    }
+}
+
 /**
- * Fetches GET /api/storage and re-populates every dependent <select> across the app that
- * lists departments, drawers, or department prefixes: #str-box-dept-select, #add-tool-prefix,
- * #add-tool-drawer, #new-user-dept, and #rep-dept. Also opportunistically primes
- * #str-box-id via fetchNextBoxId() the first time a department list is loaded.
+ * Filters globalBoxesCache to the given department id and (re)populates a toolbox <select>
+ * with it. Shared by the Ingest New Asset cascade and the Add Drawer cascade so both stay
+ * in sync with a single implementation. Shows an explicit disabled option when the chosen
+ * department has no toolboxes yet, rather than silently leaving the select empty.
+ */
+function populateBoxSelect(selectEl, deptId) {
+    if (!selectEl) return;
+    if (!deptId) { selectEl.innerHTML = '<option value="">-- Select a department first --</option>'; return; }
+    const boxes = globalBoxesCache.filter(b => b.dept_id == deptId);
+    selectEl.innerHTML = boxes.length
+        ? '<option value="">-- Select Toolbox --</option>' + boxes.map(b => `<option value="${b.box_id}">${b.name}</option>`).join('')
+        : '<option value="">No toolboxes in this department</option>';
+}
+
+/** Filters globalDrawersCache to the given toolbox id and (re)populates a drawer <select>. Shows an explicit message when the chosen toolbox has no drawers yet. */
+function populateDrawerSelect(selectEl, boxId) {
+    if (!selectEl) return;
+    if (!boxId) { selectEl.innerHTML = '<option value="">-- Select a toolbox first --</option>'; return; }
+    const drawers = globalDrawersCache.filter(d => d.box_id == boxId);
+    selectEl.innerHTML = drawers.length
+        ? '<option value="">-- Select Drawer --</option>' + drawers.map(d => `<option value="${d.drawer_id}">${d.name}</option>`).join('')
+        : '<option value="">No drawers in this toolbox</option>';
+}
+
+/**
+ * Fetches GET /api/storage, caches the result in globalDeptsCache/globalBoxesCache/
+ * globalDrawersCache (shared with renderEditableInfraTree/openEntityModal), and
+ * re-populates every dependent <select> across the app: #str-box-dept-select,
+ * #add-tool-dept, #new-drawer-dept, #new-user-dept, and #rep-dept. Also opportunistically
+ * primes #str-box-id via fetchNextBoxId() the first time a department list is loaded.
+ * The toolbox/drawer cascades (Ingest New Asset, Add Drawer) are populated on demand by
+ * their own onchange handlers (onAddToolDeptChange, onNewDrawerDeptChange, etc.), not here.
  */
 async function syncStorageHierarchyDropdowns() {
     try {
         const res = await fetch('/api/storage'); const data = await res.json(); if(!data.success) return;
+
+        globalDeptsCache = data.departments;
+        globalBoxesCache = data.toolboxes;
+        globalDrawersCache = data.drawers;
+
         const deptOptions = data.departments.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
         const boxDeptSelect = document.getElementById('str-box-dept-select');
         if(boxDeptSelect) {
             boxDeptSelect.innerHTML = deptOptions;
             if(boxDeptSelect.options.length > 0 && !document.getElementById('str-box-id').value) fetchNextBoxId();
         }
-        
-        const prefixEl = document.getElementById('add-tool-prefix');
-        if (prefixEl) prefixEl.innerHTML = data.departments.map(d => `<option value="${d.prefix_code}-">${d.prefix_code}</option>`).join('');
-        const drawerEl = document.getElementById('add-tool-drawer');
-        if (drawerEl) drawerEl.innerHTML = data.drawers.map(dr => `<option value="${dr.drawer_id}">${dr.name}</option>`).join('');
-        
+
+        // Carries data-prefix so fetchNextToolId() can derive the barcode prefix straight
+        // from whichever department is selected -- the prefix and the drawer assignment can
+        // no longer disagree with each other (previously two independent dropdowns, which
+        // is exactly how tools ended up filed under the wrong department's boxes).
+        const deptOptionsWithPrefix = '<option value="">-- Select Department --</option>' +
+            data.departments.map(d => `<option value="${d.dept_id}" data-prefix="${d.prefix_code}">${d.name}</option>`).join('');
+        const addToolDeptEl = document.getElementById('add-tool-dept');
+        if (addToolDeptEl) addToolDeptEl.innerHTML = deptOptionsWithPrefix;
+        const newDrawerDeptEl = document.getElementById('new-drawer-dept');
+        if (newDrawerDeptEl) newDrawerDeptEl.innerHTML = '<option value="">-- Select Department --</option>' + deptOptions;
+
         const newDeptEl = document.getElementById('new-user-dept');
         if (newDeptEl) newDeptEl.innerHTML = deptOptions;
         const repDeptEl = document.getElementById('rep-dept');
@@ -573,23 +638,52 @@ async function removeToolPermanent(tool_id, qr_code) {
 // ==========================================
 // 7. INGEST ASSETS (TOOLS) & CAMERAS
 // ==========================================
-/** Requests the next sequential tool barcode for the currently selected department prefix from GET /api/tools/next-id, writing it into the read-only #add-tool-id field. No-ops if the prefix dropdown is hidden (i.e. a scanned barcode is being used instead). */
-async function fetchNextToolId() {
-    const prefixDropdown = document.getElementById('add-tool-prefix');
-    if (!prefixDropdown || prefixDropdown.style.display === 'none' || !prefixDropdown.value) return;
-    document.getElementById('add-tool-id').value = 'Generating...';
-    try { 
-        const res = await fetch(`/api/tools/next-id?prefix=${prefixDropdown.value}`); const data = await res.json(); 
-        document.getElementById('add-tool-id').value = data.success ? data.next_sequence : 'Error'; 
-    } catch (err) { document.getElementById('add-tool-id').value = 'Error'; } 
+/**
+ * Cascade handler for the Ingest New Asset form's Department select: repopulates the
+ * Toolbox select filtered to that department (populateBoxSelect), resets the Drawer select
+ * to its empty "select a toolbox first" state, and requests a fresh barcode id via
+ * fetchNextToolId() (which reads this same department's prefix).
+ */
+function onAddToolDeptChange() {
+    populateBoxSelect(document.getElementById('add-tool-box'), document.getElementById('add-tool-dept').value);
+    document.getElementById('add-tool-drawer').innerHTML = '<option value="">-- Select a toolbox first --</option>';
+    fetchNextToolId();
+}
+
+/** Cascade handler for the Ingest New Asset form's Toolbox select: repopulates the Drawer select filtered to that toolbox (populateDrawerSelect). */
+function onAddToolBoxChange() {
+    populateDrawerSelect(document.getElementById('add-tool-drawer'), document.getElementById('add-tool-box').value);
 }
 
 /**
- * Validates and submits the "Ingest New Asset" form to POST /api/tools. The barcode id is
- * assembled from the prefix dropdown + generated sequence unless a full code was scanned in
- * directly (prefix dropdown hidden), in which case the scanned value in #add-tool-id is used
- * as-is. On success, resets the name/description/url fields, re-arms the prefix dropdown,
- * and refreshes the next-id field and the infrastructure tree.
+ * Requests the next sequential tool barcode from GET /api/tools/next-id, using the prefix
+ * carried on the selected #add-tool-dept option's data-prefix attribute (see
+ * syncStorageHierarchyDropdowns), and writes the FULL id (prefix + sequence) into the
+ * read-only #add-tool-id field. Deriving the prefix from the department selection directly
+ * -- rather than a second, independent prefix dropdown -- is what guarantees the barcode id
+ * and the drawer assignment always agree on department; that mismatch was the root cause of
+ * tools ending up filed under the wrong department's boxes.
+ */
+async function fetchNextToolId() {
+    const deptSelect = document.getElementById('add-tool-dept');
+    const idField = document.getElementById('add-tool-id');
+    const prefix = deptSelect.selectedOptions[0]?.dataset.prefix;
+    if (!prefix) { idField.value = ''; idField.placeholder = 'Select a department first...'; return; }
+
+    idField.value = 'Generating...';
+    try {
+        const res = await fetch(`/api/tools/next-id?prefix=${prefix}-`); const data = await res.json();
+        idField.value = data.success ? `${prefix}-${data.next_sequence}` : 'Error';
+    } catch (err) { idField.value = 'Error'; }
+}
+
+/**
+ * Validates and submits the "Ingest New Asset" form to POST /api/tools. Department, toolbox,
+ * and drawer are all required now (previously drawer alone was optional and unscoped, which
+ * is how tools ended up filed under the wrong department -- see fetchNextToolId). The
+ * barcode id in #add-tool-id is used as-is, whether auto-generated or overwritten by a
+ * camera scan (see startAdminAssetCamera). On success, resets the form and refreshes the
+ * infrastructure tree.
  */
 async function addNewTool() {
     const payload = {
@@ -598,10 +692,13 @@ async function addNewTool() {
         serial_number: document.getElementById('add-tool-serial').value || null,
         part_number: document.getElementById('add-tool-partnum').value || null,
         replacement_url: document.getElementById('add-tool-url').value,
-        qr_code: document.getElementById('add-tool-prefix').style.display !== 'none' ? document.getElementById('add-tool-prefix').value + document.getElementById('add-tool-id').value : document.getElementById('add-tool-id').value,
+        qr_code: document.getElementById('add-tool-id').value,
         drawer_id: document.getElementById('add-tool-drawer').value
     };
-    if (!payload.name || !payload.qr_code) return alert('Name and ID required.');
+    if (!payload.name || !payload.qr_code) return alert('⚠️ Name and Barcode ID are required.');
+    if (!document.getElementById('add-tool-dept').value || !document.getElementById('add-tool-box').value || !payload.drawer_id) {
+        return alert('⚠️ Select a department, toolbox, and drawer for this asset.');
+    }
 
     const res = await fetch('/api/tools', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
     if (res.ok) {
@@ -611,8 +708,58 @@ async function addNewTool() {
         document.getElementById('add-tool-serial').value = '';
         document.getElementById('add-tool-partnum').value = '';
         document.getElementById('add-tool-url').value = '';
-        document.getElementById('add-tool-prefix').style.display = 'inline-block';
-        fetchNextToolId(); renderEditableInfraTree();
+        document.getElementById('add-tool-dept').value = '';
+        document.getElementById('add-tool-box').innerHTML = '<option value="">-- Select a department first --</option>';
+        document.getElementById('add-tool-drawer').innerHTML = '<option value="">-- Select a toolbox first --</option>';
+        document.getElementById('add-tool-id').value = '';
+        renderEditableInfraTree();
+    } else {
+        const data = await res.json();
+        alert('❌ ' + (data.error || 'Failed to save asset.'));
+    }
+}
+
+/**
+ * Uploads the file selected in #import-csv-file to POST /api/tools/import (multipart field
+ * `csv`) and renders the returned per-row report into #import-results-container: a summary
+ * line (created/updated/error counts) plus a row-by-row table. This is a best-effort bulk
+ * operation server-side -- one bad row doesn't block the rest of the file -- so the report
+ * is the only way to know what actually happened; there's no single pass/fail result.
+ * Refreshes the infrastructure tree afterward so any created/updated tools show up
+ * immediately. Gated to currentAdminWeight >= 3 (dept_admin+) by the hidden
+ * #card-inventory-import card, matching the server's requireRole(3) on this endpoint.
+ */
+async function submitInventoryImport() {
+    const fileInput = document.getElementById('import-csv-file');
+    const file = fileInput.files[0];
+    if (!file) return alert('⚠️ Choose a CSV file first.');
+
+    const formData = new FormData();
+    formData.append('csv', file);
+
+    const btn = document.getElementById('btn-import-csv');
+    btn.textContent = '⏳ Importing...'; btn.disabled = true;
+
+    try {
+        const res = await fetch('/api/tools/import', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+        const data = await res.json();
+        if (!res.ok) { alert('❌ ' + (data.error || 'Import failed.')); return; }
+
+        const { results, summary } = data;
+        document.getElementById('import-results-container').style.display = 'block';
+        document.getElementById('import-summary').textContent = `${summary.created} created, ${summary.updated} updated, ${summary.errors} error(s).`;
+        document.getElementById('import-results-body').innerHTML = results.map(r => {
+            const color = r.result === 'error' ? 'var(--red)' : (r.result === 'created' ? 'var(--green)' : 'var(--accent)');
+            const icon = r.result === 'error' ? '❌' : '✅';
+            return `<tr><td>${r.row}</td><td style="font-family: monospace;">${r.barcode}</td><td style="color: ${color}; font-weight: bold;">${icon} ${r.result}</td><td>${r.message}</td></tr>`;
+        }).join('');
+
+        fileInput.value = '';
+        renderEditableInfraTree();
+    } catch (err) {
+        alert('❌ Network error during import.');
+    } finally {
+        btn.textContent = '⬆️ Import'; btn.disabled = false;
     }
 }
 
@@ -629,8 +776,8 @@ function initCameraCore(elementId, callback) {
 }
 /** Opens the login-screen scanner and writes the decoded badge id into #admin-badge. */
 function startAdminLoginCamera() { initCameraCore('admin-auth-reader', (txt) => { document.getElementById('admin-badge').value = txt; }); }
-/** Opens the asset-ingest scanner, hides the prefix dropdown (a full scanned code replaces the generated prefix+sequence), and writes the decoded value into the given input. */
-function startAdminAssetCamera(readerId, inputId) { initCameraCore(readerId, (txt) => { document.getElementById('add-tool-prefix').style.display = 'none'; document.getElementById(inputId).value = txt; }); }
+/** Opens the asset-ingest scanner and writes the decoded value into the given input, overwriting whatever auto-generated barcode was there -- the department/toolbox/drawer selection is unaffected either way. */
+function startAdminAssetCamera(readerId, inputId) { initCameraCore(readerId, (txt) => { document.getElementById(inputId).value = txt; }); }
 
 // ==========================================
 // 8. REPORTS

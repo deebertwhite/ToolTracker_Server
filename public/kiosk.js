@@ -70,6 +70,7 @@ function resetToIdle() {
     document.getElementById('screen-auth').style.display = 'none';
     document.getElementById('screen-idle').style.display = 'flex';
     document.getElementById('kiosk-audit-banner').style.display = 'none';
+    loadIdleAuditStatus(); // catches an audit just completed during the session that's ending
 }
 
 // ==========================================
@@ -162,6 +163,41 @@ async function loadKioskAuditStatus() {
         }
     } catch (err) {
         banner.style.display = 'none';
+    }
+}
+
+/**
+ * Populates #idle-audit-status on the idle screen (#screen-idle) with the current shift
+ * audit window and one pass/fail chip per department -- visible to anyone walking up to
+ * the kiosk, before logging in, unlike #kiosk-audit-banner above (which only shows the
+ * logged-in tech's own department, after auth). Called once on page load and re-run
+ * periodically (see the setInterval near the bottom of this file) since the idle screen
+ * is often left on-screen unattended for a long time.
+ */
+async function loadIdleAuditStatus() {
+    const windowEl = document.getElementById('idle-audit-window');
+    const chipsEl = document.getElementById('idle-audit-chips');
+    if (!windowEl || !chipsEl) return;
+
+    try {
+        const res = await fetch('/api/audits/today-status');
+        const data = await res.json();
+        if (!data.success) throw new Error('failed');
+
+        const windowStart = new Date(data.window_start);
+        const isMorning = windowStart.getHours() === 4;
+        windowEl.textContent = `${isMorning ? 'Morning' : 'Afternoon'} audit window (since ${windowStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+
+        // Same flat-background chip convention as loadAuditStatus() in admin.js, plus an
+        // icon since this is meant to be glanceable from a few steps away on the kiosk.
+        chipsEl.innerHTML = data.departments.map(d => {
+            const color = d.audit_completed ? 'var(--muted)' : 'var(--red)';
+            const label = d.audit_completed ? `✅ ${d.name}` : `⚠️ ${d.name}`;
+            return `<span style="font-size:12px; font-weight:bold; padding:5px 12px; border-radius:14px; background: rgba(255,255,255,0.05); color: ${color};">${label}</span>`;
+        }).join('');
+    } catch (err) {
+        windowEl.textContent = '';
+        chipsEl.innerHTML = '';
     }
 }
 
@@ -1091,4 +1127,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('audit-scan-input').addEventListener('blur', () => {
         setTimeout(() => focusScanInput('audit-scan-input'), 200);
     });
+
+    // Idle-screen audit status: load once now, then keep it fresh every 60s since this
+    // screen is often left on-screen unattended for a long time (see loadIdleAuditStatus()).
+    loadIdleAuditStatus();
+    setInterval(loadIdleAuditStatus, 60 * 1000);
 });

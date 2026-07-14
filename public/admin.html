@@ -204,6 +204,16 @@
                         <button class="btn btn-primary" style="margin-top: 15px; width: auto;" onclick="submitSmartBox()">🔨 Build Storage Structure</button>
                     </div>
 
+                    <div class="card" id="card-manage-drawers">
+                        <h3 style="margin-bottom: 16px;">2b. Add Drawer to Existing Toolbox</h3>
+                        <div class="flex-grid-3">
+                            <div class="form-group" style="margin:0;"><label class="form-label">Department</label><select class="form-select" id="new-drawer-dept" onchange="onNewDrawerDeptChange()"></select></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Toolbox</label><select class="form-select" id="new-drawer-box"><option value="">-- Select a department first --</option></select></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Drawer Name</label><input class="form-input" id="new-drawer-name" placeholder="e.g. Drawer 6"></div>
+                        </div>
+                        <button class="btn btn-secondary" style="margin-top: 15px; width: auto;" onclick="submitNewDrawer()">+ Add Drawer</button>
+                    </div>
+
                     <div class="card">
                         <h3 style="margin-bottom: 16px;">3. Ingest New Asset (Tools)</h3>
                         <div id="admin-reader-add" class="camera-reader" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
@@ -213,16 +223,22 @@
                             <div class="form-group" style="margin: 0;"><label class="form-label">Serial Number</label><input class="form-input" id="add-tool-serial" placeholder="Optional -- mainly for calibrated tools"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="add-tool-partnum" placeholder="Optional -- mfr/catalog part #"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Replacement URL</label><input class="form-input" id="add-tool-url" placeholder="https://mcmaster.com/..."></div>
-                            
+
+                            <!-- Department drives both the toolbox/drawer cascade below AND the barcode
+                                 prefix (see fetchNextToolId in admin.js) -- previously these were two
+                                 independent selections that could disagree, which is how tools ended up
+                                 filed under the wrong department's boxes. -->
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Department</label><select class="form-select" id="add-tool-dept" onchange="onAddToolDeptChange()"></select></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Toolbox</label><select class="form-select" id="add-tool-box" onchange="onAddToolBoxChange()"><option value="">-- Select a department first --</option></select></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Drawer</label><select class="form-select" id="add-tool-drawer"><option value="">-- Select a toolbox first --</option></select></div>
+
                             <div class="form-group" style="margin: 0;">
                                 <label class="form-label">Barcode ID</label>
                                 <div style="display: flex; gap: 8px;">
-                                    <select class="form-select" id="add-tool-prefix" style="width: 85px;" onchange="fetchNextToolId()"></select>
-                                    <input class="form-input" id="add-tool-id" placeholder="Generating..." style="font-family: monospace; color: var(--accent);" readonly>
+                                    <input class="form-input" id="add-tool-id" placeholder="Select a department..." style="font-family: monospace; color: var(--accent);" readonly>
                                     <button class="btn-icon" onclick="startAdminAssetCamera('admin-reader-add', 'add-tool-id')">📷</button>
                                 </div>
                             </div>
-                            <div class="form-group" style="margin: 0;"><label class="form-label">Drawer Assignment</label><select class="form-select" id="add-tool-drawer"></select></div>
                         </div>
                         <div style="background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; margin-top: 15px; border: 1px solid var(--border);">
                             <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;">
@@ -235,6 +251,33 @@
                             </div>
                         </div>
                         <button class="btn btn-secondary" style="width: auto; margin-top: 15px;" onclick="addNewTool()">+ Save Asset to Database</button>
+                    </div>
+
+                    <div class="card">
+                        <h3 style="margin-bottom: 8px;">4. Export Inventory</h3>
+                        <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Back up the full inventory to CSV, or open it in a spreadsheet for bulk editing (see Import below).</p>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-secondary" style="width: auto;" onclick="window.location.href='/api/tools/export'">⬇️ Export Full Inventory (CSV)</button>
+                            <button class="btn btn-secondary" style="width: auto;" onclick="window.location.href='/api/toolboxes/export'">⬇️ Export Toolbox Structure (CSV)</button>
+                        </div>
+                    </div>
+
+                    <div class="card" id="card-inventory-import">
+                        <h3 style="margin-bottom: 8px;">5. Import Inventory from CSV</h3>
+                        <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Barcode ID is the match key -- a row with an existing Barcode ID updates that tool, otherwise a new tool is created. A row can't reference a department/toolbox/drawer that doesn't already exist yet -- create the structure first (above), then import.</p>
+                        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                            <input type="file" id="import-csv-file" accept=".csv" class="form-input" style="max-width: 320px;">
+                            <button class="btn btn-primary" style="width: auto;" id="btn-import-csv" onclick="submitInventoryImport()">⬆️ Import</button>
+                        </div>
+                        <div id="import-results-container" style="margin-top: 16px; display: none;">
+                            <div id="import-summary" style="font-weight: 700; margin-bottom: 8px;"></div>
+                            <div class="table-responsive-wrapper" style="max-height: 300px; overflow-y: auto;">
+                                <table>
+                                    <thead style="position: sticky; top: 0; background: var(--surface2);"><tr><th>Row</th><th>Barcode ID</th><th>Result</th><th>Message</th></tr></thead>
+                                    <tbody id="import-results-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
