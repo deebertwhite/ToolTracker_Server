@@ -261,11 +261,26 @@ async function handlePhotoUpload(event) {
 // ==========================================
 // 5. PERSONNEL
 // ==========================================
+/** Display labels for each role value, used by the Manage Accounts role dropdown. */
+const ROLE_LABELS = { technician: 'Technician', tool_rep: 'Tool Rep', dept_admin: 'Department Admin', super_admin: 'Super Admin' };
+
+/** Builds <option> tags for every role whose weight is <= maxWeight, selecting selectedRole. Used so a row's role dropdown never offers a promotion beyond the acting admin's own level. */
+function roleOptionsUpTo(maxWeight, selectedRole) {
+    return Object.keys(ROLE_LABELS)
+        .filter(role => getRoleWeight(role) <= maxWeight)
+        .map(role => `<option value="${role}" ${role === selectedRole ? 'selected' : ''}>${ROLE_LABELS[role]}</option>`)
+        .join('');
+}
+
 /**
  * Fetches the requester's manageable subordinate roster from GET /api/users and renders
- * #user-manage-body (the "Manage Accounts" table) with per-row Upload/PIN-reset/Remove
+ * #user-manage-body (the "Manage Accounts" table) with per-row Upload/PIN-reset/Role/Remove
  * actions. Only reachable when currentAdminWeight >= 3 (dept_admin+), matching the
- * card-manage-users visibility gate applied at login.
+ * card-manage-users visibility gate applied at login. The role dropdown lets a dept_admin+
+ * promote/demote a subordinate up to and including their own level (see PUT
+ * /api/users/:badge_id/role) -- every row here is already a subordinate (GET /api/users only
+ * returns users with a lower weight than the requester), so no extra hierarchy check is
+ * needed client-side beyond capping the dropdown's own options.
  */
 async function loadUsers() {
     try {
@@ -275,7 +290,7 @@ async function loadUsers() {
             return `<tr>
                         <td><div style="display: flex; align-items: center; gap: 12px;">${avatar} <div><strong>${u.full_name}</strong><br><span style="font-size:11px;color:var(--muted);">${u.email || 'No email'}</span></div></div></td>
                         <td style="font-family: monospace; font-size:12px;">Badge: ${u.badge_id}<br>User: ${u.username || '---'}</td>
-                        <td>${u.role.toUpperCase()}</td>
+                        <td><select class="form-select" style="font-size:12px;padding:4px 6px;" onchange="changeUserRole('${u.badge_id}', this)">${roleOptionsUpTo(currentAdminWeight, u.role)}</select></td>
                         <td>
                             <button onclick="triggerPhotoUpload('user', '${u.badge_id}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-weight:bold;margin-right:10px;">📸 Upload</button>
                             <button onclick="resetUserPin('${u.badge_id}')" style="background:none;border:none;color:var(--blue);cursor:pointer;font-weight:bold;margin-right:10px;">↺ PIN</button>
@@ -324,6 +339,17 @@ async function resetUserPin(id) {
         const data = await res.json();
         showCredentialsModal({ title: 'PIN Reset', badgeId: id, pin: data.new_pin });
     } else { alert('❌ Failed.'); }
+}
+
+/** Confirms with the operator, then submits the new role from a Manage Accounts row's dropdown to PUT /api/users/:id/role. Reverts the dropdown to its previous value on cancel or failure so the UI never shows a role that wasn't actually saved. */
+async function changeUserRole(id, selectEl) {
+    const newRole = selectEl.value;
+    const previousRole = Array.from(selectEl.options).find(o => o.defaultSelected)?.value;
+    if (!confirm(`Change ${id}'s role to ${ROLE_LABELS[newRole]}?`)) { selectEl.value = previousRole; return; }
+    const res = await fetch(`/api/users/${id}/role`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({ role: newRole }) });
+    if (res.ok) { loadUsers(); loadRosterDirectory(); } else {
+        const err = await res.json(); alert('❌ ' + err.error); selectEl.value = previousRole;
+    }
 }
 
 /** Confirms with the operator, then deactivates the given badge id via PUT /api/users/:id/deactivate and refreshes both personnel tables. */

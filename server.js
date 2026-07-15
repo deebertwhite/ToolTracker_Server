@@ -716,6 +716,33 @@ app.put('/api/users/:badge_id/deactivate', requireFetchHeader, requireRole(1), a
     }
 });
 
+// Change a user's role. Requester must outrank the target's CURRENT role (getRoleWeight
+// hierarchy check, same pattern as reset-pin/deactivate above) -- so nobody can touch a peer
+// or superior's account. The NEW role, however, may be set up to AND INCLUDING the requester's
+// own weight, not strictly below it like account creation requires -- this is the one
+// deliberate exception to the strict-inequality pattern used elsewhere, so a dept_admin can
+// promote a subordinate up to a peer dept_admin, and a super_admin can eventually promote
+// someone to super_admin (creation alone can never do this, since requireRole there demands
+// weight > target weight, which no one can satisfy for the top role).
+app.put('/api/users/:badge_id/role', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { badge_id } = req.params;
+    const { role } = req.body;
+    try {
+        if (!['super_admin', 'dept_admin', 'tool_rep', 'technician'].includes(role)) {
+            return res.status(400).json({ error: 'Invalid role.' });
+        }
+        const target = await pool.query('SELECT role FROM users WHERE badge_id = $1', [badge_id]);
+        if (target.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+        if (req.authUser.weight <= getRoleWeight(target.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
+        if (getRoleWeight(role) > req.authUser.weight) return res.status(403).json({ error: 'Cannot promote a user above your own role.' });
+
+        await pool.query('UPDATE users SET role = $1 WHERE badge_id = $2', [role, badge_id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update role.' });
+    }
+});
+
 // Self-service: let the logged-in admin update their own username and/or PIN. Scoped to
 // req.authUser.badge_id (the verified session), never a client-supplied badge -- this
 // used to let anyone change *any* badge's credentials by passing it as `requester`.
