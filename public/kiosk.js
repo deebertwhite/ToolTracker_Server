@@ -255,7 +255,7 @@ function isAnyKioskModalOpen() {
  * away) AND no modal is currently open on top of it -- without that
  * second check, the auto-refocus blur listeners below would yank
  * focus back to the scan input the instant an operator clicked into
- * the Supervisor Sign-Off PIN field (its own focus blurs the scan
+ * the Buddy Sign-Off PIN field (its own focus blurs the scan
  * input, which re-triggers this function 200ms later), making the
  * PIN field appear to "immediately unclick" itself. Used both
  * directly (scan-box click) and by the auto-refocus blur listeners
@@ -697,7 +697,8 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuou
  * Submits the current batchQueue as a checkout or check-in
  * transaction to POST /api/transactions (action derived from
  * pendingMode). Every checkout AND check-in now requires a universal
- * Supervisor Sign-Off PIN, so when called with no managerPin this
+ * Buddy Sign-Off PIN (any other active user, no role restriction), so
+ * when called with no managerPin this
  * ALWAYS shows #override-modal (clearing/focusing #override-pin-input)
  * and returns, rather than only doing so after a rejected attempt.
  * submitTransactionWithOverride() re-invokes this same function with
@@ -725,21 +726,27 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuou
  * toast is shown, and the kiosk returns to the idle screen.
  */
 async function submitTransaction(managerPin = null) {
-    if (batchQueue.length === 0) return showToast('⚠️ Queue empty.');
-
-    if (!managerPin) {
-        // Universal gate: always require sign-off before finalizing, for BOTH OUT and IN.
-        document.getElementById('override-pin-input').value = '';
-        document.getElementById('override-modal').style.display = 'flex';
-        document.getElementById('override-pin-input').focus();
-        return;
-    }
-
-    // Lock the button to prevent double-clicks
-    const submitBtn = document.getElementById('btn-submit-action');
-    if(submitBtn) { submitBtn.textContent = 'Processing...'; submitBtn.disabled = true; }
-
+    // Everything below is wrapped in one top-level try/catch -- previously only the
+    // fetch itself was guarded, so any unexpected DOM/state error in the synchronous
+    // setup above it (element lookups, button locking) would fail completely silently:
+    // no toast, no modal change, the tap would just appear to do nothing. Whatever the
+    // failure, the operator now always gets a visible message instead of a dead button.
+    let submitBtn;
     try {
+        if (batchQueue.length === 0) return showToast('⚠️ Queue empty.');
+
+        if (!managerPin) {
+            // Universal gate: always require sign-off before finalizing, for BOTH OUT and IN.
+            document.getElementById('override-pin-input').value = '';
+            document.getElementById('override-modal').style.display = 'flex';
+            document.getElementById('override-pin-input').focus();
+            return;
+        }
+
+        // Lock the button to prevent double-clicks
+        submitBtn = document.getElementById('btn-submit-action');
+        if(submitBtn) { submitBtn.textContent = 'Processing...'; submitBtn.disabled = true; }
+
         const response = await fetch('/api/transactions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -768,7 +775,7 @@ async function submitTransaction(managerPin = null) {
                 return showToast('⚠️ ' + (data.error || 'Sign-off PIN is required.'));
             }
             else if (data.code === 'BAD_PIN') {
-                return showToast('❌ Invalid Supervisor PIN.');
+                return showToast('❌ Invalid Buddy PIN.');
             }
             else if (data.code === 'SIGNOFF_SAME_PERSON') {
                 return showToast('❌ Sign-off must be from a different person.');
@@ -794,20 +801,24 @@ async function submitTransaction(managerPin = null) {
         setTimeout(resetToIdle, 1500);
     } catch (err) {
         if(submitBtn) { submitBtn.textContent = 'Error'; submitBtn.disabled = false; }
-        showToast('❌ Connection error.');
+        showToast('❌ ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
     }
 }
 
 /**
- * Supervisor sign-off retry flow: reads the PIN entered in
+ * Buddy sign-off retry flow: reads the PIN entered in
  * #override-pin-input (shown unconditionally by submitTransaction())
  * and, if present, re-runs submitTransaction() with that PIN so the
  * exact same batch/action is resubmitted for authorization.
  */
 function submitTransactionWithOverride() {
-    const pin = document.getElementById('override-pin-input').value.trim();
-    if (!pin) return showToast('⚠️ PIN is required.');
-    submitTransaction(pin); // Re-run the exact same transaction, but pass the PIN this time
+    try {
+        const pin = document.getElementById('override-pin-input').value.trim();
+        if (!pin) return showToast('⚠️ PIN is required.');
+        submitTransaction(pin); // Re-run the exact same transaction, but pass the PIN this time
+    } catch (err) {
+        showToast('❌ ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
+    }
 }
 
 /**
@@ -1103,11 +1114,20 @@ async function acceptReturnedTransfer(transferId) {
  * feedback.
  */
 function showToast(msg) {
-    const el = document.getElementById('kiosk-toast'); 
-    el.textContent = msg; 
-    el.style.display = 'block'; 
-    setTimeout(() => { el.style.display = 'none'; }, 3500); 
+    const el = document.getElementById('kiosk-toast');
+    el.textContent = msg;
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 3500);
 }
+
+// Last-resort safety net: this kiosk runs unattended for hours at a time, so a JS error
+// nobody wrote a specific handler for must never fail completely silently -- a button
+// that visibly does nothing when tapped looks identical to a hang, and the operator has
+// no way to know whether to retry, wait, or call for help. Surfacing it as a toast at
+// least tells them something broke, even if the message itself is just the raw error.
+window.addEventListener('error', (event) => {
+    showToast('❌ Unexpected error: ' + (event.message || 'unknown'));
+});
 
 // Auto-refocus logic
 // On initial page load, wires up blur listeners on the two

@@ -1269,8 +1269,9 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo
 // 7. KIOSK TRANSACTIONS & AUDITS
 // ==========================================
 // Process Tool Check-in / Check-out. Requires dual-PIN sign-off for every transaction (technician
-// badge+pin, PLUS a manager/tool_rep+ sign-off PIN belonging to a different person) and, for
-// checkouts, a same-day AUDIT of the tool's home department (see getAuditGatePendingToolboxes).
+// badge+pin, PLUS a buddy-check sign-off PIN belonging to any other active person -- no role
+// restriction, any coworker can confirm) and, for checkouts, a same-day AUDIT of the tool's home
+// department (see getAuditGatePendingToolboxes).
 app.post('/api/transactions', authLimiter, async (req, res) => {
     const { badge_id, pin, action, qr_codes, manager_pin } = req.body;
     const client = await pool.connect();
@@ -1291,18 +1292,20 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
         const user = userRes.rows[0];
         await resetFailedPinAttempts(badge_id);
 
-        // 2. Manager/sign-off PIN is now always required, for both checkout and check-in.
+        // 2. Buddy sign-off PIN is now always required, for both checkout and check-in.
         if (!manager_pin) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ error: 'Manager sign-off PIN is required.', code: 'SIGNOFF_REQUIRED' });
+            return res.status(400).json({ error: 'Buddy sign-off PIN is required.', code: 'SIGNOFF_REQUIRED' });
         }
 
         // Hashed PINs can't be matched via a SQL WHERE clause (no signer badge_id is known
         // ahead of time -- the sign-off is identified purely by whoever's PIN matches), so
-        // every active qualifying candidate is fetched and checked in turn. Shop-scale
+        // every active user is fetched and checked in turn. Any active person qualifies as
+        // the buddy (no role restriction -- a technician can sign off another technician),
+        // the only real requirement is being a different person (checked next). Shop-scale
         // candidate counts (dozens at most) make this negligible at bcrypt's cost factor.
         const candidatesRes = await client.query(
-            "SELECT user_id, full_name, badge_id, role, pin_hash FROM users WHERE role IN ('super_admin', 'dept_admin', 'tool_rep') AND is_active = true"
+            "SELECT user_id, full_name, badge_id, role, pin_hash FROM users WHERE is_active = true"
         );
         let signoff = null;
         for (const candidate of candidatesRes.rows) {
@@ -1313,7 +1316,7 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
         }
         if (!signoff) {
             await client.query('ROLLBACK');
-            return res.status(403).json({ error: 'Invalid Manager PIN or insufficient permissions.', code: 'BAD_PIN' });
+            return res.status(403).json({ error: 'Invalid Buddy PIN.', code: 'BAD_PIN' });
         }
 
         // 3. The sign-off person cannot be the same person as the technician.
