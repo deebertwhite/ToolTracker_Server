@@ -94,15 +94,21 @@ app.use('/uploads', express.static(UPLOAD_DIR));
 // ==========================================
 // DATABASE CONFIGURATION
 // ==========================================
-// Before deploying this app to the Raspberry Pi, these hardcoded credentials should be
-// moved into environment variables and docker-compose.yml should be updated to match,
-// rather than shipping plaintext credentials in source control.
+// Credentials come from environment variables (.env, see .env.example) rather than being
+// hardcoded in source control -- docker-compose.yml reads the same DB_PASSWORD value via
+// its own .env lookup, so both sides always agree. Only the password is fatal-if-missing;
+// user/host/database/port aren't secrets and default to the values docker-compose.yml
+// itself uses, so a bare .env with just DB_PASSWORD set is enough to run locally.
+if (!process.env.DB_PASSWORD) {
+    console.error('FATAL: DB_PASSWORD is not set. Copy .env.example to .env and set it to match docker-compose.yml.');
+    process.exit(1);
+}
 const pool = new Pool({
-    user: 'tooladmin',
-    host: 'localhost',
-    database: 'tooltracker',
-    password: 'SuperSecretPassword123',
-    port: 5432,
+    user: process.env.DB_USER || 'tooladmin',
+    host: process.env.DB_HOST || 'localhost',
+    database: process.env.DB_NAME || 'tooltracker',
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT || 5432,
 });
 
 // ==========================================

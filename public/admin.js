@@ -11,6 +11,7 @@ let globalDeptsCache = [];
 let globalBoxesCache = [];
 let globalDrawersCache = [];
 let globalToolsCache = [];
+let globalUsersCache = [];
 
 // ==========================================
 // 2. UTILITIES & VIEW TOGGLES
@@ -261,10 +262,10 @@ async function handlePhotoUpload(event) {
 // ==========================================
 // 5. PERSONNEL
 // ==========================================
-/** Display labels for each role value, used by the Manage Accounts role dropdown. */
+/** Display labels for each role value, used by the personnel entity modal's role dropdown. */
 const ROLE_LABELS = { technician: 'Technician', tool_rep: 'Tool Rep', dept_admin: 'Department Admin', super_admin: 'Super Admin' };
 
-/** Builds <option> tags for every role whose weight is <= maxWeight, selecting selectedRole. Used so a row's role dropdown never offers a promotion beyond the acting admin's own level. */
+/** Builds <option> tags for every role whose weight is <= maxWeight, selecting selectedRole. Used so the role dropdown never offers a promotion beyond the acting admin's own level. */
 function roleOptionsUpTo(maxWeight, selectedRole) {
     return Object.keys(ROLE_LABELS)
         .filter(role => getRoleWeight(role) <= maxWeight)
@@ -273,29 +274,24 @@ function roleOptionsUpTo(maxWeight, selectedRole) {
 }
 
 /**
- * Fetches the requester's manageable subordinate roster from GET /api/users and renders
- * #user-manage-body (the "Manage Accounts" table) with per-row Upload/PIN-reset/Role/Remove
- * actions. Only reachable when currentAdminWeight >= 3 (dept_admin+), matching the
- * card-manage-users visibility gate applied at login. The role dropdown lets a dept_admin+
- * promote/demote a subordinate up to and including their own level (see PUT
- * /api/users/:badge_id/role) -- every row here is already a subordinate (GET /api/users only
- * returns users with a lower weight than the requester), so no extra hierarchy check is
- * needed client-side beyond capping the dropdown's own options.
+ * Fetches the requester's manageable subordinate roster from GET /api/users, caches it in
+ * globalUsersCache (consumed by openEntityModal), and renders #user-manage-body (the "Manage
+ * Accounts" table) as click-to-view rows -- mirroring renderEditableInfraTree()'s pattern for
+ * departments/toolboxes/drawers/tools. There are no inline Upload/PIN/Role/Remove actions here
+ * any more; clicking a row opens openEntityModal('user', badge_id), which is the only place
+ * those actions live now. Only reachable when currentAdminWeight >= 3 (dept_admin+), matching
+ * the card-manage-users visibility gate applied at login.
  */
 async function loadUsers() {
     try {
         const response = await fetch('/api/users'); const data = await response.json();
+        globalUsersCache = data.users;
         document.getElementById('user-manage-body').innerHTML = data.users.map(u => {
             const avatar = u.photo_url ? `<img src="${u.photo_url}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">` : `<div style="width: 40px; height: 40px; border-radius: 50%; background: var(--surface2); display: flex; align-items: center; justify-content: center;">👤</div>`;
-            return `<tr>
+            return `<tr style="cursor: pointer;" onclick="openEntityModal('user', '${u.badge_id}')">
                         <td><div style="display: flex; align-items: center; gap: 12px;">${avatar} <div><strong>${u.full_name}</strong><br><span style="font-size:11px;color:var(--muted);">${u.email || 'No email'}</span></div></div></td>
                         <td style="font-family: monospace; font-size:12px;">Badge: ${u.badge_id}<br>User: ${u.username || '---'}</td>
-                        <td><select class="form-select" style="font-size:12px;padding:4px 6px;" onchange="changeUserRole('${u.badge_id}', this)">${roleOptionsUpTo(currentAdminWeight, u.role)}</select></td>
-                        <td>
-                            <button onclick="triggerPhotoUpload('user', '${u.badge_id}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-weight:bold;margin-right:10px;">📸 Upload</button>
-                            <button onclick="resetUserPin('${u.badge_id}')" style="background:none;border:none;color:var(--blue);cursor:pointer;font-weight:bold;margin-right:10px;">↺ PIN</button>
-                            <button onclick="deactivateUser('${u.badge_id}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-weight:bold;">✕ Remove</button>
-                        </td>
+                        <td>${ROLE_LABELS[u.role] || u.role.toUpperCase()}</td>
                     </tr>`;
         }).join('');
     } catch (err) { console.error(err); }
@@ -341,22 +337,12 @@ async function resetUserPin(id) {
     } else { alert('❌ Failed.'); }
 }
 
-/** Confirms with the operator, then submits the new role from a Manage Accounts row's dropdown to PUT /api/users/:id/role. Reverts the dropdown to its previous value on cancel or failure so the UI never shows a role that wasn't actually saved. */
-async function changeUserRole(id, selectEl) {
-    const newRole = selectEl.value;
-    const previousRole = Array.from(selectEl.options).find(o => o.defaultSelected)?.value;
-    if (!confirm(`Change ${id}'s role to ${ROLE_LABELS[newRole]}?`)) { selectEl.value = previousRole; return; }
-    const res = await fetch(`/api/users/${id}/role`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({ role: newRole }) });
-    if (res.ok) { loadUsers(); loadRosterDirectory(); } else {
-        const err = await res.json(); alert('❌ ' + err.error); selectEl.value = previousRole;
-    }
-}
-
-/** Confirms with the operator, then deactivates the given badge id via PUT /api/users/:id/deactivate and refreshes both personnel tables. */
+/** Confirms with the operator, then deactivates the given badge id via PUT /api/users/:id/deactivate, closes the entity modal (a no-op if it wasn't open), and refreshes both personnel tables. */
 async function deactivateUser(id) {
-    if(!confirm(`Deactivate ${id}?`)) return; 
+    if(!confirm(`Deactivate ${id}?`)) return;
     await fetch(`/api/users/${id}/deactivate`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' } });
-    loadUsers(); loadRosterDirectory(); 
+    closeEntityModal();
+    loadUsers(); loadRosterDirectory();
 }
 
 // ==========================================
@@ -847,9 +833,10 @@ function exportTableToCSV(filename) {
 // ==========================================
 /**
  * Populates and opens the universal entity modal (#entity-modal-overlay) for a single
- * department, toolbox, drawer, or tool record, dispatching on `type`. This is the only way
- * to reach Edit/Photo/Delete now -- the infrastructure tree itself (renderEditableInfraTree)
- * is click-to-view only, with a separate toggle-icon for expand/collapse where applicable.
+ * department, toolbox, drawer, tool, or user record, dispatching on `type`. This is the only
+ * way to reach Edit/Photo/Delete (or, for a user, Edit Role/Photo/PIN-reset/Remove) --
+ * both the infrastructure tree (renderEditableInfraTree) and the personnel table (loadUsers)
+ * are click-to-view only, with a separate toggle-icon for expand/collapse where applicable.
  *   - 'department': looks up globalDeptsCache by dept_id, shows a name-only edit field
  *     (prefix_code is immutable -- it's baked into existing barcode IDs) plus Delete.
  *   - 'toolbox' / 'drawer': looks up globalBoxesCache/globalDrawersCache, shows a
@@ -858,12 +845,19 @@ function exportTableToCSV(filename) {
  *     status, calibration due date, replacement link) plus a fuller edit view (name,
  *     description, replacement URL, status select, calibration checkbox + dates) and
  *     Photo/Delete.
- * For each type, the action buttons are only rendered when the caller's role weight clears
- * that type's threshold (canEditDepts = currentAdminWeight >= 4 for department, canEditInfra
- * = currentAdminWeight >= 3 for toolbox/drawer, canEditTools = currentAdminWeight >= 2 for
- * tool -- matching each type's requireRole() minimum server-side) -- if the threshold isn't
- * met, #em-actions is left empty and the modal is effectively read-only. The modal always
- * opens via toggleModalEditMode(false), i.e. read view first, even when edit is permitted.
+ *   - 'user': looks up globalUsersCache by badge_id, shows username/email/department/role in
+ *     the read view and a role-only dropdown (roleOptionsUpTo) in the edit view, plus
+ *     Photo/Reset PIN/Remove. Unlike the other types there's no per-type weight gate here --
+ *     the Manage Accounts panel that's the only entry point to this type is already hidden
+ *     below weight 3, and GET /api/users only ever returns people below the requester's own
+ *     weight, so anyone who can open this modal already qualifies for all its actions.
+ * For the infrastructure types, action buttons are only rendered when the caller's role
+ * weight clears that type's threshold (canEditDepts = currentAdminWeight >= 4 for department,
+ * canEditInfra = currentAdminWeight >= 3 for toolbox/drawer, canEditTools = currentAdminWeight
+ * >= 2 for tool -- matching each type's requireRole() minimum server-side) -- if the
+ * threshold isn't met, #em-actions is left empty and the modal is effectively read-only. The
+ * modal always opens via toggleModalEditMode(false), i.e. read view first, even when edit is
+ * permitted.
  */
 function openEntityModal(type, id) {
     const canEditDepts = currentAdminWeight >= 4; // matches requireRole(4) on the department PUT/DELETE endpoints
@@ -1036,6 +1030,44 @@ function openEntityModal(type, id) {
                 <button class="btn btn-secondary" onclick="removeToolPermanent('${entity.tool_id}', '${entity.qr_code}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
             `;
         }
+
+    } else if (type === 'user') {
+        // Every user reachable here already comes from GET /api/users, which only returns
+        // people whose role weight is strictly below the requester's own -- the Manage
+        // Accounts panel itself is hidden below weight 3 (see bootstrapAdminUI) -- so unlike
+        // toolbox/drawer/tool (visible to a wider tool_rep+ audience via the Master Directory),
+        // every viewer who can even open this modal already qualifies for all its actions.
+        entity = globalUsersCache.find(u => u.badge_id === id);
+        if(!entity) return;
+        document.getElementById('em-type-badge').textContent = `PERSONNEL [${entity.badge_id}]`;
+        document.getElementById('em-thumb').innerHTML = entity.photo_url
+            ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:50%;object-fit:cover;cursor:zoom-in;">`
+            : '👤';
+
+        titleHtml = `<h3 style="margin:0;">${entity.full_name}</h3>`;
+        readHtml = `
+            <div style="display: flex; gap: 30px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Username</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.username || '--'}</div></div>
+                <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Email</div><div style="font-size:14px;margin-top:4px;">${entity.email || '--'}</div></div>
+            </div>
+            <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Department</div><div style="font-size:14px;margin-top:4px;">${entity.department_name || '--'}</div></div>
+            <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">System Role</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${ROLE_LABELS[entity.role] || entity.role}</div></div>
+        `;
+        fieldsHtml = `
+            <div class="form-group">
+                <label class="form-label">System Role</label>
+                <select class="form-select" id="em-input-role">${roleOptionsUpTo(currentAdminWeight, entity.role)}</select>
+                <div style="font-size:11px; color: var(--muted); margin-top:4px;">You can only assign roles up to your own level.</div>
+            </div>
+        `;
+
+        actionsHtml = `
+            <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Role</button>
+            <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
+            <button class="btn btn-secondary" onclick="triggerPhotoUpload('user', '${entity.badge_id}')" style="width:auto;">📸 Photo</button>
+            <button class="btn btn-secondary" onclick="resetUserPin('${entity.badge_id}')" style="width:auto;">↺ Reset PIN</button>
+            <button class="btn btn-secondary" onclick="deactivateUser('${entity.badge_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Remove</button>
+        `;
     }
 
     document.getElementById('em-title-container').innerHTML = titleHtml;
@@ -1054,36 +1086,46 @@ function closeEntityModal() { document.getElementById('entity-modal-overlay').st
 /**
  * Reads the entity type/id stashed in the modal's hidden #em-target-type/#em-target-id
  * fields and dispatches the save to the matching REST endpoint: PUT /api/toolboxes/:id,
- * PUT /api/drawers/:id, or PUT /api/tools/:id. Every type submits the shared `name` field;
- * 'tool' additionally submits description, replacement_url, status, and calibration
- * fields. Closes the modal and refreshes the infrastructure tree on success.
+ * PUT /api/drawers/:id, PUT /api/tools/:id, or PUT /api/users/:badge_id/role. Every
+ * infrastructure type submits the shared `name` field; 'tool' additionally submits
+ * description, replacement_url, status, and calibration fields; 'user' submits only `role`
+ * (name/email/username aren't editable from here). Closes the modal and refreshes the
+ * infrastructure tree (or the personnel tables, for 'user') on success.
  */
 async function saveEntityUpdates() {
     const type = document.getElementById('em-target-type').value;
     const id = document.getElementById('em-target-id').value;
-    const nameVal = document.getElementById('em-input-name').value;
-    
-    let payload = { name: nameVal };
+
+    let payload = {};
     let endpoint = '';
 
-    if (type === 'department') { endpoint = `/api/departments/${id}`; }
-    else if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
-    else if (type === 'drawer') { endpoint = `/api/drawers/${id}`; }
-    else if (type === 'tool') {
-        endpoint = `/api/tools/${id}`;
-        payload.description = document.getElementById('em-input-desc').value;
-        payload.serial_number = document.getElementById('em-input-serial').value || null;
-        payload.part_number = document.getElementById('em-input-partnum').value || null;
-        payload.replacement_url = document.getElementById('em-input-url').value;
-        payload.status = document.getElementById('em-input-status').value;
-        payload.is_calibrated = document.getElementById('em-input-is-cal').checked;
-        payload.last_cal_date = document.getElementById('em-input-last-cal').value || null;
-        payload.cal_due_date = document.getElementById('em-input-cal-due').value || null;
+    if (type === 'user') {
+        endpoint = `/api/users/${id}/role`;
+        payload.role = document.getElementById('em-input-role').value;
+    } else {
+        payload.name = document.getElementById('em-input-name').value;
+        if (type === 'department') { endpoint = `/api/departments/${id}`; }
+        else if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
+        else if (type === 'drawer') { endpoint = `/api/drawers/${id}`; }
+        else if (type === 'tool') {
+            endpoint = `/api/tools/${id}`;
+            payload.description = document.getElementById('em-input-desc').value;
+            payload.serial_number = document.getElementById('em-input-serial').value || null;
+            payload.part_number = document.getElementById('em-input-partnum').value || null;
+            payload.replacement_url = document.getElementById('em-input-url').value;
+            payload.status = document.getElementById('em-input-status').value;
+            payload.is_calibrated = document.getElementById('em-input-is-cal').checked;
+            payload.last_cal_date = document.getElementById('em-input-last-cal').value || null;
+            payload.cal_due_date = document.getElementById('em-input-cal-due').value || null;
+        }
     }
 
     try {
         const res = await fetch(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-        if(res.ok) { closeEntityModal(); renderEditableInfraTree(); }
+        if(res.ok) {
+            closeEntityModal();
+            if (type === 'user') { loadUsers(); loadRosterDirectory(); } else { renderEditableInfraTree(); }
+        }
         else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to save.')); }
     } catch(e) { alert('Network Error.'); }
 }

@@ -25,10 +25,10 @@ services:
     restart: always
     environment:
       POSTGRES_USER: tooladmin
-      # NOTE: This password is hardcoded here for local/dev convenience.
-      # Before production deployment, move this value into a .env file or
-      # a Docker secret instead of leaving it in source control.
-      POSTGRES_PASSWORD: SuperSecretPassword123
+      # Read from the .env file in this same directory (docker-compose loads it
+      # automatically) -- the exact same DB_PASSWORD value server.js reads via
+      # process.env, so both sides always agree and nothing is hardcoded in source control.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env -- copy .env.example to .env and fill it in}
       POSTGRES_DB: tooltracker
     ports:
       - "5432:5432"

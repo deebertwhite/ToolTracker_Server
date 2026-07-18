@@ -7,7 +7,7 @@ ToolTracker is LTA's tool check-in / check-out tracking system. It keeps a live 
 The server serves everything in `public/` as static files. There are four pages, each independently installable as its own app (see [Progressive Web App](#progressive-web-app-pwa) below):
 
 - **`index.html`** — The hub. A simple landing page with links to the other three tools.
-- **`kiosk.html`** — Shop-floor scanning station. A technician identifies themselves with a badge/username **and PIN**, then scans tool barcodes (camera or a USB barcode gun) to check tools in or out, run toolbox audits, report a damaged/missing tool, or send a tool to QA for calibration. Every checkout and check-in additionally requires a second person (`tool_rep` or higher) to sign off with their own PIN. Meant to run on a shared PC, tablet, or phone at the point of use.
+- **`kiosk.html`** — Shop-floor scanning station. A technician identifies themselves with a badge/username **and PIN**, then scans tool barcodes (camera or a USB barcode gun) to check tools in or out, run toolbox audits, report a damaged/missing tool, or send a tool to QA for calibration. Every checkout and check-in additionally requires a second person — any other active account, any role — to sign off with their own PIN (a "buddy check"). Meant to run on a shared PC, tablet, or phone at the point of use.
 - **`admin.html`** — Admin portal for managing personnel (users, roles, PINs), inventory infrastructure (departments, toolboxes, drawers, tools), running reports, and seeing which departments still need their mandatory audit for the current shift.
 - **`dashboard.html`** — Read-only telemetry dashboard: counts of tools in/out, flagged tools, upcoming/overdue calibrations, and a click-through detail view for any tool. Each department/toolbox drill-down mirrors the global view's layout, scoped to that location.
 
@@ -15,42 +15,54 @@ The server serves everything in `public/` as static files. There are four pages,
 
 Beyond basic check-in/check-out, the app enforces a few real operational controls:
 
-- **Dual-PIN sign-off**: every checkout and check-in requires the technician's own PIN plus a second, different `tool_rep`+ person's PIN. There is no "solo" checkout path.
-- **Mandatory shift audits**: each department must log a toolbox audit at least once per shift window (morning 04:00–14:00, afternoon 14:00–04:00 overnight) before anyone can check tools **out** of that department that shift. Check-ins are never blocked. See `getAuditWindowStart()` in `server.js`.
+- **Dual-PIN sign-off (buddy check)**: every checkout and check-in requires the technician's own PIN plus a second, different active person's PIN — any role, not just supervisors. There is no "solo" checkout path.
+- **Mandatory shift audits**: each department must log a toolbox audit at least once per shift window (morning 04:00–14:00, afternoon 14:00–04:00 overnight) before anyone can check tools **out** of that department that shift. Check-ins are never blocked. A live audit-status widget shows the current window and each department's status on both the dashboard and the kiosk idle screen. See `getAuditWindowStart()` in `server.js`.
 - **QA calibration transfers**: reporting a tool as "Needs Calibration" starts a two-leg, two-party chain of custody — the tool moves to a QA department, QA explicitly accepts it, calibrates it, and sends it back; the home department explicitly accepts the return. Tracked in the `tool_transfers` table.
 - **Reserved IDs on damaged/missing tools**: reporting a tool Broken/Missing/Worn flags it and reserves its barcode ID until an admin creates an explicit replacement.
+- **Role management**: a `dept_admin`+ user can promote or demote any subordinate's role up to and including their own level (never higher), from the same click-to-open detail card used everywhere else in the admin portal — see [Security Notes](#security-notes) for the underlying hierarchy rule.
+- **CSV backup / import / export**: full inventory and toolbox-structure export to CSV from the admin portal, plus a bulk import path (Barcode ID is the match key — an existing tool is updated, a new one is created) for round-tripping through a spreadsheet.
+- **Account security**: PINs are bcrypt-hashed, brute-force attempts are throttled both by IP and by individual badge, and every admin action is re-checked against the database's current role on every request — see [Security Notes](#security-notes).
 - **Real HTTPS everywhere**: camera access requires a secure context on every device except `localhost`. See [HTTPS & Remote Access](#https--remote-access-caddy--duckdns) below for how this is solved without per-device certificate installs.
 - **Progressive Web App**: installable home-screen icons for Kiosk/Admin/Dashboard separately, with app-shell caching for resilience against brief network hiccups (not full offline data sync — see [Future Improvements](#future-improvements)).
 - **Data Matrix label generation**: `scripts/generate-tool-labels.js` and `scripts/generate-size-test-sheet.js` produce print- and laser-engraving-ready barcode labels straight from the live tool list. See [Generating Tool Labels](#generating-tool-labels) below.
 
 ## Running Locally (PC / Dev)
 
-1. **Start the database:**
+1. **Configure environment variables:**
+   ```
+   cp .env.example .env
+   ```
+   Then fill in `.env`: generate a `SESSION_SECRET` with the command in `.env.example`'s comment, and set `DB_PASSWORD` (any value for a fresh database — see the next step). Leave `NODE_ENV` unset for local dev. `.env` is git-ignored; never commit real values.
+
+2. **Start the database:**
    ```
    docker-compose up
    ```
-   This brings up a PostgreSQL container (`db`, exposed on `5432`). (Metabase used to run alongside it here but was removed — it was sharing this same database for its own internal metadata, which filled it with 150+ unrelated tables, and nobody was using it.)
+   This brings up a PostgreSQL container (`db`, exposed on `5432`) using the `DB_PASSWORD` from `.env`. (Metabase used to run alongside it here but was removed — it was sharing this same database for its own internal metadata, which filled it with 150+ unrelated tables, and nobody was using it.)
 
-2. **First time only — create the schema:**
+3. **First time only — create the schema:**
    ```
    docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/000_initial_schema.sql
    docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/001_beta_feedback.sql
+   docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/002_pin_hashing.sql
+   node scripts/backfill-pin-hashes.js
+   docker exec -i tooltracker_server-db-1 psql -U tooladmin -d tooltracker < migrations/003_scoped_unique_identifiers.sql
    ```
-   `000` is the full base schema (all 6 core tables); `001` is the one real incremental migration since (adds `tool_transfers` and `tools.serial_number`). Both are safe to re-run (they use `IF NOT EXISTS` throughout).
+   `000` is the full base schema (all 6 core tables). `001` adds `tool_transfers` and `tools.serial_number`. `002` adds the `pin_hash`/lockout columns and a `role` CHECK constraint — the backfill script must run immediately after it and before starting a `server.js` that reads `pin_hash` (see [Security Notes](#security-notes)). `003` scopes `badge_id`/`username`/`email` uniqueness to active users only, so deactivating someone frees their identifiers for reuse without needing a hard delete. All four SQL files are safe to re-run (`IF NOT EXISTS`/`DROP ... IF EXISTS` throughout); the backfill script is also safe to re-run (it only touches rows where `pin_hash` is still `NULL`).
 
-3. **Start the API and static server:**
+4. **Start the API and static server:**
    ```
    node server.js
    ```
-   This runs the Express app on port `3000` (HTTP only — see below for HTTPS).
+   This runs the Express app on port `3000` (HTTP only — see below for HTTPS). Exits immediately with a clear error if `SESSION_SECRET` or `DB_PASSWORD` isn't set.
 
-4. **(Optional but recommended) Start Caddy for real HTTPS:**
+5. **(Optional but recommended) Start Caddy for real HTTPS:**
    ```
    ./caddy.exe run
    ```
    Needed for camera access from any device other than this PC via `localhost`. See the next section for one-time setup.
 
-5. **Open the app:** `http://localhost:3000/` (this PC only) or `https://<your-duckdns-name>.duckdns.org/` (any device, once Caddy is set up).
+6. **Open the app:** `http://localhost:3000/` (this PC only) or `https://<your-duckdns-name>.duckdns.org/` (any device, once Caddy is set up).
 
 ## HTTPS & Remote Access (Caddy + DuckDNS)
 
@@ -117,6 +129,34 @@ npm run generate-size-test [qr_code]         # one real tool's code at several c
 
 ## Raspberry Pi Migration
 
+### Initial Pi setup (blank SD card → reachable over SSH)
+
+Skip this part if the Pi already has an OS on it and you can SSH in.
+
+1. On the Windows PC, download **Raspberry Pi Imager** from [raspberrypi.com/software](https://www.raspberrypi.com/software/) and install it.
+2. Insert the SD card into the PC (a USB adapter works fine), open Imager:
+   - **Device**: pick the specific Pi model (e.g. Raspberry Pi 4).
+   - **Operating System**: `Raspberry Pi OS (other)` → `Raspberry Pi OS Lite (64-bit)`. Must be **64-bit** — the pre-staged `caddy-linux-arm64` binary and Docker's ARM64 images both require it. Lite (no desktop) is the right choice for a headless appliance.
+   - **Storage**: select the SD card. Double-check this — Imager will erase whatever's selected.
+3. Click **Next**, then **Edit Settings** when prompted (this is the important part — it lets the Pi boot already configured, with no monitor/keyboard ever needed):
+   - **General tab**: set a hostname (e.g. `tooltracker`), a username + password (recent Raspberry Pi OS no longer ships a default `pi`/`raspberry` login — you're creating the real account here), and Wi-Fi SSID/password if not using Ethernet (Ethernet is more reliable for something meant to stay put and run unattended).
+   - **Services tab**: enable SSH, "Use password authentication."
+   - Save, then **Write** (takes a few minutes; it'll verify the write afterward).
+4. Move the card to the Pi, connect Ethernet (or rely on the Wi-Fi config above) and power, and wait about a minute for first boot.
+5. From the Windows PC: `ssh <username>@<hostname>.local` (e.g. `ssh jwhite@tooltracker.local` — this relies on mDNS, which Raspberry Pi OS supports out of the box). If that name doesn't resolve, find the Pi's IP from the router's DHCP client list instead and `ssh <username>@<ip>`.
+6. Once in: `sudo apt update && sudo apt full-upgrade -y`, then reboot (`sudo reboot`) if the kernel was updated.
+7. Install Node.js and Docker, both of which ship ARM64 builds:
+   ```bash
+   curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+   sudo apt install -y nodejs git
+   curl -fsSL https://get.docker.com | sudo sh
+   sudo usermod -aG docker $USER
+   ```
+   Log out and back in (or `newgrp docker`) for the `docker` group membership to take effect. Confirm both installed correctly: `node -v` and `docker compose version`.
+8. Give the Pi a **static/reserved IP** via a DHCP reservation on the router now, before going further — the DuckDNS setup later assumes this IP never changes.
+
+   > **Note**: a fresh Docker install provides `docker compose` (a subcommand, no hyphen) rather than the older standalone `docker-compose` binary this README otherwise uses interchangeably with it. Both do the same thing; use whichever is actually installed (`docker compose version` vs `docker-compose --version` to check).
+
 `server.js` writes uploaded photos to `public/uploads` and activity logs to `logs/`, both resolved relative to one constant near the top of the file:
 
 ```js
@@ -126,12 +166,15 @@ const BASE_STORAGE_PATH = __dirname; // Option A: Windows PC (Development)
 
 Steps to move to the Pi:
 
-1. Flip `BASE_STORAGE_PATH` to the external-drive path (uncomment Option B, comment out Option A).
-2. Run `npm install` on the Pi (installs the same dependencies fresh for its architecture).
-3. Run the two migration files against the Pi's Postgres instance (see [Running Locally](#running-locally-pc--dev) step 2).
-4. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download).
-5. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again).
-6. Set up both processes to survive reboots and crashes — **this is not done yet, do it before relying on this in production**. On Linux, a systemd unit for each is the standard approach:
+1. Copy the whole project to the Pi (excluding everything already git-ignored — `node_modules/`, `.env`, `certs/`, `logs/`, etc. don't need to travel over, they're regenerated or recreated fresh).
+2. On the Pi's copy, flip `BASE_STORAGE_PATH` to the external-drive path (uncomment Option B, comment out Option A).
+3. Run `npm install` on the Pi (installs the same dependencies fresh for its architecture — every dependency in `package.json` is pure JS or ships prebuilt ARM64 binaries, no native build step needed).
+4. Create `.env` on the Pi (`cp .env.example .env`, then fill it in) — this is a **separate** file from the dev machine's, with its **own** freshly generated `SESSION_SECRET` (never reuse the dev one). Set `DB_PASSWORD` to match whatever you set up for the Pi's own Postgres container, and set `NODE_ENV=production` this time (unlike local dev) so the session cookie requires HTTPS.
+5. Run all four migration files (plus the PIN-hash backfill) against the Pi's own Postgres instance — a fresh database, so this is the "first time only" path in [Running Locally](#running-locally-pc--dev) step 3, not a repeat of anything from the dev machine.
+6. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download).
+7. Copy `Caddyfile` over too (it's git-ignored since it holds the DuckDNS token — copy it manually, or recreate it from `Caddyfile.example` with the same token as the current deployment so the existing DuckDNS domain keeps working).
+8. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again).
+9. Set up both processes to survive reboots and crashes — **this is not done yet, do it before relying on this in production**. On Linux, a systemd unit for each is the standard approach:
 
    ```ini
    # /etc/systemd/system/tooltracker.service
@@ -165,7 +208,7 @@ Steps to move to the Pi:
    WantedBy=multi-user.target
    ```
 
-   Then `sudo systemctl enable --now tooltracker tooltracker-caddy`. Also give the Postgres container the same treatment (`docker-compose` already restarts `always`, but confirm Docker itself starts on boot: `sudo systemctl enable docker`).
+   Then `sudo systemctl enable --now tooltracker tooltracker-caddy`. Also give the Postgres container the same treatment (`docker-compose` already restarts `always`, but confirm Docker itself starts on boot: `sudo systemctl enable docker`). No extra systemd config is needed for `.env` — `dotenv` looks for it in the current working directory by default, and `WorkingDirectory` above already points at the project folder where it lives.
 
 ## Maintenance
 
@@ -191,25 +234,33 @@ Steps to move to the Pi:
 
 - **Express** — HTTP API and static file serving
 - **PostgreSQL** via **pg** — primary datastore (departments, users, toolboxes, drawers, tools, audit_logs, tool_transfers)
+- **bcrypt** — PIN hashing
+- **express-session** + **connect-pg-simple** — Postgres-backed admin session cookies (survive a server restart; no separate session store to run)
+- **express-rate-limit** — IP-based brute-force throttling on every PIN-checking endpoint
+- **helmet** — HTTP security headers, including a locked-down Content-Security-Policy
 - **multer** — handles multipart photo uploads
 - **sharp** — image processing for uploaded photos; also used to rasterize PWA icons
 - **bwip-js** — Data Matrix barcode generation for tool labels
+- **csv-parse** / **csv-stringify** — bulk inventory CSV import/export
 - **html5-qrcode** (front-end) — camera-based barcode scanning in the browser
 - **Caddy** — reverse proxy providing automatic, real HTTPS via Let's Encrypt (DNS-01 challenge against DuckDNS)
 - **cors** — cross-origin support for the API
 
 ## Security Notes
 
-- Database credentials are hardcoded in both `server.js` (the `pg` `Pool` config) and `docker-compose.yml`. Fine for local dev, but should move into environment variables before any real production exposure.
+- **Credentials**: database credentials live in `.env` (see `.env.example`), read via environment variables by both `server.js` and `docker-compose.yml` — nothing is hardcoded in source control. `SESSION_SECRET` and `DB_PASSWORD` are fatal-if-missing on startup rather than silently falling back to an insecure default.
+- **PINs are bcrypt-hashed** (`users.pin_hash`), checked via `bcrypt.compare()` everywhere a PIN is verified. The original plaintext `pin` column still exists in the schema (see `migrations/002_pin_hashing.sql`) but is no longer read or written by any code path — it's kept temporarily for a burn-in period before a future migration drops it, not because it's still in use (see [Future Improvements](#future-improvements)).
+- **Brute-force lockout**: an IP-based rate limiter (`authLimiter`) throttles every PIN-checking endpoint, plus a per-badge, DB-backed lockout (`failed_pin_attempts`/`locked_until`) that locks an individual account after repeated bad PINs regardless of source IP.
+- **Admin authorization**: every admin-only route is gated by `requireRole(minWeight)` middleware that re-checks the requester's role against the database on every single request (never trusting the session's cached snapshot) — a deactivated or demoted admin loses access immediately, not just once their session naturally expires. Role changes themselves (see [Feature Overview](#feature-overview)) are capped at the acting admin's own weight — a `dept_admin` can never create or promote someone to `super_admin`. A `X-Requested-With` header is required on every mutating admin request as lightweight CSRF defense. The kiosk stays deliberately sessionless — its security model is "prove it's you, right now" per transaction via badge+PIN, which persistent login would defeat.
+- **HTTP hardening**: `helmet` with a locked-down Content-Security-Policy, plus explicit CORS configuration.
 - There is no email delivery in this system by design — new-user and PIN-reset credentials are always shown directly to the admin in a handout modal, to be relayed to the person in person.
-- User PINs are stored in **plain text** in the `users.pin` column, not hashed. This is a real weakness worth addressing before this system holds anything more sensitive than shop-floor tool access — see [Future Improvements](#future-improvements).
 
 ## Future Improvements
 
 Roughly in priority order:
 
 1. **Automated backups** for the Postgres database — currently manual (`pg_dump` on demand), no schedule.
-2. **PIN hashing** — plaintext PIN storage should move to a hashed scheme (bcrypt/argon2) before this is trusted with anything more sensitive.
+2. **Drop the legacy plaintext `users.pin` column** once `pin_hash` has run in production through a full burn-in period — see [Security Notes](#security-notes).
 3. **systemd services on the Pi** (both Node and Caddy) so a crash or reboot doesn't require someone to manually notice and restart things — see [Raspberry Pi Migration](#raspberry-pi-migration).
 4. **Real automated tests.** Everything so far has been verified by hand (manual `curl` testing against the live database during development) — there is no test suite. Worth adding at least basic API contract tests before this grows further.
 5. **Offline-first multi-site sync** — deliberately deferred. The single-shop, single-server setup doesn't need it; it becomes worth the real design cost (particularly: how to handle the same physical tool being checked out from two offline devices before they reconcile) once there's an actual second site or road-use scenario, not before.

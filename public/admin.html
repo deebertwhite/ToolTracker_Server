@@ -64,9 +64,9 @@
             <div class="hub-card" id="hub-personnel" onclick="openWorkspace('ws-personnel')">
                 <div class="hub-icon">👥</div><div class="hub-title">Personnel</div><div class="hub-desc">View roster and manage accounts.</div>
             </div>
-            <!-- Card 3: Inventory & Infra (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
+            <!-- Card 3: Inventory (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
             <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree(); loadAuditStatus();">
-                <div class="hub-icon">📦</div><div class="hub-title">Inventory & Infra</div><div class="hub-desc">Manage physical storage and tools.</div>
+                <div class="hub-icon">📦</div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
             <!-- Card 4: Reports (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
             <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports')">
@@ -117,9 +117,10 @@
                     </div>
                     <div class="card">
                         <h3>Subordinate Roster</h3>
+                        <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px; margin-top: -8px;">Click a person to view details, change their role, upload a photo, reset their PIN, or remove them.</p>
                         <div class="table-responsive-wrapper">
                             <table>
-                                <thead><tr><th>Name / Profile</th><th>Identifiers</th><th>Role</th><th>Actions</th></tr></thead>
+                                <thead><tr><th>Name / Profile</th><th>Identifiers</th><th>Role</th></tr></thead>
                                 <tbody id="user-manage-body"></tbody>
                             </table>
                         </div>
@@ -144,14 +145,14 @@
                 </div>
             </div>
 
-            <!-- Workspace panel: Inventory & Infrastructure, containing its own subhub plus two sub-panels (panel-inv-tree, panel-inv-build) toggled via openSubPanel()/closeSubPanel() -->
+            <!-- Workspace panel: Inventory, containing its own subhub plus two sub-panels (panel-inv-tree, panel-inv-build) toggled via openSubPanel()/closeSubPanel() -->
             <div id="ws-inventory" class="workspace-panel no-print">
                 <div id="subhub-inventory">
                     <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
-                    <h3 style="margin-bottom: 20px;">Global Inventory Management</h3>
+                    <h3 style="margin-bottom: 20px;">Inventory Management</h3>
                     <div class="grid-container">
                         <div class="hub-card" onclick="openSubPanel('panel-inv-tree'); renderEditableInfraTree(); loadAuditStatus();">
-                            <div class="hub-icon">🗺️</div><div class="hub-title">Master Directory</div><div class="hub-desc">View and edit the complete global structure.</div>
+                            <div class="hub-icon">🗄️</div><div class="hub-title">Master Directory</div><div class="hub-desc">View and edit the complete global structure.</div>
                         </div>
                         <div class="hub-card" onclick="openSubPanel('panel-inv-build'); syncStorageHierarchyDropdowns();">
                             <div class="hub-icon">🏗️</div><div class="hub-title">Deployment Builder</div><div class="hub-desc">Provision new toolboxes and ingest new tools.</div>
