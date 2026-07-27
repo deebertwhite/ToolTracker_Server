@@ -157,16 +157,11 @@ Skip this part if the Pi already has an OS on it and you can SSH in.
 
    > **Note**: a fresh Docker install provides `docker compose` (a subcommand, no hyphen) rather than the older standalone `docker-compose` binary this README otherwise uses interchangeably with it. Both do the same thing; use whichever is actually installed (`docker compose version` vs `docker-compose --version` to check).
 
-`server.js` writes uploaded photos to `public/uploads` and activity logs to `logs/`, both resolved relative to one constant near the top of the file:
-
-```js
-const BASE_STORAGE_PATH = __dirname; // Option A: Windows PC (Development)
-// const BASE_STORAGE_PATH = '/mnt/external_drive/ToolTracker_Data'; // Option B: Raspberry Pi (Production)
-```
+`server.js` writes uploaded photos to `public/uploads` and activity logs to `logs/`, both resolved relative to `BASE_STORAGE_PATH` (read from `.env`, see `.env.example`) — defaults to this project's own directory if unset, which is correct for local PC dev. This is a `.env` setting rather than a line of code specifically so `server.js` stays byte-identical on every deployment: a `git pull` on the Pi should never conflict with an environment-specific code edit.
 
 ### Mounting the external drive at a stable path
 
-Mount the USB drive by its filesystem **UUID** in `/etc/fstab`, at a fixed path (matching the `Option B` path above), rather than relying on whatever auto-mount path the OS happens to assign (which can change between drives, or even between boots):
+Mount the USB drive by its filesystem **UUID** in `/etc/fstab`, at a fixed path (this is what `BASE_STORAGE_PATH` in `.env` will point at), rather than relying on whatever auto-mount path the OS happens to assign (which can change between drives, or even between boots):
 
 ```bash
 lsblk -f                       # find the drive's UUID (e.g. /dev/sda1)
@@ -189,15 +184,24 @@ The payoff: since `BASE_STORAGE_PATH` points at this fixed path rather than a de
 
 Steps to move to the Pi:
 
-1. Copy the whole project to the Pi (excluding everything already git-ignored — `node_modules/`, `.env`, `certs/`, `logs/`, etc. don't need to travel over, they're regenerated or recreated fresh).
-2. On the Pi's copy, flip `BASE_STORAGE_PATH` to the external-drive path (uncomment Option B, comment out Option A).
-3. Run `npm install` on the Pi (installs the same dependencies fresh for its architecture — every dependency in `package.json` is pure JS or ships prebuilt ARM64 binaries, no native build step needed).
-4. Create `.env` on the Pi (`cp .env.example .env`, then fill it in) — this is a **separate** file from the dev machine's, with its **own** freshly generated `SESSION_SECRET` (never reuse the dev one). Set `DB_PASSWORD` to match whatever you set up for the Pi's own Postgres container, and set `NODE_ENV=production` this time (unlike local dev) so the session cookie requires HTTPS.
-5. Run all four migration files (plus the PIN-hash backfill) against the Pi's own Postgres instance — a fresh database, so this is the "first time only" path in [Running Locally](#running-locally-pc--dev) step 3, not a repeat of anything from the dev machine.
-6. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download).
-7. Copy `Caddyfile` over too (it's git-ignored since it holds the DuckDNS token — copy it manually, or recreate it from `Caddyfile.example` with the same token as the current deployment so the existing DuckDNS domain keeps working).
-8. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again).
-9. Set up both processes to survive reboots and crashes — **this is not done yet, do it before relying on this in production**. On Linux, a systemd unit for each is the standard approach:
+1. Get the code onto the Pi via a **read-only GitHub deploy key** scoped to just this repo, rather than copying files by hand or reusing a personal key with broader access:
+   - On the Pi: `ssh-keygen -t ed25519 -f ~/.ssh/tooltracker_deploy_key -N ''`
+   - Add the resulting `~/.ssh/tooltracker_deploy_key.pub` at `github.com/<owner>/<repo>/settings/keys` → **Add deploy key** (leave "Allow write access" unchecked — the Pi only ever needs to pull)
+   - On the Pi, point SSH at that key for GitHub specifically (append to `~/.ssh/config`):
+     ```
+     Host github.com
+         IdentityFile ~/.ssh/tooltracker_deploy_key
+         IdentitiesOnly yes
+     ```
+   - `git clone git@github.com:<owner>/<repo>.git`
+   - This also sets up the ongoing workflow: commit and `git push` from the PC like normal, then `git pull` on the Pi to update it — no manual file copying, ever again. See the deploy script further down for turning that into one command.
+2. Run `npm install` on the Pi (installs the same dependencies fresh for its architecture — every dependency in `package.json` is pure JS or ships prebuilt ARM64 binaries, no native build step needed).
+3. Create `.env` on the Pi (`cp .env.example .env`, then fill it in) — this is a **separate** file from the dev machine's, with its **own** freshly generated `SESSION_SECRET` (never reuse the dev one). Set `DB_PASSWORD` to match whatever you set up for the Pi's own Postgres container, set `NODE_ENV=production` this time (unlike local dev) so the session cookie requires HTTPS, and set `BASE_STORAGE_PATH` to wherever the external drive is mounted (see above).
+4. Run all four migration files (plus the PIN-hash backfill) against the Pi's own Postgres instance — a fresh database, so this is the "first time only" path in [Running Locally](#running-locally-pc--dev) step 3, not a repeat of anything from the dev machine.
+5. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download).
+6. Copy `Caddyfile` over too (it's git-ignored since it holds the DuckDNS token — copy it manually, or recreate it from `Caddyfile.example` with the same token as the current deployment so the existing DuckDNS domain keeps working).
+7. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again).
+8. Set up both processes to survive reboots and crashes — **this is not done yet, do it before relying on this in production**. On Linux, a systemd unit for each is the standard approach:
 
    ```ini
    # /etc/systemd/system/tooltracker.service
@@ -233,7 +237,7 @@ Steps to move to the Pi:
 
    Then `sudo systemctl enable --now tooltracker tooltracker-caddy`. Also give the Postgres container the same treatment (`docker-compose` already restarts `always`, but confirm Docker itself starts on boot: `sudo systemctl enable docker`). No extra systemd config is needed for `.env` — `dotenv` looks for it in the current working directory by default, and `WorkingDirectory` above already points at the project folder where it lives.
 
-10. (Optional but recommended) Schedule log pruning (`npm run prune-logs`, see [Maintenance](#maintenance)) to run monthly instead of remembering to do it by hand, via a systemd timer:
+9. (Optional but recommended) Schedule log pruning (`npm run prune-logs`, see [Maintenance](#maintenance)) to run monthly instead of remembering to do it by hand, via a systemd timer:
 
     ```ini
     # /etc/systemd/system/tooltracker-prune-logs.service

@@ -79,12 +79,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ==========================================
 // STORAGE PATH CONFIGURATION (PC vs RPI)
 // ==========================================
-
-// Option A: Windows PC (Development)
-const BASE_STORAGE_PATH = __dirname;
-
-// Option B: Raspberry Pi External Drive (Production)
-// const BASE_STORAGE_PATH = '/mnt/external_drive/ToolTracker_Data';
+// Read from .env (see .env.example) rather than a manual comment-toggle in this file --
+// server.js is meant to be the exact same file on every deployment (git pull on the Pi
+// should never conflict with a local edit here), so the one thing that actually differs
+// per machine -- where uploaded photos and logs live -- belongs in each machine's own
+// git-ignored .env, the same way DB_PASSWORD/SESSION_SECRET/NODE_ENV already do. Defaults to
+// this file's own directory (correct for local PC dev) if unset.
+const BASE_STORAGE_PATH = process.env.BASE_STORAGE_PATH || __dirname;
 
 const UPLOAD_DIR = path.join(BASE_STORAGE_PATH, 'public', 'uploads');
 const LOG_DIR = path.join(BASE_STORAGE_PATH, 'logs');
