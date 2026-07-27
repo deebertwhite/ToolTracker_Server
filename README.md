@@ -28,11 +28,13 @@ Beyond basic check-in/check-out, the app enforces a few real operational control
 
 ## Running Locally (PC / Dev)
 
+The **Raspberry Pi is the only real deployment** — see [Raspberry Pi Migration](#raspberry-pi-migration) below. Running locally on a PC is for writing and testing code changes *before* deploying them (via `npm run deploy`, see [Deploying changes to the Pi](#deploying-changes-to-the-pi)); it's never meant to serve real traffic to real devices, so there's no HTTPS/Caddy/domain step here at all — plain `http://localhost:3000` is enough, since browsers already treat literal `localhost` as a secure context (camera access works fine for local testing without any certificate).
+
 1. **Configure environment variables:**
    ```
    cp .env.example .env
    ```
-   Then fill in `.env`: generate a `SESSION_SECRET` with the command in `.env.example`'s comment, and set `DB_PASSWORD` (any value for a fresh database — see the next step). Leave `NODE_ENV` unset for local dev. `.env` is git-ignored; never commit real values.
+   Then fill in `.env`: generate a `SESSION_SECRET` with the command in `.env.example`'s comment, and set `DB_PASSWORD` (any value for a fresh database — see the next step). Leave `NODE_ENV` and `BASE_STORAGE_PATH` unset for local dev. `.env` is git-ignored; never commit real values, and never reuse the Pi's values here.
 
 2. **Start the database:**
    ```
@@ -54,34 +56,26 @@ Beyond basic check-in/check-out, the app enforces a few real operational control
    ```
    node server.js
    ```
-   This runs the Express app on port `3000` (HTTP only — see below for HTTPS). Exits immediately with a clear error if `SESSION_SECRET` or `DB_PASSWORD` isn't set.
+   This runs the Express app on port `3000`. Exits immediately with a clear error if `SESSION_SECRET` or `DB_PASSWORD` isn't set.
 
-5. **(Optional but recommended) Start Caddy for real HTTPS:**
-   ```
-   ./caddy.exe run
-   ```
-   Needed for camera access from any device other than this PC via `localhost`. See the next section for one-time setup.
-
-6. **Open the app:** `http://localhost:3000/` (this PC only) or `https://<your-duckdns-name>.duckdns.org/` (any device, once Caddy is set up).
+5. **Open the app:** `http://localhost:3000/`.
 
 ## HTTPS & Remote Access (Caddy + DuckDNS)
 
+This entire section describes infrastructure that lives **only on the Pi**, set up once during [Raspberry Pi Migration](#raspberry-pi-migration). It's documented here as reference for how it works and how to redo it (new Pi, lost `Caddyfile`, etc.) — it is not a step to run on a dev PC.
+
 Browsers only allow camera access (`getUserMedia`) on HTTPS, or the special-cased `localhost`. A self-signed certificate doesn't solve this cleanly — every single device (every phone, every tablet) would need that certificate manually installed and trusted, which doesn't scale past one or two test devices, and iOS Safari in particular won't grant camera access off a self-signed cert even after you click through the warning.
 
-The actual fix: a **real, publicly-trusted certificate** (free, via Let's Encrypt) for a DNS name that happens to point at this machine's **local** IP address. This works because:
-- DNS resolution happens over the public internet, but the actual connection stays entirely on the local network — nothing needs to be reachable from outside.
+The actual fix: a **real, publicly-trusted certificate** (free, via Let's Encrypt) for a DNS name that happens to point at the Pi's **local** IP address. This works because:
+- DNS resolution happens over the public internet, but the actual connection stays entirely on the local network — nothing needs to be reachable from outside. There is no port-forwarding and no public exposure anywhere in this setup.
 - Let's Encrypt can verify domain ownership via a DNS TXT record (the "DNS-01 challenge"), which doesn't require the server to be internet-facing at all.
 - Once issued, the certificate is trusted by every browser/OS on the planet automatically — zero per-device setup, ever.
 
-### One-time setup (already done for this deployment, documented here for the next one)
+### One-time setup (already done — this is how it was set up, for reference)
 
 1. Create a free subdomain at [duckdns.org](https://www.duckdns.org) (sign in with GitHub/Google/etc — no new password). Note the domain name and the account token shown at the top of the page.
-2. Point that DuckDNS domain's IP field at this machine's **local LAN IP** (not its public IP — DuckDNS will auto-fill your public IP by default, which is wrong for this purpose. Get the real local IP via `ipconfig` on Windows or `ip addr` on Linux).
-3. Get a Caddy binary with the DuckDNS DNS plugin built in — no local Go/xcaddy install needed:
-   ```
-   curl -sL -o caddy.exe "https://caddyserver.com/api/download?os=windows&arch=amd64&p=github.com/caddy-dns/duckdns"
-   ```
-   (swap `os=windows&arch=amd64` for `os=linux&arch=arm64` on the Raspberry Pi — already pre-downloaded at `caddy-for-raspberry-pi/caddy-linux-arm64` for exactly this).
+2. Point that DuckDNS domain's IP field at the Pi's **local LAN IP** (not its public IP — DuckDNS will auto-fill your public IP by default, which is wrong for this purpose. Get the real local IP via `hostname -I` on the Pi).
+3. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no download needed; only re-fetch it if this ARM64 binary is ever lost, via `curl -sL -o caddy "https://caddyserver.com/api/download?os=linux&arch=arm64&p=github.com/caddy-dns/duckdns"`).
 4. Copy `Caddyfile.example` to `Caddyfile` and fill in your actual DuckDNS domain and token (this file is gitignored — it holds a secret, never commit it):
    ```
    your-subdomain.duckdns.org {
@@ -91,19 +85,16 @@ The actual fix: a **real, publicly-trusted certificate** (free, via Let's Encryp
        reverse_proxy localhost:3000
    }
    ```
-5. Run `./caddy.exe run` — on first launch it automatically requests and installs the certificate (takes a few seconds) and **renews it automatically forever after**, as long as Caddy keeps running and has occasional internet access (renewal happens well before the ~90-day expiry).
+5. The Caddy binary needs permission to bind to ports 80/443 without running as root: `sudo setcap cap_net_bind_service=+ep caddy-for-raspberry-pi/caddy-linux-arm64` (one-time; this is a Linux capability grant, not something Windows needs).
+6. Run it (or, in production, let `tooltracker-caddy.service` run it — see [Raspberry Pi Migration](#raspberry-pi-migration)) — on first launch it automatically requests and installs the certificate (takes a few seconds) and **renews it automatically forever after**, as long as Caddy keeps running and has occasional internet access (renewal happens well before the ~90-day expiry).
 
-### If the local IP ever changes
+### If the Pi's local IP ever changes
 
-If this machine (or the Pi, later) gets a new local IP — e.g. after a router reset — update the IP field on the DuckDNS page to match. To avoid this entirely, give the machine a **static/reserved IP** via a DHCP reservation on your router (recommended, one-time setup).
+Update the IP field on the DuckDNS page to match (`curl "https://www.duckdns.org/update?domains=<name>&token=<token>&ip=<new-ip>"` or via the DuckDNS website), or nobody can reach the app until it's corrected. To avoid this entirely, give the Pi a **static/reserved IP** via a DHCP reservation on the router — recommended, but requires router access, so this may be pending until then.
 
 ### Firewall
 
-Only two ports need to be open to the network: **443** (HTTPS, what Caddy actually serves) and optionally **80** (so a stray `http://` request gets redirected to `https://` instead of failing). Port 3000 does **not** need to be exposed — Caddy reaches the Node app over `localhost`, which never touches the firewall. Example (run as Administrator):
-```powershell
-New-NetFirewallRule -DisplayName "ToolTracker HTTPS (443)" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow -Profile Any
-New-NetFirewallRule -DisplayName "ToolTracker HTTP redirect (80)" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Any
-```
+Raspberry Pi OS has no firewall enabled by default (no `ufw`/`firewalld`), so nothing extra is needed for LAN devices to reach ports 80/443/3000 on the Pi. If a firewall is ever enabled for hardening, allow at least 443 (HTTPS) and optionally 80 (HTTP→HTTPS redirect) — port 3000 never needs to be reachable from other devices, since Caddy reaches the Node app over `localhost` only.
 
 ## Progressive Web App (PWA)
 
@@ -198,10 +189,10 @@ Steps to move to the Pi:
 2. Run `npm install` on the Pi (installs the same dependencies fresh for its architecture — every dependency in `package.json` is pure JS or ships prebuilt ARM64 binaries, no native build step needed).
 3. Create `.env` on the Pi (`cp .env.example .env`, then fill it in) — this is a **separate** file from the dev machine's, with its **own** freshly generated `SESSION_SECRET` (never reuse the dev one). Set `DB_PASSWORD` to match whatever you set up for the Pi's own Postgres container, set `NODE_ENV=production` this time (unlike local dev) so the session cookie requires HTTPS, and set `BASE_STORAGE_PATH` to wherever the external drive is mounted (see above).
 4. Run all four migration files (plus the PIN-hash backfill) against the Pi's own Postgres instance — a fresh database, so this is the "first time only" path in [Running Locally](#running-locally-pc--dev) step 3, not a repeat of anything from the dev machine.
-5. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download).
+5. Use the pre-built `caddy-for-raspberry-pi/caddy-linux-arm64` binary (already has the DuckDNS plugin built in — no need to re-download), and grant it permission to bind ports 80/443 without running as root: `sudo setcap cap_net_bind_service=+ep caddy-for-raspberry-pi/caddy-linux-arm64` (a Linux-only step; Windows never needed this).
 6. Copy `Caddyfile` over too (it's git-ignored since it holds the DuckDNS token — copy it manually, or recreate it from `Caddyfile.example` with the same token as the current deployment so the existing DuckDNS domain keeps working).
-7. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again).
-8. Set up both processes to survive reboots and crashes — **this is not done yet, do it before relying on this in production**. On Linux, a systemd unit for each is the standard approach:
+7. Update the DuckDNS IP field to the Pi's local IP (give it a DHCP reservation so this never has to change again, once router access allows it).
+8. Set up both processes to survive reboots and crashes via systemd, so a crash or reboot doesn't require someone to manually notice and restart things:
 
    ```ini
    # /etc/systemd/system/tooltracker.service
@@ -275,14 +266,15 @@ This pushes local commits to GitHub, then pulls them on the Pi and restarts `too
 
 ## Maintenance
 
-- **Restarting after a code change**: static files (`public/*.html`, `*.js`, `*.css`) take effect on the next page load with no restart needed. Changes to `server.js` require killing and restarting the Node process. **Before starting a new one, always check nothing is already listening on port 3000** — a stray process from a previous session silently serving old code was a repeated source of confusing bugs during development:
+- **Deploying a code change**: on the Pi (the only real deployment), just `npm run deploy` from the PC — see [Deploying changes to the Pi](#deploying-changes-to-the-pi). It restarts `tooltracker.service` for you, which is the systemd-managed way this now always happens; there's no manual process-killing involved on the Pi.
+- **Restarting during local PC dev**: static files (`public/*.html`, `*.js`, `*.css`) take effect on the next page load with no restart needed. Changes to `server.js` require killing and restarting the local `node server.js` process. **Before starting a new one, always check nothing is already listening on port 3000** — a stray process from a previous session silently serving old code was a repeated source of confusing bugs during development:
   ```powershell
   Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like "*server.js*" } | Select-Object ProcessId, CommandLine
   ```
-  Kill any match with `Stop-Process -Id <id> -Force` before starting a fresh one. (Once the systemd units above are in place, `systemctl restart tooltracker` handles this correctly on its own.)
+  Kill any match with `Stop-Process -Id <id> -Force` before starting a fresh one.
 - **Database backups**: `docker exec tooltracker_server-db-1 pg_dump -U tooladmin -d tooltracker -F c -f /tmp/backup.dump`, then copy it out with `docker cp`. Do this before any risky schema change or bulk edit. No automated backup schedule exists yet — see [Future Improvements](#future-improvements).
-- **Certificate renewal**: fully automatic, no action needed — just make sure Caddy keeps running (see the systemd unit above once on the Pi).
-- **Logs**: `logs/hourly/<DEPT>/` and `logs/daily/<DEPT>/` grow daily and are gitignored (not committed) — but the actual bytes involved are small even over years (terse text lines, not binary data), so this is about intentional retention policy more than real disk pressure. `npm run prune-logs` deletes anything older than the retention window set at the top of `scripts/prune-old-logs.js` (2 years by default); pass `--dry-run` to preview what it would delete without touching anything. Not run automatically yet — see the systemd timer note in [Raspberry Pi Migration](#raspberry-pi-migration).
+- **Certificate renewal**: fully automatic, no action needed — `tooltracker-caddy.service` just needs to keep running, which systemd (`Restart=always`) already guarantees.
+- **Logs**: `logs/hourly/<DEPT>/` and `logs/daily/<DEPT>/` grow daily and are gitignored (not committed) — but the actual bytes involved are small even over years (terse text lines, not binary data), so this is about intentional retention policy more than real disk pressure. `npm run prune-logs` deletes anything older than the retention window set at the top of `scripts/prune-old-logs.js` (2 years by default); pass `--dry-run` to preview what it would delete without touching anything. Runs automatically on the Pi via `tooltracker-prune-logs.timer` (monthly).
 - **Photo storage**: uploaded photos (`public/uploads/`) are automatically resized (max 1600px) and re-compressed to JPEG on upload, and the previous file is deleted whenever a photo is replaced or its entity is deleted (see `deletePhotoFile()` in `server.js`) — so growth tracks the number of *distinct* photos actually taken, not every re-upload or replacement.
 - **Regenerating tool labels**: re-run `npm run generate-labels` any time tools are added — see [Generating Tool Labels](#generating-tool-labels).
 
@@ -325,7 +317,7 @@ Roughly in priority order:
 
 1. **Automated backups** for the Postgres database — currently manual (`pg_dump` on demand), no schedule.
 2. **Drop the legacy plaintext `users.pin` column** once `pin_hash` has run in production through a full burn-in period — see [Security Notes](#security-notes).
-3. **systemd services on the Pi** (both Node and Caddy) so a crash or reboot doesn't require someone to manually notice and restart things — see [Raspberry Pi Migration](#raspberry-pi-migration).
+3. **DHCP reservation for the Pi** — pending until router access is granted (see [If the Pi's local IP ever changes](#if-the-pis-local-ip-ever-changes)); until then, a Pi IP change means manually updating the DuckDNS record again.
 4. **Real automated tests.** Everything so far has been verified by hand (manual `curl` testing against the live database during development) — there is no test suite. Worth adding at least basic API contract tests before this grows further.
 5. **Offline-first multi-site sync** — deliberately deferred. The single-shop, single-server setup doesn't need it; it becomes worth the real design cost (particularly: how to handle the same physical tool being checked out from two offline devices before they reconcile) once there's an actual second site or road-use scenario, not before.
 6. **Dual-PIN sign-off for the hardware sensor endpoints** (`/api/hardware/unlock`, `/api/hardware/sensor`) — these still only require a single badge, since there's no physical hardware deployed yet. Needs the same treatment as `/api/transactions` before any real sensor/lock hardware goes live.
