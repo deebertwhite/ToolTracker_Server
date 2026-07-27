@@ -265,6 +265,14 @@ Steps to move to the Pi:
 
     `sudo systemctl enable --now tooltracker-prune-logs.timer`. `Persistent=true` means a run that was missed (e.g. the Pi was off when it would have fired) happens shortly after the next boot instead of silently skipping that month.
 
+### Deploying changes to the Pi
+
+Once the deploy key and `tooltracker.service` above are set up, day-to-day changes are one command from the PC (Git Bash):
+```bash
+npm run deploy
+```
+This pushes local commits to GitHub, then pulls them on the Pi and restarts `tooltracker.service` (see `scripts/deploy-to-pi.sh`) so the change actually takes effect. Static file changes (`public/*.html`/`*.js`/`*.css`) don't strictly need the restart — they take effect on next page load either way — but it's harmless to restart for those too. Assumes commits are already made locally and the Pi is reachable at `tooltracker.local` with your SSH key already authorized on it.
+
 ## Maintenance
 
 - **Restarting after a code change**: static files (`public/*.html`, `*.js`, `*.css`) take effect on the next page load with no restart needed. Changes to `server.js` require killing and restarting the Node process. **Before starting a new one, always check nothing is already listening on port 3000** — a stray process from a previous session silently serving old code was a repeated source of confusing bugs during development:
