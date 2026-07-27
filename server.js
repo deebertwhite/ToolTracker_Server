@@ -12,6 +12,7 @@ const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
@@ -447,10 +448,26 @@ const storage = multer.diskStorage({
     }
 });
 
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB Limit
 });
+
+/**
+ * Deletes a previously-uploaded photo file given its stored `/uploads/<filename>` URL,
+ * silently no-oping on a null/empty URL or a file that's already gone. Shared by the photo
+ * upload endpoint (cleaning up the file a new upload just replaced) and every entity DELETE
+ * endpoint (cleaning up that entity's own photo) -- previously nothing ever deleted these
+ * files, so every re-upload or deletion left the old file behind on disk forever. Only ever
+ * called with a photo_url this server itself generated (never a client-supplied path), so
+ * path.basename() safely strips it back down to just the filename before joining it onto
+ * UPLOAD_DIR -- there's no path-traversal risk from user input here.
+ */
+function deletePhotoFile(photoUrl) {
+    if (!photoUrl) return;
+    const filePath = path.join(UPLOAD_DIR, path.basename(photoUrl));
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+}
 
 // ==========================================
 // 1. SYSTEM & INVENTORY FETCHING
@@ -906,10 +923,11 @@ app.delete('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req,
         // Count tools whose drawer belongs to this toolbox instead of filtering tools.box_id directly.
         const checkTools = await pool.query('SELECT COUNT(*) FROM tools t LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id WHERE dr.box_id = $1', [req.params.id]);
         if (parseInt(checkDrawers.rows[0].count) > 0 || parseInt(checkTools.rows[0].count) > 0) return res.status(400).json({ error: 'Cannot delete: Not empty.' });
-        await pool.query('DELETE FROM toolboxes WHERE box_id = $1', [req.params.id]);
+        const result = await pool.query('DELETE FROM toolboxes WHERE box_id = $1 RETURNING photo_url', [req.params.id]);
+        deletePhotoFile(result.rows[0]?.photo_url);
         res.json({ success: true });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to delete Toolbox.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete Toolbox.' });
     }
 });
 
@@ -918,10 +936,11 @@ app.delete('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, r
     try {
         const checkTools = await pool.query('SELECT COUNT(*) FROM tools WHERE drawer_id = $1', [req.params.id]);
         if (parseInt(checkTools.rows[0].count) > 0) return res.status(400).json({ error: 'Cannot delete: Not empty.' });
-        await pool.query('DELETE FROM drawers WHERE drawer_id = $1', [req.params.id]);
+        const result = await pool.query('DELETE FROM drawers WHERE drawer_id = $1 RETURNING photo_url', [req.params.id]);
+        deletePhotoFile(result.rows[0]?.photo_url);
         res.json({ success: true });
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to delete Drawer.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete Drawer.' });
     }
 });
 
@@ -966,16 +985,17 @@ app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req
         try {
             await client.query('BEGIN');
             await client.query('DELETE FROM audit_logs WHERE tool_id = $1', [tool_id]);
-            await client.query('DELETE FROM tools WHERE tool_id = $1', [tool_id]);
+            const result = await client.query('DELETE FROM tools WHERE tool_id = $1 RETURNING photo_url', [tool_id]);
             await client.query('COMMIT');
+            deletePhotoFile(result.rows[0]?.photo_url);
             res.json({ success: true });
         } catch (err) {
             await client.query('ROLLBACK'); throw err;
         } finally {
             client.release();
         }
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to delete tool.' }); 
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete tool.' });
     }
 });
 
@@ -1245,6 +1265,14 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo
         return res.status(400).json({ error: 'Missing required fields.' });
     }
 
+    // Tracks whichever file currently represents "the new photo" -- starts as multer's raw
+    // upload, reassigned to the compressed copy below if that step succeeds. The catch block
+    // at the bottom always cleans up whatever this currently points at, so a failure after
+    // compression doesn't leak the compressed file the same way a failure before it doesn't
+    // leak the original.
+    let finalPath = req.file.path;
+    let finalFilename = req.file.filename;
+
     try {
         if (req.authUser.weight < 3 && (entity_type === 'user' || entity_type === 'toolbox' || entity_type === 'drawer')) {
             throw new Error('You only have permission to upload tool assets.');
@@ -1258,15 +1286,51 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo
         else if (entity_type === 'drawer') { table = 'drawers'; idColumn = 'drawer_id'; }
         else throw new Error('Invalid entity type.');
 
-        const photoUrl = `/uploads/${req.file.filename}`;
+        // Compress/resize before this ever becomes a permanent photo_url -- phone camera
+        // photos routinely land at 3-8MB with no benefit at the sizes this app actually
+        // displays them (a ~40px thumbnail up to a lightbox capped well under full screen), and
+        // this matters a lot on a Pi with a fixed-size external drive for public/uploads.
+        // Written to a temp path first, then renamed over the final name, since sharp refuses
+        // to use the same path for input and output (which would otherwise happen whenever the
+        // original upload was already a .jpg). Falls back to keeping the untouched original if
+        // sharp can't process it (e.g. an exotic format that slipped past the client's
+        // accept="image/*") rather than blocking the upload entirely.
+        try {
+            const compressedFilename = path.parse(req.file.filename).name + '.jpg';
+            const compressedPath = path.join(UPLOAD_DIR, compressedFilename);
+            const tempPath = compressedPath + '.tmp';
+            await sharp(req.file.path)
+                .rotate() // apply EXIF orientation before it's stripped, so sideways/upside-down phone photos still display upright
+                .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+                .jpeg({ quality: 82 })
+                .toFile(tempPath);
+            fs.unlinkSync(req.file.path);
+            fs.renameSync(tempPath, compressedPath);
+            finalPath = compressedPath;
+            finalFilename = compressedFilename;
+        } catch (compressErr) {
+            console.error('Photo compression failed, keeping original upload:', compressErr.message);
+        }
+
+        // Look up the entity's current photo (if any) before overwriting it, so the old file
+        // can be cleaned up once the new one is confirmed saved -- previously every re-upload
+        // for the same entity left the old file behind forever (a real storage leak on fixed
+        // external storage), since multer gives every upload a unique filename and nothing
+        // ever pointed back at the old one to delete it.
+        const oldRes = await pool.query(`SELECT photo_url FROM ${table} WHERE ${idColumn} = $1`, [entity_id]);
+        const oldPhotoUrl = oldRes.rows[0]?.photo_url;
+
+        const photoUrl = `/uploads/${finalFilename}`;
         const query = `UPDATE ${table} SET photo_url = $1 WHERE ${idColumn} = $2 RETURNING *`;
         const result = await pool.query(query, [photoUrl, entity_id]);
 
         if (result.rows.length === 0) throw new Error(`Record not found in ${table}.`);
 
+        if (oldPhotoUrl && oldPhotoUrl !== photoUrl) deletePhotoFile(oldPhotoUrl);
+
         res.json({ success: true, photo_url: photoUrl, message: 'Upload successful.' });
     } catch (err) {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
         res.status(403).json({ error: err.message || 'Upload failed.' });
     }
 });

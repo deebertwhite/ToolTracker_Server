@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "generate-labels": "node scripts/generate-tool-labels.js",
-    "generate-size-test": "node scripts/generate-size-test-sheet.js"
+    "generate-size-test": "node scripts/generate-size-test-sheet.js",
+    "prune-logs": "node scripts/prune-old-logs.js"
   },
   "keywords": [],
   "author": "",

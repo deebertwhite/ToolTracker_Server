@@ -164,6 +164,29 @@ const BASE_STORAGE_PATH = __dirname; // Option A: Windows PC (Development)
 // const BASE_STORAGE_PATH = '/mnt/external_drive/ToolTracker_Data'; // Option B: Raspberry Pi (Production)
 ```
 
+### Mounting the external drive at a stable path
+
+Mount the USB drive by its filesystem **UUID** in `/etc/fstab`, at a fixed path (matching the `Option B` path above), rather than relying on whatever auto-mount path the OS happens to assign (which can change between drives, or even between boots):
+
+```bash
+lsblk -f                       # find the drive's UUID (e.g. /dev/sda1)
+sudo mkdir -p /mnt/external_drive/ToolTracker_Data
+sudo blkid /dev/sda1           # copy the UUID= value
+```
+
+Add a line like this to `/etc/fstab` (as root, e.g. `sudo nano /etc/fstab`):
+```
+UUID=xxxx-xxxx-xxxx-xxxx  /mnt/external_drive/ToolTracker_Data  ext4  defaults,nofail  0  2
+```
+`nofail` matters — without it, a missing drive at boot (loose cable, drive swapped out) can hang the whole boot process instead of just failing to mount. Then `sudo mount -a` to mount it immediately without rebooting, and `df -h` to confirm it's there.
+
+The payoff: since `BASE_STORAGE_PATH` points at this fixed path rather than a device-specific one, swapping to a new or larger drive later never requires touching the app's code or config. To migrate to a new drive:
+1. Format the new drive and get its UUID (same commands as above).
+2. With the app stopped (`sudo systemctl stop tooltracker`, so nothing writes mid-copy), mount the new drive at a temporary path and copy everything over: `sudo rsync -avh /mnt/external_drive/ToolTracker_Data/ /mnt/new_drive_temp/`.
+3. Verify the copy (`diff -rq` between old and new, or at minimum compare `du -sh` on both).
+4. Update the UUID in `/etc/fstab` to the new drive, unmount both, then `sudo mount -a` to bring the new one up at the real path.
+5. `sudo systemctl start tooltracker`. The 16GB (or whatever size) old drive is now free to reuse or retire.
+
 Steps to move to the Pi:
 
 1. Copy the whole project to the Pi (excluding everything already git-ignored — `node_modules/`, `.env`, `certs/`, `logs/`, etc. don't need to travel over, they're regenerated or recreated fresh).
@@ -210,6 +233,34 @@ Steps to move to the Pi:
 
    Then `sudo systemctl enable --now tooltracker tooltracker-caddy`. Also give the Postgres container the same treatment (`docker-compose` already restarts `always`, but confirm Docker itself starts on boot: `sudo systemctl enable docker`). No extra systemd config is needed for `.env` — `dotenv` looks for it in the current working directory by default, and `WorkingDirectory` above already points at the project folder where it lives.
 
+10. (Optional but recommended) Schedule log pruning (`npm run prune-logs`, see [Maintenance](#maintenance)) to run monthly instead of remembering to do it by hand, via a systemd timer:
+
+    ```ini
+    # /etc/systemd/system/tooltracker-prune-logs.service
+    [Unit]
+    Description=ToolTracker log retention cleanup
+
+    [Service]
+    Type=oneshot
+    WorkingDirectory=/path/to/ToolTracker_Server
+    ExecStart=/usr/bin/node scripts/prune-old-logs.js
+    ```
+
+    ```ini
+    # /etc/systemd/system/tooltracker-prune-logs.timer
+    [Unit]
+    Description=Run ToolTracker log pruning monthly
+
+    [Timer]
+    OnCalendar=monthly
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+    ```
+
+    `sudo systemctl enable --now tooltracker-prune-logs.timer`. `Persistent=true` means a run that was missed (e.g. the Pi was off when it would have fired) happens shortly after the next boot instead of silently skipping that month.
+
 ## Maintenance
 
 - **Restarting after a code change**: static files (`public/*.html`, `*.js`, `*.css`) take effect on the next page load with no restart needed. Changes to `server.js` require killing and restarting the Node process. **Before starting a new one, always check nothing is already listening on port 3000** — a stray process from a previous session silently serving old code was a repeated source of confusing bugs during development:
@@ -219,7 +270,8 @@ Steps to move to the Pi:
   Kill any match with `Stop-Process -Id <id> -Force` before starting a fresh one. (Once the systemd units above are in place, `systemctl restart tooltracker` handles this correctly on its own.)
 - **Database backups**: `docker exec tooltracker_server-db-1 pg_dump -U tooladmin -d tooltracker -F c -f /tmp/backup.dump`, then copy it out with `docker cp`. Do this before any risky schema change or bulk edit. No automated backup schedule exists yet — see [Future Improvements](#future-improvements).
 - **Certificate renewal**: fully automatic, no action needed — just make sure Caddy keeps running (see the systemd unit above once on the Pi).
-- **Logs**: `logs/hourly/<DEPT>/` and `logs/daily/<DEPT>/` grow daily and are gitignored (not committed). They currently grow forever with no rotation/cleanup — worth revisiting once real usage volume is known.
+- **Logs**: `logs/hourly/<DEPT>/` and `logs/daily/<DEPT>/` grow daily and are gitignored (not committed) — but the actual bytes involved are small even over years (terse text lines, not binary data), so this is about intentional retention policy more than real disk pressure. `npm run prune-logs` deletes anything older than the retention window set at the top of `scripts/prune-old-logs.js` (2 years by default); pass `--dry-run` to preview what it would delete without touching anything. Not run automatically yet — see the systemd timer note in [Raspberry Pi Migration](#raspberry-pi-migration).
+- **Photo storage**: uploaded photos (`public/uploads/`) are automatically resized (max 1600px) and re-compressed to JPEG on upload, and the previous file is deleted whenever a photo is replaced or its entity is deleted (see `deletePhotoFile()` in `server.js`) — so growth tracks the number of *distinct* photos actually taken, not every re-upload or replacement.
 - **Regenerating tool labels**: re-run `npm run generate-labels` any time tools are added — see [Generating Tool Labels](#generating-tool-labels).
 
 ## Troubleshooting
