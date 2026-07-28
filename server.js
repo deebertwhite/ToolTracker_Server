@@ -410,7 +410,13 @@ async function describeAuditWindowStatus(deptId, windowStart) {
  * (via PUT /api/tools/:id) is legal, without touching the DB.
  * - 'Out', 'Pending Transfer', and 'In Calibration' can never be *entered* here -- 'Out' only
  *   happens via a real kiosk checkout, the other two only via the transfer endpoints.
- * - While currently 'Out', 'Pending Transfer', or 'In Calibration', no change is allowed at all.
+ * - While 'Pending Transfer' or 'In Calibration', no change is allowed at all.
+ * - While 'Out': can only move to Missing/Broken/Worn (reporting an issue on a tool that's
+ *   currently checked out implicitly ends the checkout -- see POST /api/kiosk/report-issue --
+ *   rather than requiring it to be checked in "clean" first and flagged as a separate step
+ *   afterward, which was impossible to do correctly and blocked reporting a tool broken or
+ *   lost while someone actually had it). Retiring an Out tool directly isn't allowed -- it
+ *   must pass through one of the three flagged states first, same as from every other status.
  * - Otherwise: 'In' <-> (Missing, Broken, Worn) freely, any of those -> Retired, Retired is terminal.
  * @param {string} currentStatus - the tool's status before the update
  * @param {string} requestedStatus - the status being requested
@@ -419,11 +425,15 @@ async function describeAuditWindowStatus(deptId, windowStart) {
 const checkToolStatusTransition = (currentStatus, requestedStatus) => {
     if (requestedStatus === currentStatus) return { allowed: true };
 
-    if (currentStatus === 'Out') return { allowed: false, code: 'TOOL_IS_OUT' };
     if (currentStatus === 'Pending Transfer' || currentStatus === 'In Calibration') return { allowed: false, code: 'TOOL_IN_TRANSFER' };
 
     if (requestedStatus === 'Out' || requestedStatus === 'Pending Transfer' || requestedStatus === 'In Calibration') {
         return { allowed: false, code: 'INVALID_STATUS_TRANSITION' };
+    }
+
+    if (currentStatus === 'Out') {
+        if (['Missing', 'Broken', 'Worn'].includes(requestedStatus)) return { allowed: true };
+        return { allowed: false, code: 'TOOL_IS_OUT' };
     }
 
     if (currentStatus === 'In') {
@@ -1568,8 +1578,12 @@ app.get('/api/audits/today-status', async (req, res) => {
 // while still AWAITING_QA_ACCEPT). tools.drawer_id is never modified during this cycle -- only
 // tools.status reflects the tool being temporarily away for calibration.
 
-// Report a tool issue from the kiosk (Broken/Missing/Worn). Requires a valid technician badge+pin;
-// tool must currently be 'In'.
+// Report a tool issue from the kiosk (Broken/Missing/Worn). Requires a valid technician
+// badge+pin. Legal from either 'In' or 'Out' (see checkToolStatusTransition) -- reporting a
+// tool broken or lost while it's checked out implicitly ends that checkout, since there's no
+// "check it in clean, then separately flag it" step that could ever correctly represent a
+// tool that broke or went missing in someone's hands. Not legal while 'Pending Transfer',
+// 'In Calibration', or 'Retired'.
 app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
     const { badge_id, pin, qr_code, issue_type, notes } = req.body;
 
@@ -1601,9 +1615,13 @@ app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
         }
         const tool = toolRes.rows[0];
 
-        if (tool.status !== 'In') {
+        const transition = checkToolStatusTransition(tool.status, issue_type);
+        if (!transition.allowed) {
             await client.query('ROLLBACK');
-            return res.status(409).json({ error: 'Tool must be checked in to report an issue.', code: 'TOOL_NOT_IN' });
+            const message = transition.code === 'TOOL_IN_TRANSFER'
+                ? 'Tool is currently in a QA transfer and cannot be reported right now.'
+                : 'This tool cannot be reported in its current state.';
+            return res.status(409).json({ error: message, code: transition.code });
         }
 
         await client.query('UPDATE tools SET status = $1, status_reason = $2 WHERE tool_id = $3', [issue_type, notes || null, tool.tool_id]);
