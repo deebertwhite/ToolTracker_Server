@@ -19,6 +19,16 @@ const { stringify: stringifyCsv } = require('csv-stringify/sync');
 
 const app = express();
 
+// Trust exactly one hop of reverse proxy (Caddy sits directly in front of this app in every
+// real deployment -- see the Caddyfile). Without this, Express has no way to know the
+// request in front of Caddy was actually HTTPS (breaking the session cookie's `secure` flag
+// in production -- the cookie silently never gets set, which is why login appeared to
+// succeed but every subsequent request came back "Not logged in"), and express-rate-limit
+// refuses to trust the client IP in X-Forwarded-For, throwing on every request instead of
+// rate-limiting correctly. `1` (not `true`) means only the immediate hop is trusted, so a
+// client can't spoof its own IP by prepending a fake X-Forwarded-For entry.
+app.set('trust proxy', 1);
+
 // ==========================================
 // MIDDLEWARE
 // ==========================================
