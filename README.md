@@ -24,7 +24,8 @@ Beyond basic check-in/check-out, the app enforces a few real operational control
 - **Account security**: PINs are bcrypt-hashed, brute-force attempts are throttled both by IP and by individual badge, and every admin action is re-checked against the database's current role on every request — see [Security Notes](#security-notes).
 - **Real HTTPS everywhere**: camera access requires a secure context on every device except `localhost`. See [HTTPS & Remote Access](#https--remote-access-caddy--duckdns) below for how this is solved without per-device certificate installs.
 - **Progressive Web App**: installable home-screen icons for Kiosk/Admin/Dashboard separately, with app-shell caching for resilience against brief network hiccups (not full offline data sync — see [Future Improvements](#future-improvements)).
-- **Data Matrix label generation**: `scripts/generate-tool-labels.js` and `scripts/generate-size-test-sheet.js` produce print- and laser-engraving-ready barcode labels straight from the live tool list. See [Generating Tool Labels](#generating-tool-labels) below.
+- **Automatic per-tool barcode label**: creating a tool (single-tool ingest form or CSV import) automatically generates a Data Matrix label PNG for it, stored as `tools.barcode_image_url` -- a separate file/field from `photo_url` (the tool's actual picture) -- and viewable/selectable from its card in the admin panel.
+- **Data Matrix label generation for print/engraving**: `scripts/generate-tool-labels.js` and `scripts/generate-size-test-sheet.js` produce print- and laser-engraving-ready barcode labels straight from the live tool list, at an exact confirmed-scannable physical size. See [Generating Tool Labels](#generating-tool-labels) below.
 
 ## Running Locally (PC / Dev)
 
@@ -107,7 +108,9 @@ Each of the three main pages has its own web app manifest (`manifest-kiosk.json`
 
 ## Generating Tool Labels
 
-Two free, offline scripts (using `bwip-js`, no external service) generate Data Matrix barcodes straight from the live `tools` table, so printed/engraved codes can never drift out of sync with the database:
+Every tool gets a Data Matrix label PNG automatically the moment it's created (see `generateBarcodeLabel()` in `server.js`), stored at `tools.barcode_image_url` and viewable from its card in the admin panel -- generous padding around the code and its human-readable ID, since it's meant for on-screen viewing/selection, not precision engraving. Run `npm run backfill-barcode-labels` once to generate labels for any tool created before this feature existed (safe to re-run; it only touches tools missing one).
+
+For **physical printing/engraving** specifically, two separate, free, offline scripts (using `bwip-js`, no external service) generate Data Matrix barcodes straight from the live `tools` table at an exact, confirmed-scannable physical size (deliberately zero padding, unlike the auto-generated on-screen label above -- padding here would either enlarge the physical label or shrink the code to compensate, neither desirable once a size is confirmed scannable), so printed/engraved codes can never drift out of sync with the database:
 
 ```
 npm run generate-labels [target-size-mm]     # one PNG + one SVG per tool, in tool_labels/
