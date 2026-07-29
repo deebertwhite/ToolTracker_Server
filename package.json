@@ -8,6 +8,7 @@
     "generate-labels": "node scripts/generate-tool-labels.js",
     "generate-size-test": "node scripts/generate-size-test-sheet.js",
     "prune-logs": "node scripts/prune-old-logs.js",
+    "backfill-barcode-labels": "node scripts/backfill-barcode-labels.js",
     "deploy": "bash scripts/deploy-to-pi.sh"
   },
   "keywords": [],

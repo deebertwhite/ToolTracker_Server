@@ -16,6 +16,7 @@ const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
+const { generatePngAtSize } = require('./scripts/lib/datamatrix');
 
 const app = express();
 
@@ -488,6 +489,39 @@ function deletePhotoFile(photoUrl) {
     if (!photoUrl) return;
     const filePath = path.join(UPLOAD_DIR, path.basename(photoUrl));
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+}
+
+// ==========================================
+// BARCODE LABEL GENERATION (DATA MATRIX)
+// ==========================================
+const BARCODE_LABEL_DIR = path.join(UPLOAD_DIR, 'barcodes');
+if (!fs.existsSync(BARCODE_LABEL_DIR)) {
+    fs.mkdirSync(BARCODE_LABEL_DIR, { recursive: true });
+}
+
+const BARCODE_LABEL_SIZE_MM = 15; // matches the default physical size scripts/generate-tool-labels.js uses
+const BARCODE_LABEL_PADDING = 20; // bwip-js module units -- visually confirmed to give clear breathing room around the code and its human-readable ID without looking excessive; see scripts/lib/datamatrix.js for why this differs from the 0-padding bulk print/engrave scripts
+
+/**
+ * Generates a Data Matrix label PNG for a tool's barcode and saves it to
+ * public/uploads/barcodes/<qr_code>.png, returning the /uploads/... URL to store in
+ * tools.barcode_image_url. This is a distinct file/column from a tool's photo_url (its
+ * actual picture) -- one is auto-generated from the barcode value, the other is a manual
+ * upload of what the tool physically looks like.
+ *
+ * The filename is derived directly from qr_code rather than the random-suffixed pattern
+ * multer uses for photo uploads: a tool's barcode value is immutable once set (retiring a
+ * tool mangles its OLD qr_code with a "-RET-<id>" suffix rather than reusing it -- see
+ * POST /api/tools), so there's no collision risk and no old file to clean up on replacement
+ * the way user-uploaded photos need (see deletePhotoFile()).
+ * @param {string} qrCode
+ * @returns {Promise<string>} the saved image's /uploads/... URL
+ */
+async function generateBarcodeLabel(qrCode) {
+    const safeName = qrCode.replace(/[^A-Za-z0-9_-]/g, '_');
+    const { png } = await generatePngAtSize(qrCode, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING);
+    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), png);
+    return `/uploads/barcodes/${safeName}.png`;
 }
 
 // ==========================================
@@ -973,6 +1007,7 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
     const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
     try {
         const client = await pool.connect();
+        let newToolId;
         try {
             await client.query('BEGIN');
             if (replaced_tool_id) {
@@ -982,19 +1017,33 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
             // Updated to include description, replacement_url, serial_number, and part_number
             const insertQuery = `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING tool_id`;
             const insertRes = await client.query(insertQuery, [qr_code, name, description || null, replacement_url || null, drawer_id || null, 'In', is_calibrated || false, last_cal_date || null, cal_due_date || null, serial_number || null, part_number || null]);
+            newToolId = insertRes.rows[0].tool_id;
 
             if (replaced_tool_id) {
-                await client.query('UPDATE tools SET replaced_by_id = $1 WHERE tool_id = $2', [insertRes.rows[0].tool_id, replaced_tool_id]);
+                await client.query('UPDATE tools SET replaced_by_id = $1 WHERE tool_id = $2', [newToolId, replaced_tool_id]);
             }
-            await client.query('COMMIT'); 
-            res.json({ success: true });
-        } catch (err) { 
-            await client.query('ROLLBACK'); throw err; 
-        } finally { 
-            client.release(); 
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK'); throw err;
+        } finally {
+            client.release();
         }
-    } catch (err) { 
-        res.status(500).json({ error: 'Failed to add tool.' }); 
+
+        // Auto-generate this tool's Data Matrix label image now that qr_code is committed.
+        // Done outside the transaction (a filesystem write, not something to roll back) and
+        // best-effort -- a label-generation failure shouldn't block tool creation itself,
+        // since the tool record is already valid and useful without one (it can be filled in
+        // later via scripts/backfill-barcode-labels.js).
+        try {
+            const barcodeUrl = await generateBarcodeLabel(qr_code);
+            await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, newToolId]);
+        } catch (labelErr) {
+            console.error('Barcode label generation failed for', qr_code, labelErr.message);
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to add tool.' });
     }
 });
 
@@ -1261,7 +1310,18 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                      fields.is_calibrated, fields.last_cal_date, fields.cal_due_date, fields.serial_number, fields.part_number]
                 );
                 created++;
-                results.push({ row: rowNum, barcode: qr_code, result: 'created', message: 'Created new tool.' });
+
+                // Best-effort, same reasoning as POST /api/tools -- a label-generation
+                // failure shouldn't turn an otherwise-successful row into a reported error.
+                let message = 'Created new tool.';
+                try {
+                    const barcodeUrl = await generateBarcodeLabel(qr_code);
+                    await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE qr_code = $2', [barcodeUrl, qr_code]);
+                } catch (labelErr) {
+                    console.error('Barcode label generation failed for', qr_code, labelErr.message);
+                    message = 'Created new tool (barcode label generation failed -- can be filled in later).';
+                }
+                results.push({ row: rowNum, barcode: qr_code, result: 'created', message });
             }
         } catch (err) {
             errors++;

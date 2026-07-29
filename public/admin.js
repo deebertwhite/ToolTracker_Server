@@ -952,6 +952,15 @@ function openEntityModal(type, id) {
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Status</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${entity.status}</div></div>
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration</div><div style="font-size:14px;margin-top:4px;font-weight:bold;">${calText}</div></div>
             </div>
+            <div style="display: flex; align-items: center; gap: 14px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div style="flex:1;">
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Barcode Label</div>
+                    <div style="font-size:12px;margin-top:4px;color:var(--muted);">${entity.barcode_image_url ? 'Auto-generated Data Matrix label -- click to view/print.' : 'Not generated yet.'}</div>
+                </div>
+                ${entity.barcode_image_url
+                    ? `<img src="${entity.barcode_image_url}" onclick="openImageModal('${entity.barcode_image_url}')" style="width:50px;height:50px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
+                    : ''}
+            </div>
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
         if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">🛒 Open Replacement Link →</a></div>`;

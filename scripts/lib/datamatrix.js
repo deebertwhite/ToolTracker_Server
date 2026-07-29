@@ -80,16 +80,24 @@ function withPhysicalDpi(pngBuffer, dpi) {
  * same pixel count and produce identical output, which defeats the point of a
  * size-comparison test. The resulting PNG also carries a pHYs chunk (see
  * withPhysicalDpi) so "print at 100%" actually reflects the requested size.
+ *
+ * `padding` (bwip-js module units, applied symmetrically on all sides, default 0) is
+ * deliberately left at 0 for the existing print/engrave callers below, which are
+ * calibrated for exact physical code sizing and where extra padding would either
+ * enlarge the physical label or shrink the code to compensate -- neither desirable for
+ * something meant to be engraved at a confirmed-scannable size. A caller generating a
+ * label purely for on-screen viewing (see generateBarcodeLabel() in server.js) can pass
+ * a positive value for clearer breathing room around the code and its human-readable ID.
  */
-async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true) {
+async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, padding = 0) {
     const grid = await getModuleGridSize(text);
     const targetPx = (targetMm / MM_PER_INCH) * dpi;
     const scale = Math.max(1, Math.round(targetPx / grid.width));
-    const opts = { bcid: 'datamatrix', text, scale, paddingwidth: 0, paddingheight: 0 };
+    const opts = { bcid: 'datamatrix', text, scale, paddingwidth: padding, paddingheight: padding };
     if (withText) Object.assign(opts, textOptions(text));
     const rawPng = await bwipjs.toBuffer(opts);
     const png = withPhysicalDpi(rawPng, dpi);
-    const actualCodeMm = (grid.width * scale / dpi) * MM_PER_INCH; // size of the scannable code itself, excluding any text row
+    const actualCodeMm = (grid.width * scale / dpi) * MM_PER_INCH; // size of the scannable code itself, excluding any text row or padding
     return { png, dpi, scale, requestedMm: targetMm, actualCodeMm };
 }
 
