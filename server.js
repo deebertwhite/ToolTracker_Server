@@ -476,18 +476,25 @@ const upload = multer({
 });
 
 /**
- * Deletes a previously-uploaded photo file given its stored `/uploads/<filename>` URL,
- * silently no-oping on a null/empty URL or a file that's already gone. Shared by the photo
- * upload endpoint (cleaning up the file a new upload just replaced) and every entity DELETE
- * endpoint (cleaning up that entity's own photo) -- previously nothing ever deleted these
- * files, so every re-upload or deletion left the old file behind on disk forever. Only ever
- * called with a photo_url this server itself generated (never a client-supplied path), so
- * path.basename() safely strips it back down to just the filename before joining it onto
- * UPLOAD_DIR -- there's no path-traversal risk from user input here.
+ * Deletes a previously-uploaded file (a photo, or a generated barcode label under
+ * uploads/barcodes/) given its stored `/uploads/...` URL, silently no-oping on a null/empty
+ * URL or a file that's already gone. Shared by the photo upload endpoint (cleaning up the
+ * file a new upload just replaced) and every entity DELETE endpoint (cleaning up that
+ * entity's photo and, for tools, its barcode label too) -- previously nothing ever deleted
+ * these files, so every re-upload or deletion left the old file behind on disk forever.
+ *
+ * Strips only the leading "/uploads/" prefix (not path.basename()) so a URL pointing into a
+ * subdirectory like "/uploads/barcodes/AVI-000001.png" resolves to the correct nested file
+ * rather than being flattened to just "AVI-000001.png" directly under UPLOAD_DIR, which
+ * would silently no-op (the flattened path was never actually written there). This is only
+ * ever called with a photo_url/barcode_image_url this server itself generated (never a
+ * client-supplied path), so trusting the rest of the path is safe -- there's no
+ * path-traversal risk from user input here.
  */
 function deletePhotoFile(photoUrl) {
     if (!photoUrl) return;
-    const filePath = path.join(UPLOAD_DIR, path.basename(photoUrl));
+    const relativePath = photoUrl.replace(/^\/uploads\//, '');
+    const filePath = path.join(UPLOAD_DIR, relativePath);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 }
 
@@ -1055,9 +1062,10 @@ app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req
         try {
             await client.query('BEGIN');
             await client.query('DELETE FROM audit_logs WHERE tool_id = $1', [tool_id]);
-            const result = await client.query('DELETE FROM tools WHERE tool_id = $1 RETURNING photo_url', [tool_id]);
+            const result = await client.query('DELETE FROM tools WHERE tool_id = $1 RETURNING photo_url, barcode_image_url', [tool_id]);
             await client.query('COMMIT');
             deletePhotoFile(result.rows[0]?.photo_url);
+            deletePhotoFile(result.rows[0]?.barcode_image_url);
             res.json({ success: true });
         } catch (err) {
             await client.query('ROLLBACK'); throw err;
