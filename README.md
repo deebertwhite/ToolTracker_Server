@@ -91,7 +91,7 @@ The actual fix: a **real, publicly-trusted certificate** (free, via Let's Encryp
 
 ### If the Pi's local IP ever changes
 
-Update the IP field on the DuckDNS page to match (`curl "https://www.duckdns.org/update?domains=<name>&token=<token>&ip=<new-ip>"` or via the DuckDNS website), or nobody can reach the app until it's corrected. To avoid this entirely, give the Pi a **static/reserved IP** via a DHCP reservation on the router — recommended, but requires router access, so this may be pending until then.
+`tooltracker-duckdns-update.timer` (see [Disaster Recovery & Resilience](#disaster-recovery--resilience)) handles this automatically every 5 minutes now, so this is no longer something that needs noticing and fixing by hand. It exists specifically because there's no DHCP reservation for the Pi yet (pending router access) — a real reservation is still the better long-term fix (one less moving part), but the auto-updater means that's no longer urgent.
 
 ### Firewall
 
@@ -267,6 +267,95 @@ npm run deploy
 ```
 This pushes local commits to GitHub, then pulls them on the Pi and restarts `tooltracker.service` (see `scripts/deploy-to-pi.sh`) so the change actually takes effect. Static file changes (`public/*.html`/`*.js`/`*.css`) don't strictly need the restart — they take effect on next page load either way — but it's harmless to restart for those too. Assumes commits are already made locally and the Pi is reachable at `tooltracker.local` with your SSH key already authorized on it.
 
+## Disaster Recovery & Resilience
+
+Three separate, complementary protections, each against a different failure mode:
+
+### 1. Database lives on the external drive, not the SD card
+
+`docker-compose.yml` bind-mounts Postgres's data directory under `BASE_STORAGE_PATH` (see `.env.example`) instead of using a Docker-managed named volume, which would otherwise default to living on the SD card. SD cards fail far more often than a proper external drive, and losing one used to mean losing every tool/user/audit record — even though photos and logs already lived safely on the external drive. This is already set up; nothing to redo unless migrating to new storage. To do that migration again by hand (e.g. a new Pi, or a bigger drive):
+
+1. `docker exec tooltracker_server-db-1 pg_dump -U tooladmin -d tooltracker -F c -f /tmp/backup.dump`, then `docker cp` it out somewhere safe (twice — see [Maintenance](#maintenance) for the exact commands).
+2. `sudo systemctl stop tooltracker` (stop writes), then `docker compose down` (stops the container, does **not** delete the old volume/data).
+3. Create the new target directory and `sudo chown -R 999:999` it (`999` is the `postgres` user *inside* the official `postgres:15` image — confirm with `docker run --rm postgres:15 id postgres` if that ever changes), then `sudo chmod 700` it.
+4. Update `BASE_STORAGE_PATH` in `.env` if the target changed, then `docker compose up -d` — this initializes a fresh, empty database at the new location.
+5. Restore: `docker exec -i tooltracker_server-db-1 pg_restore -U tooladmin -d tooltracker --no-owner < backup.dump` (the "already exists" errors it prints if the schema init raced ahead of you are harmless noise, not a failure — verify with a real query afterward, e.g. `SELECT * FROM users`, rather than trusting the absence of errors).
+6. `sudo systemctl start tooltracker`, verify the app works, *then* remove the old volume (`docker volume ls`, `docker volume rm <name>`) once you're confident.
+
+### 2. Automated off-Pi backups (Google Drive via rclone)
+
+Protects against a different failure than #1: losing the *entire* Pi (stolen, destroyed, both drives fail at once), not just the SD card specifically. `scripts/backup-to-drive.sh` dumps the database and uploads it to Google Drive via `rclone`, keeping the most recent 30 backups and pruning older ones. Runs automatically once a day via `tooltracker-backup.timer`. One-time setup (already done for this deployment):
+
+1. Install rclone: `curl https://rclone.org/install.sh | sudo bash`.
+2. `rclone config` → `n` (new remote) → name it `gdrive` → type `drive` → leave `client_id`/`client_secret` blank (see the client-id note below) → scope `3` (`drive.file` — rclone can only see/manage files *it* creates, not your other Drive contents) → leave `service_account_file` blank → no advanced config → confirm continuing with the shared client_id → **no** to "use web browser" (the Pi has none) → it prints a `rclone authorize "drive" "<token>"` command.
+3. Run that exact command on any machine that *does* have a browser (rclone needs to be installed there too, even temporarily) — it opens a Google sign-in/consent page, then prints a config token back.
+4. Paste that token into the Pi's still-open `config_token>` prompt → `n` (not a Shared/Team Drive) → confirm the remote.
+5. Verify: `rclone lsd gdrive:` should succeed with no error (an empty result is expected — nothing's been uploaded yet).
+6. Create the service + timer:
+   ```ini
+   # /etc/systemd/system/tooltracker-backup.service
+   [Unit]
+   Description=ToolTracker off-Pi database backup
+
+   [Service]
+   Type=oneshot
+   User=tooltracker
+   WorkingDirectory=/home/tooltracker/ToolTracker_Server
+   ExecStart=/bin/bash scripts/backup-to-drive.sh
+   ```
+   ```ini
+   # /etc/systemd/system/tooltracker-backup.timer
+   [Unit]
+   Description=Run ToolTracker database backup daily
+
+   [Timer]
+   OnCalendar=daily
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   ```
+   `sudo systemctl enable --now tooltracker-backup.timer`.
+
+**The shared client_id warning**: rclone prints a notice that its shared Google Drive `client_id` "is being retired and will stop working during 2026." This was accepted for now to get backups working immediately without a separate Google Cloud project — but it means backups could silently start failing at some point this year. Creating your own `client_id` (a Google Cloud Console project + OAuth credentials, no Workspace admin needed) removes this risk entirely; see [rclone's guide](https://rclone.org/drive/#making-your-own-client-id). Worth revisiting before year-end regardless of whether it's failed yet.
+
+**A different, non-technical risk worth knowing about**: this remote is authorized against one person's Google account (`jwhite@ltaresearch.com`), not a company-owned service account. If that account's access to this app ever changes (leaves the company, revokes the grant, loses 2FA access, etc.), backups stop working silently until someone notices and re-authorizes with a different account. A Google Cloud **service account** (a machine identity with its own key file, owned by the organization rather than a person) would remove this single-point-of-failure, but needs a Google Cloud project, which is a separate ask from Workspace access and may need IT involvement. Worth it eventually; not blocking for now.
+
+To restore from one of these backups: download it from the `ToolTracker_Backups` folder in Drive (`rclone copy gdrive:ToolTracker_Backups/<file> .`), then follow step 5 of the migration procedure above.
+
+### 3. DuckDNS stays in sync with the Pi's local IP automatically
+
+Covered in [If the Pi's local IP ever changes](#if-the-pis-local-ip-ever-changes) above — `scripts/update-duckdns-ip.sh` runs every 5 minutes via `tooltracker-duckdns-update.timer`, so a DHCP lease change (no router-level reservation yet) gets corrected automatically instead of silently breaking access for everyone until it's noticed. Setup, if redoing this on a new Pi:
+
+1. Add `DUCKDNS_DOMAIN` (just the subdomain, e.g. `lta-tooltracker`, not the full `.duckdns.org`) and `DUCKDNS_TOKEN` (same value already in the git-ignored `Caddyfile`) to `.env`.
+2. Create the service + timer:
+   ```ini
+   # /etc/systemd/system/tooltracker-duckdns-update.service
+   [Unit]
+   Description=ToolTracker DuckDNS IP updater
+
+   [Service]
+   Type=oneshot
+   User=tooltracker
+   WorkingDirectory=/home/tooltracker/ToolTracker_Server
+   ExecStart=/bin/bash scripts/update-duckdns-ip.sh
+   ```
+   ```ini
+   # /etc/systemd/system/tooltracker-duckdns-update.timer
+   [Unit]
+   Description=Run ToolTracker DuckDNS IP updater every 5 minutes
+
+   [Timer]
+   OnBootSec=1min
+   OnUnitActiveSec=5min
+
+   [Install]
+   WantedBy=timers.target
+   ```
+   `sudo systemctl enable --now tooltracker-duckdns-update.timer`.
+
+This doesn't cover a genuine internet outage (DNS resolution for a public domain still needs internet the *first* time a device looks it up, even though the actual app traffic is 100% local afterward — see [Feature Overview](#feature-overview)) — only the "Pi's local IP silently changed" failure mode. A real DHCP reservation is still the cleaner permanent fix once router access allows it; this just means that's no longer urgent.
+
 ## Maintenance
 
 - **Deploying a code change**: on the Pi (the only real deployment), just `npm run deploy` from the PC — see [Deploying changes to the Pi](#deploying-changes-to-the-pi). It restarts `tooltracker.service` for you, which is the systemd-managed way this now always happens; there's no manual process-killing involved on the Pi.
@@ -275,7 +364,7 @@ This pushes local commits to GitHub, then pulls them on the Pi and restarts `too
   Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like "*server.js*" } | Select-Object ProcessId, CommandLine
   ```
   Kill any match with `Stop-Process -Id <id> -Force` before starting a fresh one.
-- **Database backups**: `docker exec tooltracker_server-db-1 pg_dump -U tooladmin -d tooltracker -F c -f /tmp/backup.dump`, then copy it out with `docker cp`. Do this before any risky schema change or bulk edit. No automated backup schedule exists yet — see [Future Improvements](#future-improvements).
+- **Database backups**: automatic and off-Pi now — `tooltracker-backup.timer` runs `scripts/backup-to-drive.sh` daily, uploading to Google Drive and keeping the most recent 30 (see [Disaster Recovery & Resilience](#disaster-recovery--resilience)). Before any risky schema change or bulk edit specifically, still take a fresh manual one first rather than relying on last night's: `docker exec tooltracker_server-db-1 pg_dump -U tooladmin -d tooltracker -F c -f /tmp/backup.dump`, then copy it out with `docker cp`.
 - **Certificate renewal**: fully automatic, no action needed — `tooltracker-caddy.service` just needs to keep running, which systemd (`Restart=always`) already guarantees.
 - **Logs**: `logs/hourly/<DEPT>/` and `logs/daily/<DEPT>/` grow daily and are gitignored (not committed) — but the actual bytes involved are small even over years (terse text lines, not binary data), so this is about intentional retention policy more than real disk pressure. `npm run prune-logs` deletes anything older than the retention window set at the top of `scripts/prune-old-logs.js` (2 years by default); pass `--dry-run` to preview what it would delete without touching anything. Runs automatically on the Pi via `tooltracker-prune-logs.timer` (monthly).
 - **Photo storage**: uploaded photos (`public/uploads/`) are automatically resized (max 1600px) and re-compressed to JPEG on upload, and the previous file is deleted whenever a photo is replaced or its entity is deleted (see `deletePhotoFile()` in `server.js`) — so growth tracks the number of *distinct* photos actually taken, not every re-upload or replacement.
@@ -318,10 +407,11 @@ This pushes local commits to GitHub, then pulls them on the Pi and restarts `too
 
 Roughly in priority order:
 
-1. **Automated backups** for the Postgres database — currently manual (`pg_dump` on demand), no schedule.
-2. **Drop the legacy plaintext `users.pin` column** once `pin_hash` has run in production through a full burn-in period — see [Security Notes](#security-notes).
-3. **DHCP reservation for the Pi** — pending until router access is granted (see [If the Pi's local IP ever changes](#if-the-pis-local-ip-ever-changes)); until then, a Pi IP change means manually updating the DuckDNS record again.
-4. **Real automated tests.** Everything so far has been verified by hand (manual `curl` testing against the live database during development) — there is no test suite. Worth adding at least basic API contract tests before this grows further.
-5. **Offline-first multi-site sync** — deliberately deferred. The single-shop, single-server setup doesn't need it; it becomes worth the real design cost (particularly: how to handle the same physical tool being checked out from two offline devices before they reconcile) once there's an actual second site or road-use scenario, not before.
-6. **Dual-PIN sign-off for the hardware sensor endpoints** (`/api/hardware/unlock`, `/api/hardware/sensor`) — these still only require a single badge, since there's no physical hardware deployed yet. Needs the same treatment as `/api/transactions` before any real sensor/lock hardware goes live.
-7. **`tools.box_id` cleanup** — a legacy column, currently unused; intentionally left alone per an earlier decision to revisit later rather than touch it opportunistically.
+1. **rclone's own client_id** — currently using rclone's shared Google Drive client_id, which is being retired sometime in 2026 and could break the automated backup silently when it does. Create a dedicated one (a Google Cloud Console project, no Workspace admin needed) — see [Disaster Recovery & Resilience](#disaster-recovery--resilience).
+2. **A company-owned backup identity** — the Drive backup is currently authorized against one person's Google account rather than a service account; see the same section for why that's a single-point-of-failure worth removing eventually.
+3. **Drop the legacy plaintext `users.pin` column** once `pin_hash` has run in production through a full burn-in period — see [Security Notes](#security-notes).
+4. **DHCP reservation for the Pi** — pending until router access is granted. No longer urgent now that `tooltracker-duckdns-update.timer` corrects a changed IP automatically (see [Disaster Recovery & Resilience](#disaster-recovery--resilience)), but still the cleaner permanent fix.
+5. **Real automated tests.** Everything so far has been verified by hand (manual `curl` testing against the live database during development) — there is no test suite. Worth adding at least basic API contract tests before this grows further.
+6. **Offline-first multi-site sync** — deliberately deferred. The single-shop, single-server setup doesn't need it; it becomes worth the real design cost (particularly: how to handle the same physical tool being checked out from two offline devices before they reconcile) once there's an actual second site or road-use scenario, not before.
+7. **Dual-PIN sign-off for the hardware sensor endpoints** (`/api/hardware/unlock`, `/api/hardware/sensor`) — these still only require a single badge, since there's no physical hardware deployed yet. Needs the same treatment as `/api/transactions` before any real sensor/lock hardware goes live.
+8. **`tools.box_id` cleanup** — a legacy column, currently unused; intentionally left alone per an earlier decision to revisit later rather than touch it opportunistically.
