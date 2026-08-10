@@ -33,7 +33,15 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Bind-mounted under BASE_STORAGE_PATH (same variable server.js reads -- see
+      # .env.example) rather than a Docker-managed named volume, so the database lives on
+      # the same durable storage as photos/logs instead of defaulting to the SD card. A
+      # Docker-managed volume for Postgres data specifically is a real risk on a Pi: SD
+      # cards wear out and fail far more often than a proper external drive, and losing the
+      # SD card would previously have meant losing every tool/user/audit record, even though
+      # photos and logs already lived safely on the external drive. Defaults to a local
+      # ./postgres_data folder for local PC dev, where there's no external drive concept and
+      # BASE_STORAGE_PATH is normally left unset.
+      - ${BASE_STORAGE_PATH:-.}/postgres_data:/var/lib/postgresql/data
 
-volumes:
-  pgdata:
+# No top-level `volumes:` section anymore -- see the bind-mount comment above.
