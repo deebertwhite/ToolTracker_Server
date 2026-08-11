@@ -1209,8 +1209,15 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
             return res.status(400).json({ error: 'A drawer/location is required.' });
         }
 
-        const currentRes = await pool.query('SELECT status FROM tools WHERE tool_id = $1', [req.params.id]);
+        // The entity modal's edit form always identifies a tool by its barcode ID (qr_code),
+        // matching how it's looked up/opened everywhere else in admin.js (openEntityModal,
+        // globalToolsCache) -- :id here is never the numeric tool_id, despite the route
+        // param name. Resolving to the real tool_id up front (rather than trying to use the
+        // qr_code text directly in a WHERE tool_id = ... comparison) is what was missing:
+        // that mismatch made every save throw "invalid input syntax for type integer".
+        const currentRes = await pool.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [req.params.id]);
         if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        const toolId = currentRes.rows[0].tool_id;
 
         const transition = checkToolStatusTransition(currentRes.rows[0].status, status);
         if (!transition.allowed) {
@@ -1232,7 +1239,7 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
              WHERE tool_id = $11`,
             [name, description || null, replacement_url || null, status,
              is_calibrated || false, last_cal_date || null, cal_due_date || null,
-             serial_number || null, part_number || null, drawer_id, req.params.id]
+             serial_number || null, part_number || null, drawer_id, toolId]
         );
         res.json({ success: true });
     } catch (err) {
