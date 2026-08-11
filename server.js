@@ -1197,11 +1197,14 @@ app.put('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res)
 
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
 app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
+    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number, drawer_id } = req.body;
     try {
         // If they checked the box but didn't provide a due date, throw an error
         if (is_calibrated && !cal_due_date) {
             return res.status(400).json({ error: 'Calibration Due Date is required.' });
+        }
+        if (!drawer_id) {
+            return res.status(400).json({ error: 'A drawer/location is required.' });
         }
 
         const currentRes = await pool.query('SELECT status FROM tools WHERE tool_id = $1', [req.params.id]);
@@ -1212,15 +1215,22 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
             return res.status(409).json({ error: 'That status change is not allowed.', code: transition.code });
         }
 
+        // Lets a tool be moved to a different drawer -- including in a different toolbox or
+        // department -- straight from the edit modal's Location cascade. Not blocked while
+        // 'Out': the tool isn't physically in any drawer at that point anyway, so reassigning
+        // where it lives once returned is a legitimate, unrelated action.
+        const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
+        if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid drawer selected.' });
+
         await pool.query(
             `UPDATE tools
              SET name = $1, description = $2, replacement_url = $3, status = $4,
                  is_calibrated = $5, last_cal_date = $6, cal_due_date = $7,
-                 serial_number = $8, part_number = $9
-             WHERE tool_id = $10`,
+                 serial_number = $8, part_number = $9, drawer_id = $10
+             WHERE tool_id = $11`,
             [name, description || null, replacement_url || null, status,
              is_calibrated || false, last_cal_date || null, cal_due_date || null,
-             serial_number || null, part_number || null, req.params.id]
+             serial_number || null, part_number || null, drawer_id, req.params.id]
         );
         res.json({ success: true });
     } catch (err) {
@@ -1399,14 +1409,18 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 const transition = checkToolStatusTransition(existing.status, requestedStatus);
                 if (!transition.allowed) throw new Error(`Status change from "${existing.status}" to "${requestedStatus}" is not allowed (${transition.code}).`);
 
+                // drawer_id is included here (not just on create) so a re-imported row that
+                // changed its Department/Toolbox/Drawer columns actually moves the tool --
+                // the same export -> bulk-edit -> re-import round trip this endpoint exists
+                // for should be able to relocate tools, not just edit their other fields.
                 await pool.query(
                     `UPDATE tools SET name = $1, description = $2, replacement_url = $3, status = $4,
                             is_calibrated = $5, last_cal_date = $6, cal_due_date = $7,
-                            serial_number = $8, part_number = $9
-                     WHERE tool_id = $10`,
+                            serial_number = $8, part_number = $9, drawer_id = $10
+                     WHERE tool_id = $11`,
                     [fields.name, fields.description, fields.replacement_url, requestedStatus,
                      fields.is_calibrated, fields.last_cal_date, fields.cal_due_date,
-                     fields.serial_number, fields.part_number, existing.tool_id]
+                     fields.serial_number, fields.part_number, drawerId, existing.tool_id]
                 );
                 updated++;
                 results.push({ row: rowNum, barcode: qr_code, result: 'updated', message: 'Updated existing tool.' });

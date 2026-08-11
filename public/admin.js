@@ -681,6 +681,17 @@ function onAddToolBoxChange() {
     populateDrawerSelect(document.getElementById('add-tool-drawer'), document.getElementById('add-tool-box').value);
 }
 
+/** Cascade handler for the tool edit modal's Location department select (see openEntityModal, type 'tool') -- lets an existing tool be moved to a different toolbox/drawer, including across departments. */
+function onMoveToolDeptChange() {
+    populateBoxSelect(document.getElementById('em-input-move-box'), document.getElementById('em-input-move-dept').value);
+    document.getElementById('em-input-move-drawer').innerHTML = '<option value="">-- Select a toolbox first --</option>';
+}
+
+/** Cascade handler for the tool edit modal's Location toolbox select: repopulates the Drawer select filtered to that toolbox. */
+function onMoveToolBoxChange() {
+    populateDrawerSelect(document.getElementById('em-input-move-drawer'), document.getElementById('em-input-move-box').value);
+}
+
 /**
  * Requests the next sequential tool barcode from GET /api/tools/next-id, using the prefix
  * carried on the selected #add-tool-dept option's data-prefix attribute (see
@@ -1022,9 +1033,35 @@ function openEntityModal(type, id) {
                 </div>`;
         }
 
+        // Location cascade (Department -> Toolbox -> Drawer), defaulted to the tool's current
+        // drawer -- lets a tool be moved to a different drawer/toolbox, including across
+        // departments, straight from the edit modal instead of only via direct DB access or a
+        // CSV round-trip. Mirrors the Ingest New Asset cascade (populateBoxSelect/
+        // populateDrawerSelect), just wired to onMoveToolDeptChange/onMoveToolBoxChange instead.
+        const currentDrawer = globalDrawersCache.find(d => d.drawer_id == entity.drawer_id);
+        const currentBox = currentDrawer ? globalBoxesCache.find(b => b.box_id == currentDrawer.box_id) : null;
+        const currentMoveDeptId = currentBox ? currentBox.dept_id : '';
+        const moveDeptOptions = globalDeptsCache.map(d => `<option value="${d.dept_id}" ${d.dept_id == currentMoveDeptId ? 'selected' : ''}>${d.name}</option>`).join('');
+        const boxesInDept = globalBoxesCache.filter(b => b.dept_id == currentMoveDeptId);
+        const moveBoxOptions = boxesInDept.length
+            ? '<option value="">-- Select Toolbox --</option>' + boxesInDept.map(b => `<option value="${b.box_id}" ${currentBox && b.box_id == currentBox.box_id ? 'selected' : ''}>${b.name}</option>`).join('')
+            : '<option value="">No toolboxes in this department</option>';
+        const drawersInBox = currentBox ? globalDrawersCache.filter(d => d.box_id == currentBox.box_id) : [];
+        const moveDrawerOptions = drawersInBox.length
+            ? '<option value="">-- Select Drawer --</option>' + drawersInBox.map(d => `<option value="${d.drawer_id}" ${d.drawer_id == entity.drawer_id ? 'selected' : ''}>${d.name}</option>`).join('')
+            : '<option value="">No drawers in this toolbox</option>';
+
         fieldsHtml = `
             <div class="form-group"><label class="form-label">Asset Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
             <div class="form-group"><label class="form-label">Description</label><textarea class="form-input" id="em-input-desc" rows="2">${entity.description || ''}</textarea></div>
+            <div class="form-group">
+                <label class="form-label">Location</label>
+                <div class="flex-grid-3" style="margin-bottom: 0;">
+                    <select class="form-select" id="em-input-move-dept" onchange="onMoveToolDeptChange()">${moveDeptOptions}</select>
+                    <select class="form-select" id="em-input-move-box" onchange="onMoveToolBoxChange()">${moveBoxOptions}</select>
+                    <select class="form-select" id="em-input-move-drawer">${moveDrawerOptions}</select>
+                </div>
+            </div>
             <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
                 <div class="form-group"><label class="form-label">Serial Number</label><input class="form-input" id="em-input-serial" value="${entity.serial_number || ''}" placeholder="Optional"></div>
                 <div class="form-group"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="em-input-partnum" value="${entity.part_number || ''}" placeholder="Optional"></div>
@@ -1127,8 +1164,9 @@ function closeEntityModal() { document.getElementById('entity-modal-overlay').st
  * fields and dispatches the save to the matching REST endpoint: PUT /api/toolboxes/:id,
  * PUT /api/drawers/:id, PUT /api/tools/:id, or PUT /api/users/:badge_id/role. Every
  * infrastructure type submits the shared `name` field; 'tool' additionally submits
- * description, replacement_url, status, and calibration fields; 'user' submits only `role`
- * (name/email/username aren't editable from here). For 'user', if the super_admin-only
+ * description, drawer_id (the Location cascade -- lets a tool be moved to a different
+ * drawer/toolbox/department here), replacement_url, status, and calibration fields; 'user'
+ * submits only `role` (name/email/username aren't editable from here). For 'user', if the super_admin-only
  * granted-department checkboxes are present in the DOM, also submits their checked state
  * to PUT /api/users/:badge_id/department-access as a second request. Closes the modal and
  * refreshes the infrastructure tree (or the personnel tables, for 'user') on success.
@@ -1151,6 +1189,7 @@ async function saveEntityUpdates() {
         else if (type === 'tool') {
             endpoint = `/api/tools/${id}`;
             payload.description = document.getElementById('em-input-desc').value;
+            payload.drawer_id = document.getElementById('em-input-move-drawer').value || null;
             payload.serial_number = document.getElementById('em-input-serial').value || null;
             payload.part_number = document.getElementById('em-input-partnum').value || null;
             payload.replacement_url = document.getElementById('em-input-url').value;
@@ -1158,6 +1197,7 @@ async function saveEntityUpdates() {
             payload.is_calibrated = document.getElementById('em-input-is-cal').checked;
             payload.last_cal_date = document.getElementById('em-input-last-cal').value || null;
             payload.cal_due_date = document.getElementById('em-input-cal-due').value || null;
+            if (!payload.drawer_id) return alert('⚠️ Select a Department, Toolbox, and Drawer for this asset.');
         }
     }
 
