@@ -738,13 +738,24 @@ app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
         }
         if (req.authUser.weight < getRoleWeight(role)) throw new Error('Hierarchy Violation.');
 
-        const finalDeptId = req.authUser.role === 'super_admin' ? dept_id : req.authUser.dept_id;
+        const finalDeptId = req.authUser.role === 'super_admin' ? (dept_id || null) : req.authUser.dept_id;
         if (!email || !email.includes('@')) throw new Error('Valid email address required.');
         const username = email.split('@')[0].toLowerCase();
 
-        const deptRes = await client.query('SELECT prefix_code FROM departments WHERE dept_id = $1', [finalDeptId]);
-        if (deptRes.rows.length === 0) throw new Error('Invalid Department selected.');
-        const prefix = deptRes.rows[0].prefix_code; 
+        // A super_admin isn't required to belong to a department -- matching the existing
+        // department-less super_admin account already in this system -- so a missing dept_id
+        // falls back to a fixed "ADMIN-" prefix instead of a department-derived one. Every
+        // other role must resolve to a real department.
+        let prefix;
+        if (finalDeptId) {
+            const deptRes = await client.query('SELECT prefix_code FROM departments WHERE dept_id = $1', [finalDeptId]);
+            if (deptRes.rows.length === 0) throw new Error('Invalid Department selected.');
+            prefix = deptRes.rows[0].prefix_code;
+        } else if (role === 'super_admin') {
+            prefix = 'ADMIN-';
+        } else {
+            throw new Error('Invalid Department selected.');
+        }
 
         const maxRes = await client.query(`SELECT MAX(CAST(NULLIF(regexp_replace(badge_id, '\\D', '', 'g'), '') AS INTEGER)) as max_num FROM users WHERE badge_id LIKE $1`, [`${prefix}%`]);
         const badge_id = prefix + String((maxRes.rows[0].max_num || 0) + 1).padStart(3, '0');

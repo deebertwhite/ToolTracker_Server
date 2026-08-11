@@ -474,8 +474,14 @@ async function syncStorageHierarchyDropdowns() {
         const newDrawerDeptEl = document.getElementById('new-drawer-dept');
         if (newDrawerDeptEl) newDrawerDeptEl.innerHTML = '<option value="">-- Select Department --</option>' + deptOptions;
 
+        // The blank option matters specifically for a super_admin creating another
+        // super_admin: only for that requester/role combination does this field's value
+        // reach the server at all (POST /api/users forces every other role to the
+        // requester's own department regardless of what's selected here), and a super_admin
+        // isn't required to belong to one -- matching the existing department-less
+        // super_admin account already in the system.
         const newDeptEl = document.getElementById('new-user-dept');
-        if (newDeptEl) newDeptEl.innerHTML = deptOptions;
+        if (newDeptEl) newDeptEl.innerHTML = '<option value="">-- No Department (Global Admin only) --</option>' + deptOptions;
         const repDeptEl = document.getElementById('rep-dept');
         if (repDeptEl) repDeptEl.innerHTML = '<option value="ALL">Global (All Departments)</option>' + deptOptions;
     } catch(e) { console.error(e); }
