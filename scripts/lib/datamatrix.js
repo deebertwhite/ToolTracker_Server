@@ -9,8 +9,18 @@ const MM_PER_INCH = 25.4;
 // Common options needed to make bwip-js actually print the human-readable text
 // under a Data Matrix symbol. includetext alone silently does nothing for 2D
 // symbologies in bwip-js -- alttext must also be set to the same value.
-function textOptions(text) {
-    return { includetext: true, alttext: text, textxalign: 'center', textsize: 9 };
+//
+// textYOffset (bwip-js "points", optional) overrides bwip-js's own default vertical gap
+// between the code and this text row, which visually reads as the text nearly touching the
+// code -- confirmed too tight for on-screen viewing (see generateBarcodeLabel() in
+// server.js). Positive values move the text UP (toward/into the code); more negative moves
+// it DOWN, away from the code. Left undefined for the print/engrave callers below, which
+// keep bwip-js's own default so their already-confirmed-scannable physical sizing/layout
+// stays exactly as calibrated.
+function textOptions(text, textYOffset) {
+    const opts = { includetext: true, alttext: text, textxalign: 'center', textsize: 9 };
+    if (textYOffset !== undefined) opts.textyoffset = textYOffset;
+    return opts;
 }
 
 // Renders at scale:1 with zero padding, so the resulting pixel dimensions are
@@ -88,13 +98,17 @@ function withPhysicalDpi(pngBuffer, dpi) {
  * something meant to be engraved at a confirmed-scannable size. A caller generating a
  * label purely for on-screen viewing (see generateBarcodeLabel() in server.js) can pass
  * a positive value for clearer breathing room around the code and its human-readable ID.
+ *
+ * `textYOffset` (bwip-js "points", optional) is passed straight through to textOptions() --
+ * see its comment there. Left undefined preserves bwip-js's own default gap exactly as
+ * every existing caller already relies on.
  */
-async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, padding = 0) {
+async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, padding = 0, textYOffset) {
     const grid = await getModuleGridSize(text);
     const targetPx = (targetMm / MM_PER_INCH) * dpi;
     const scale = Math.max(1, Math.round(targetPx / grid.width));
     const opts = { bcid: 'datamatrix', text, scale, paddingwidth: padding, paddingheight: padding };
-    if (withText) Object.assign(opts, textOptions(text));
+    if (withText) Object.assign(opts, textOptions(text, textYOffset));
     const rawPng = await bwipjs.toBuffer(opts);
     const png = withPhysicalDpi(rawPng, dpi);
     const actualCodeMm = (grid.width * scale / dpi) * MM_PER_INCH; // size of the scannable code itself, excluding any text row or padding

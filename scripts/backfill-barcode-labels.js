@@ -24,6 +24,7 @@ const BASE_STORAGE_PATH = process.env.BASE_STORAGE_PATH || path.join(__dirname, 
 const BARCODE_LABEL_DIR = path.join(BASE_STORAGE_PATH, 'public', 'uploads', 'barcodes');
 const BARCODE_LABEL_SIZE_MM = 15;
 const BARCODE_LABEL_PADDING = 20;
+const BARCODE_LABEL_TEXT_YOFFSET = -12;
 
 async function main() {
     fs.mkdirSync(BARCODE_LABEL_DIR, { recursive: true });
@@ -45,7 +46,7 @@ async function main() {
     for (const tool of rows) {
         try {
             const safeName = tool.qr_code.replace(/[^A-Za-z0-9_-]/g, '_');
-            const { png } = await generatePngAtSize(tool.qr_code, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING);
+            const { png } = await generatePngAtSize(tool.qr_code, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET);
             fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), png);
             const barcodeUrl = `/uploads/barcodes/${safeName}.png`;
             await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, tool.tool_id]);
