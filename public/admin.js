@@ -137,8 +137,10 @@ function toggleTreeVisibility(containerId, headerElement) {
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
  *     #card-manage-users, and #card-inventory-import (bulk CSV import).
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
- * Finally preloads data appropriate to the role (user list for dept_admin+, storage
- * dropdowns for everyone, next tool id for tool_rep+).
+ * Populates the Provision New User form's role dropdown with options capped at the viewer's
+ * own weight (inclusive) -- matches POST /api/users, which now allows creating a peer, e.g. a
+ * super_admin creating another super_admin directly. Finally preloads data appropriate to the
+ * role (user list for dept_admin+, storage dropdowns for everyone, next tool id for tool_rep+).
  */
 function bootstrapAdminUI(user) {
     currentAdminBadge = user.badge_id;
@@ -162,6 +164,12 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-manage-users', 'none');
         safeSetDisplay('card-inventory-import', 'none');
     }
+
+    // Options capped at the viewer's own weight (inclusive) -- matches the server's
+    // POST /api/users hierarchy check, which now allows creating a peer, e.g. a super_admin
+    // creating another super_admin, not just strictly-subordinate roles.
+    const newRoleEl = document.getElementById('new-role');
+    if (newRoleEl) newRoleEl.innerHTML = roleOptionsUpTo(currentAdminWeight, 'technician');
 
     if (currentAdminWeight >= 3) { loadUsers(); }
     syncStorageHierarchyDropdowns();

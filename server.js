@@ -722,8 +722,11 @@ app.get('/api/roster', async (req, res) => {
     }
 });
 
-// Create a new user account. Requester must outrank the target role (getRoleWeight hierarchy check);
-// generates badge_id/username/PIN and "sends" a welcome email.
+// Create a new user account. The assigned role may be up to and including the requester's
+// own weight (not strictly below it) -- the same inclusive rule PUT /api/users/:badge_id/role
+// already uses, so a super_admin can create another super_admin directly instead of only
+// being able to reach that end state via the two-step "create lower, then promote" path.
+// Generates badge_id/username/PIN and "sends" a welcome email.
 app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
     const { full_name, email, dept_id, role } = req.body;
     const client = await pool.connect();
@@ -733,7 +736,7 @@ app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
         if (!['super_admin', 'dept_admin', 'tool_rep', 'technician'].includes(role)) {
             throw new Error('Invalid role.');
         }
-        if (req.authUser.weight <= getRoleWeight(role)) throw new Error('Hierarchy Violation.');
+        if (req.authUser.weight < getRoleWeight(role)) throw new Error('Hierarchy Violation.');
 
         const finalDeptId = req.authUser.role === 'super_admin' ? dept_id : req.authUser.dept_id;
         if (!email || !email.includes('@')) throw new Error('Valid email address required.');
