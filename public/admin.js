@@ -1067,6 +1067,7 @@ function openEntityModal(type, id) {
             ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:50%;object-fit:cover;cursor:zoom-in;">`
             : '👤';
 
+        const grantedNames = (entity.granted_dept_ids || []).map(gid => (globalDeptsCache.find(d => d.dept_id == gid) || {}).name).filter(Boolean);
         titleHtml = `<h3 style="margin:0;">${entity.full_name}</h3>`;
         readHtml = `
             <div style="display: flex; gap: 30px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
@@ -1075,13 +1076,28 @@ function openEntityModal(type, id) {
             </div>
             <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Department</div><div style="font-size:14px;margin-top:4px;">${entity.department_name || '--'}</div></div>
             <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">System Role</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${ROLE_LABELS[entity.role] || entity.role}</div></div>
+            ${grantedNames.length > 0 ? `<div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Also Manages</div><div style="font-size:14px;margin-top:4px;">${grantedNames.join(', ')}</div></div>` : ''}
         `;
         fieldsHtml = `
             <div class="form-group">
                 <label class="form-label">System Role</label>
-                <select class="form-select" id="em-input-role">${roleOptionsUpTo(currentAdminWeight, entity.role)}</select>
+                <select class="form-select" id="em-input-role" ${currentAdminWeight >= 4 ? `onchange="document.getElementById('em-dept-access-section').style.display = this.value === 'dept_admin' ? 'block' : 'none'"` : ''}>${roleOptionsUpTo(currentAdminWeight, entity.role)}</select>
                 <div style="font-size:11px; color: var(--muted); margin-top:4px;">You can only assign roles up to your own level.</div>
             </div>
+            ${currentAdminWeight >= 4 ? `
+                <div class="form-group" id="em-dept-access-section" style="display: ${entity.role === 'dept_admin' ? 'block' : 'none'};">
+                    <label class="form-label">Granted Department Access</label>
+                    <div style="font-size:11px; color: var(--muted); margin-bottom:6px;">Full manager access to these departments, in addition to their home department (${entity.department_name || '--'}).</div>
+                    <div style="display:flex; flex-direction:column; gap:6px; max-height:160px; overflow-y:auto; padding:8px; background: rgba(255,255,255,0.02); border-radius:6px; border:1px solid var(--border);">
+                        ${globalDeptsCache.filter(d => d.dept_id != entity.dept_id).map(d => `
+                            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+                                <input type="checkbox" class="em-input-granted-dept" value="${d.dept_id}" ${(entity.granted_dept_ids || []).includes(d.dept_id) ? 'checked' : ''}>
+                                ${d.name}
+                            </label>
+                        `).join('') || `<div style="font-size:12px; color: var(--muted);">No other departments exist yet.</div>`}
+                    </div>
+                </div>
+            ` : ''}
         `;
 
         actionsHtml = `
@@ -1112,8 +1128,10 @@ function closeEntityModal() { document.getElementById('entity-modal-overlay').st
  * PUT /api/drawers/:id, PUT /api/tools/:id, or PUT /api/users/:badge_id/role. Every
  * infrastructure type submits the shared `name` field; 'tool' additionally submits
  * description, replacement_url, status, and calibration fields; 'user' submits only `role`
- * (name/email/username aren't editable from here). Closes the modal and refreshes the
- * infrastructure tree (or the personnel tables, for 'user') on success.
+ * (name/email/username aren't editable from here). For 'user', if the super_admin-only
+ * granted-department checkboxes are present in the DOM, also submits their checked state
+ * to PUT /api/users/:badge_id/department-access as a second request. Closes the modal and
+ * refreshes the infrastructure tree (or the personnel tables, for 'user') on success.
  */
 async function saveEntityUpdates() {
     const type = document.getElementById('em-target-type').value;
@@ -1145,11 +1163,21 @@ async function saveEntityUpdates() {
 
     try {
         const res = await fetch(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-        if(res.ok) {
-            closeEntityModal();
-            if (type === 'user') { loadUsers(); loadRosterDirectory(); } else { renderEditableInfraTree(); }
+        if(!res.ok) { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to save.')); return; }
+
+        // The department-access checkboxes (super_admin viewers only, see openEntityModal)
+        // are a second, independent form on the same modal -- submitted as its own request
+        // to PUT /api/users/:badge_id/department-access rather than folded into the role
+        // payload above, since it's a full-replace of a separate table, not a users column.
+        const grantedDeptEls = document.querySelectorAll('.em-input-granted-dept');
+        if (type === 'user' && grantedDeptEls.length > 0) {
+            const dept_ids = Array.from(grantedDeptEls).filter(el => el.checked).map(el => el.value);
+            const grantRes = await fetch(`/api/users/${id}/department-access`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({ dept_ids }) });
+            if (!grantRes.ok) { const data = await grantRes.json(); alert('❌ Role saved, but department access failed: ' + (data.error || 'Unknown error.')); }
         }
-        else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to save.')); }
+
+        closeEntityModal();
+        if (type === 'user') { loadUsers(); loadRosterDirectory(); } else { renderEditableInfraTree(); }
     } catch(e) { alert('Network Error.'); }
 }
 

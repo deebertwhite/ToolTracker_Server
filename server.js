@@ -196,17 +196,38 @@ function requireRole(minWeight) {
     return async (req, res, next) => {
         if (!req.session.user) return res.status(401).json({ error: 'Not logged in.' });
         try {
+            // LEFT JOINs in user_department_access (see migrations/005) so every request
+            // carries the full set of departments this user can act in -- their home
+            // department plus any a super_admin has explicitly granted them, e.g. a
+            // dept_admin who oversees more than one department in practice. array_agg over a
+            // LEFT JOIN with no matches produces a one-element array containing NULL, not an
+            // empty array, hence the FILTER -- see accessibleDeptIds below.
             const result = await pool.query(
-                'SELECT role, dept_id, is_active FROM users WHERE badge_id = $1',
+                `SELECT u.user_id, u.role, u.dept_id, u.is_active,
+                        COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+                 FROM users u
+                 LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
+                 WHERE u.badge_id = $1
+                 GROUP BY u.user_id`,
                 [req.session.user.badge_id]
             );
             if (result.rows.length === 0 || !result.rows[0].is_active) {
                 req.session.destroy(() => {});
                 return res.status(403).json({ error: 'Account no longer active.' });
             }
-            const weight = getRoleWeight(result.rows[0].role);
+            const row = result.rows[0];
+            const weight = getRoleWeight(row.role);
             if (weight < minWeight) return res.status(403).json({ error: 'Insufficient permissions.' });
-            req.authUser = { badge_id: req.session.user.badge_id, role: result.rows[0].role, dept_id: result.rows[0].dept_id, weight };
+            req.authUser = {
+                badge_id: req.session.user.badge_id,
+                role: row.role,
+                dept_id: row.dept_id,
+                weight,
+                user_id: row.user_id,
+                // Home department plus every granted one, deduplicated -- the single set to
+                // check anywhere a department-scoped action used to only check dept_id.
+                accessibleDeptIds: [...new Set([row.dept_id, ...row.granted_dept_ids].filter(id => id !== null))],
+            };
             next();
         } catch (err) {
             res.status(500).json({ error: 'Authorization check failed.' });
@@ -691,11 +712,18 @@ app.post('/api/kiosk-auth', authLimiter, async (req, res) => {
 // List active users with a lower role weight than the requester (any authenticated requester).
 app.get('/api/users', requireRole(1), async (req, res) => {
     try {
-        // Fetching photo_url for the UI
+        // Fetching photo_url for the UI. granted_dept_ids feeds the department-access admin
+        // UI (super_admin only) -- lets a dept_admin's extra departments show up alongside
+        // their home one without a separate round trip per row.
         const query = `
-            SELECT u.user_id, u.badge_id, u.username, u.email, u.full_name, u.role, d.name AS department_name, u.photo_url
-            FROM users u LEFT JOIN departments d ON u.dept_id = d.dept_id
-            WHERE u.is_active = true ORDER BY u.full_name ASC
+            SELECT u.user_id, u.badge_id, u.username, u.email, u.full_name, u.role, u.dept_id, d.name AS department_name, u.photo_url,
+                   COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+            FROM users u
+            LEFT JOIN departments d ON u.dept_id = d.dept_id
+            LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
+            WHERE u.is_active = true
+            GROUP BY u.user_id, d.name
+            ORDER BY u.full_name ASC
         `;
         const result = await pool.query(query);
         const filteredUsers = result.rows.filter(u => getRoleWeight(u.role) < req.authUser.weight);
@@ -738,7 +766,23 @@ app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
         }
         if (req.authUser.weight < getRoleWeight(role)) throw new Error('Hierarchy Violation.');
 
-        const finalDeptId = req.authUser.role === 'super_admin' ? (dept_id || null) : req.authUser.dept_id;
+        // A super_admin may create a user in any department (or none). Everyone else is
+        // restricted to their own accessible departments -- normally just their home one, but
+        // a dept_admin granted access to additional departments (see migrations/005 and
+        // PUT /api/users/:badge_id/department-access) can create users in any of those too,
+        // not only their own. Silently defaulting to their home department would let a
+        // dept_admin's UI selection of a department they don't actually have access to
+        // create the user somewhere else entirely without any error -- reject it instead.
+        let finalDeptId;
+        if (req.authUser.role === 'super_admin') {
+            finalDeptId = dept_id || null;
+        } else {
+            const requestedDeptId = dept_id ? parseInt(dept_id, 10) : req.authUser.dept_id;
+            if (!req.authUser.accessibleDeptIds.includes(requestedDeptId)) {
+                throw new Error('You do not have access to that department.');
+            }
+            finalDeptId = requestedDeptId;
+        }
         if (!email || !email.includes('@')) throw new Error('Valid email address required.');
         const username = email.split('@')[0].toLowerCase();
 
@@ -839,6 +883,48 @@ app.put('/api/users/:badge_id/role', requireFetchHeader, requireRole(3), async (
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update role.' });
+    }
+});
+
+// Replace a user's full set of granted cross-department access (delete-then-reinsert, not
+// incremental add/remove) -- matches the "set the whole role" UX of the endpoint above rather
+// than exposing separate grant/revoke calls. super_admin-only (requireRole(4)): a dept_admin
+// granting another dept_admin extra departments would let peers hand each other access,
+// bypassing the hierarchy checks the rest of this file enforces.
+app.put('/api/users/:badge_id/department-access', requireFetchHeader, requireRole(4), async (req, res) => {
+    const { badge_id } = req.params;
+    const dept_ids = Array.isArray(req.body.dept_ids) ? req.body.dept_ids.map(id => parseInt(id, 10)) : [];
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const target = await client.query('SELECT user_id FROM users WHERE badge_id = $1', [badge_id]);
+        if (target.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'User not found.' }); }
+        const userId = target.rows[0].user_id;
+
+        if (dept_ids.length > 0) {
+            const validDepts = await client.query('SELECT dept_id FROM departments WHERE dept_id = ANY($1::int[])', [dept_ids]);
+            if (validDepts.rows.length !== new Set(dept_ids).size) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: 'One or more departments do not exist.' });
+            }
+        }
+
+        await client.query('DELETE FROM user_department_access WHERE user_id = $1', [userId]);
+        for (const deptId of new Set(dept_ids)) {
+            await client.query(
+                'INSERT INTO user_department_access (user_id, dept_id, granted_by_user_id) VALUES ($1, $2, $3)',
+                [userId, deptId, req.authUser.user_id]
+            );
+        }
+
+        await client.query('COMMIT');
+        res.json({ success: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Department Access Update Error:', err);
+        res.status(500).json({ error: 'Failed to update department access.' });
+    } finally {
+        client.release();
     }
 });
 
@@ -2149,7 +2235,14 @@ app.post('/api/reports/generate', requireFetchHeader, requireRole(1), async (req
     const { report_type, dept_id, start_date, end_date } = req.body;
     try {
         let queryDept = dept_id;
-        if (req.authUser.weight === 3) queryDept = req.authUser.dept_id;
+        if (req.authUser.weight === 3) {
+            // A dept_admin may report on their home department or any department they've been
+            // granted cross-department access to, but never the global 'ALL' view -- that
+            // stays super_admin-only. Falls back to their home dept if the requested one isn't
+            // actually in their accessible set (covers a stale/tampered dept_id as well as 'ALL').
+            const requested = parseInt(dept_id, 10);
+            queryDept = req.authUser.accessibleDeptIds.includes(requested) ? requested : req.authUser.dept_id;
+        }
 
         let data = [];
         if (report_type === 'AUDIT') {
