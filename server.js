@@ -530,6 +530,7 @@ if (!fs.existsSync(BARCODE_LABEL_DIR)) {
 const BARCODE_LABEL_SIZE_MM = 15; // matches the default physical size scripts/generate-tool-labels.js uses
 const BARCODE_LABEL_PADDING = 20; // bwip-js module units -- visually confirmed to give clear breathing room around the code and its human-readable ID without looking excessive; see scripts/lib/datamatrix.js for why this differs from the 0-padding bulk print/engrave scripts
 const BARCODE_LABEL_TEXT_YOFFSET = -12; // bwip-js's own default gap between the code and the human-readable ID reads as touching/too tight on screen -- visually confirmed clear at -12; see textOptions() in scripts/lib/datamatrix.js for the sign convention
+const BARCODE_LABEL_BACKGROUND = 'FFFFFF'; // bwip-js's own background is fully transparent (alpha 0, not opaque white) -- invisible against the dark image-lightbox modal in admin.js. See generatePngAtSize() in scripts/lib/datamatrix.js.
 
 /**
  * Generates a Data Matrix label PNG for a tool's barcode and saves it to
@@ -548,7 +549,7 @@ const BARCODE_LABEL_TEXT_YOFFSET = -12; // bwip-js's own default gap between the
  */
 async function generateBarcodeLabel(qrCode) {
     const safeName = qrCode.replace(/[^A-Za-z0-9_-]/g, '_');
-    const { png } = await generatePngAtSize(qrCode, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET);
+    const { png } = await generatePngAtSize(qrCode, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET, BARCODE_LABEL_BACKGROUND);
     fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), png);
     return `/uploads/barcodes/${safeName}.png`;
 }

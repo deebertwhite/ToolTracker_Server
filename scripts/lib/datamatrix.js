@@ -102,12 +102,24 @@ function withPhysicalDpi(pngBuffer, dpi) {
  * `textYOffset` (bwip-js "points", optional) is passed straight through to textOptions() --
  * see its comment there. Left undefined preserves bwip-js's own default gap exactly as
  * every existing caller already relies on.
+ *
+ * `backgroundColor` (hex, no '#', optional) makes bwip-js render an opaque fill instead of
+ * its own default: a fully TRANSPARENT background (confirmed via the raw alpha channel --
+ * every "white" pixel is actually alpha 0, not an opaque white). That's invisible -- not
+ * just blank -- on anything but a plain white page, which is exactly why a tool's on-screen
+ * barcode label (see generateBarcodeLabel() in server.js) rendered as nothing but the dark
+ * modal backdrop when opened in the image lightbox: black modules on a transparent fill,
+ * over a near-black overlay, is black-on-black. Left undefined for the print/engrave
+ * callers below, which print onto physical white paper/material anyway and where changing
+ * pixel format could interact with how engraving software reads the alpha channel --
+ * not worth touching without a real reason.
  */
-async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, padding = 0, textYOffset) {
+async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, padding = 0, textYOffset, backgroundColor) {
     const grid = await getModuleGridSize(text);
     const targetPx = (targetMm / MM_PER_INCH) * dpi;
     const scale = Math.max(1, Math.round(targetPx / grid.width));
     const opts = { bcid: 'datamatrix', text, scale, paddingwidth: padding, paddingheight: padding };
+    if (backgroundColor !== undefined) opts.backgroundcolor = backgroundColor;
     if (withText) Object.assign(opts, textOptions(text, textYOffset));
     const rawPng = await bwipjs.toBuffer(opts);
     const png = withPhysicalDpi(rawPng, dpi);
