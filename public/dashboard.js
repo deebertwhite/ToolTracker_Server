@@ -102,11 +102,11 @@ async function fetchStorageTree() {
         
         let html = '';
         data.departments.forEach(dept => {
-            html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">🏢 ${dept.name}</div>`;
-            
+            html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">${icon('building-2')} ${dept.name}</div>`;
+
             const boxes = data.toolboxes.filter(b => b.dept_id === dept.dept_id);
             boxes.forEach(box => {
-                html += `<div class="nav-item nav-box" onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')">🧰 ${box.name}</div>`;
+                html += `<div class="nav-item nav-box" onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')">${icon('toolbox')} ${box.name}</div>`;
             });
         });
         document.getElementById('tree-container').innerHTML = html;
@@ -181,7 +181,7 @@ async function loadGlobalDashboard() {
                 return `<tr style="cursor:pointer;" onclick="openToolDetailModal('${t.qr_code}')">
                     <td style="font-family: monospace;">${t.qr_code}</td>
                     <td><strong>${t.tool_name}</strong></td>
-                    <td style="color: var(--accent); font-weight:bold;">👤 ${t.user_name || 'Unknown'}</td>
+                    <td style="color: var(--accent); font-weight:bold;">${icon('user')} ${t.user_name || 'Unknown'}</td>
                     <td style="font-size:12px; color:var(--muted);">${time}</td>
                     <td>${t.dept_name || '--'} / ${t.box_name || '--'}</td>
                 </tr>`;
@@ -303,7 +303,7 @@ function loadLocationView(type, filterValue, title, subtitle) {
             return `<tr style="cursor:pointer;" onclick="openToolDetailModal('${t.qr_code}')">
                 <td style="font-family: monospace;">${t.qr_code}</td>
                 <td><strong>${t.tool_name}</strong></td>
-                <td style="color: var(--accent); font-weight:bold;">👤 ${t.user_name || 'Unknown'}</td>
+                <td style="color: var(--accent); font-weight:bold;">${icon('user')} ${t.user_name || 'Unknown'}</td>
                 <td style="font-size:12px; color:var(--muted);">${time}</td>
                 <td>${t.dept_name || '--'} / ${t.box_name || '--'}</td>
             </tr>`;
@@ -366,7 +366,7 @@ function openToolDetailModal(qrCode) {
     if (!entity) return;
 
     document.getElementById('td-type-badge').textContent = `ASSET [${entity.qr_code}]`;
-    document.getElementById('td-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" style="width:100%;height:100%;border-radius:8px;object-fit:cover;">` : '🔧';
+    document.getElementById('td-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" style="width:100%;height:100%;border-radius:8px;object-fit:cover;">` : icon('wrench');
     document.getElementById('td-title').textContent = entity.name;
 
     // Status badge coloring: In=green, Out=accent, Missing/Broken/Worn=red/orange
@@ -382,7 +382,7 @@ function openToolDetailModal(qrCode) {
         const outEntry = globalOutTools.find(o => o.qr_code === qrCode);
         if (outEntry) {
             const since = outEntry.timestamp ? new Date(outEntry.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unknown';
-            bodyHtml += `<div style="margin-bottom:15px; font-size:13px; color: var(--accent); font-weight:bold;">👤 Checked out to ${outEntry.user_name || 'Unknown'} since ${since}</div>`;
+            bodyHtml += `<div style="margin-bottom:15px; font-size:13px; color: var(--accent); font-weight:bold;">${icon('user')} Checked out to ${outEntry.user_name || 'Unknown'} since ${since}</div>`;
         }
     }
 
@@ -430,7 +430,7 @@ function openToolDetailModal(qrCode) {
 
     // Replacement link -- only if present
     if (entity.replacement_url) {
-        bodyHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">🛒 Open Replacement Link →</a></div>`;
+        bodyHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
     }
 
     document.getElementById('td-body').innerHTML = bodyHtml;

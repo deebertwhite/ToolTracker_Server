@@ -21,7 +21,7 @@
 </head>
 <body class="kiosk-layout">
 
-    <a href="index.html" class="persistent-home">🏠 Main Hub</a>
+    <a href="index.html" class="persistent-home"><span class="icon" data-icon="home"></span> Main Hub</a>
 
     <!-- ============================================================
          IDLE SCREEN (#screen-idle)
@@ -52,23 +52,23 @@
         <div class="action-grid">
             <!-- Action 1 of 5: begin the Check Out batch-scanning workflow -->
             <div class="action-btn" onclick="startWorkflow('OUT')">
-                <div class="action-icon">📤</div><div class="action-label">Check Out Tools</div>
+                <div class="action-icon"><span class="icon" data-icon="upload"></span></div><div class="action-label">Check Out Tools</div>
             </div>
             <!-- Action 2 of 5: begin the Check In batch-scanning workflow -->
             <div class="action-btn" onclick="startWorkflow('IN')">
-                <div class="action-icon">📥</div><div class="action-label">Check In Tools</div>
+                <div class="action-icon"><span class="icon" data-icon="download"></span></div><div class="action-label">Check In Tools</div>
             </div>
             <!-- Action 3 of 5: begin the Damage/Missing report workflow -->
             <div class="action-btn" onclick="startWorkflow('REPORT')" style="border-color: rgba(239,68,68,0.5);">
-                <div class="action-icon">⚠️</div><div class="action-label">Report Issue</div>
+                <div class="action-icon"><span class="icon icon-warning" data-icon="triangle-alert"></span></div><div class="action-label">Report Issue</div>
             </div>
             <!-- Action 4 of 5: begin the Toolbox Audit workflow -->
             <div class="action-btn" onclick="startWorkflow('AUDIT')" style="border-color: rgba(59, 130, 246, 0.5);">
-                <div class="action-icon">📋</div><div class="action-label">Audit Toolbox</div>
+                <div class="action-icon"><span class="icon" data-icon="clipboard-list"></span></div><div class="action-label">Audit Toolbox</div>
             </div>
             <!-- Action 5 of 5: begin the QA Transfers queue workflow -->
             <div class="action-btn" onclick="startWorkflow('TRANSFERS')" style="border-color: rgba(34, 197, 94, 0.5);">
-                <div class="action-icon">🔁</div><div class="action-label">Transfers</div>
+                <div class="action-icon"><span class="icon" data-icon="repeat"></span></div><div class="action-label">Transfers</div>
             </div>
         </div>
     </div>
@@ -83,7 +83,7 @@
     <div id="screen-auth">
         <div class="auth-card">
             <div class="auth-header">
-                <div style="font-size: 32px; margin-bottom: 10px;" id="auth-header-icon">🪪</div>
+                <div style="font-size: 32px; margin-bottom: 10px;" id="auth-header-icon" class="icon" data-icon="id-card"></div>
                 <div class="auth-title" id="auth-header-title">Identify Technician</div>
                 <div class="auth-sub">Scan Badge or Enter Username</div>
             </div>
@@ -92,7 +92,7 @@
 
             <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
                 <input class="form-input" id="auth-badge-input" style="font-size: 18px; padding: 12px; text-align: center;" placeholder="Badge or Username..." onkeydown="if(event.key==='Enter')authenticateUser()">
-                <button class="btn-icon" onclick="startAuthCameraScanner()" title="Use Camera">📷</button>
+                <button class="btn-icon" onclick="startAuthCameraScanner()" title="Use Camera"><span class="icon" data-icon="camera"></span></button>
             </div>
 
             <div class="form-group">
@@ -142,16 +142,16 @@
                  (#panel-scanner). Shared by both the OUT and IN modes;
                  labels/button text are swapped in setupActionScreen(). -->
             <div class="card" id="panel-scanner" style="width: 100%; max-width: 600px;">
-                <div class="section-title" id="action-title">📤 Scanning Tools...</div>
-                
+                <div class="section-title" id="action-title"><span class="icon" data-icon="upload"></span> Scanning Tools...</div>
+
                 <div class="scan-box" id="scan-zone" onclick="focusScanInput('kiosk-scan-input')">
-                    <div style="font-size: 40px; margin-bottom: 10px;">📷</div>
+                    <div style="font-size: 40px; margin-bottom: 10px;"><span class="icon" data-icon="camera"></span></div>
                     <div style="font-weight: 600;" id="scan-prompt">Ready to Scan Tool</div>
                 </div>
 
                 <div id="reader" class="camera-reader" style="width: 100%; max-width: 600px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
-                <button class="btn btn-secondary" id="btn-open-scanner" style="width: 100%; margin-bottom: 14px;" onclick="startToolCameraScanner('reader', 'kiosk-scan-input', handleToolScan, true)">📱 Open Camera Scanner</button>
-                <button class="btn btn-success" id="btn-done-scanner" style="width: 100%; margin-bottom: 14px; display: none;" onclick="stopContinuousScanner('reader')">✅ Done Scanning (<span id="queue-count-live">0</span> added)</button>
+                <button class="btn btn-secondary" id="btn-open-scanner" style="width: 100%; margin-bottom: 14px;" onclick="startToolCameraScanner('reader', 'kiosk-scan-input', handleToolScan, true)"><span class="icon" data-icon="smartphone"></span> Open Camera Scanner</button>
+                <button class="btn btn-success" id="btn-done-scanner" style="width: 100%; margin-bottom: 14px; display: none;" onclick="stopContinuousScanner('reader')"><span class="icon" data-icon="circle-check"></span> Done Scanning (<span id="queue-count-live">0</span> added)</button>
 
                 <div class="form-group">
                     <input class="form-input" id="kiosk-scan-input" placeholder="Scan hardware or type serial..." onkeydown="if(event.key==='Enter')handleToolScan()">
@@ -171,14 +171,14 @@
                  department picker and routes to submitCalibrationTransfer()
                  instead of the normal report-issue endpoint. -->
             <div class="card" id="panel-report" style="display: none; width: 100%; max-width: 600px;">
-                <div class="section-title">⚠️ Report Damaged or Missing Asset</div>
+                <div class="section-title"><span class="icon icon-warning" data-icon="triangle-alert"></span> Report Damaged or Missing Asset</div>
                 <div id="report-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
                 
                 <div class="form-group">
                     <label class="form-label">Tool Barcode / Serial</label>
                     <div style="display: flex; gap: 8px;">
                         <input class="form-input" id="report-qr" placeholder="Scan or enter faulty tool">
-                        <button class="btn-icon" onclick="startToolCameraScanner('report-reader', 'report-qr')">📷</button>
+                        <button class="btn-icon" onclick="startToolCameraScanner('report-reader', 'report-qr')"><span class="icon" data-icon="camera"></span></button>
                     </div>
                 </div>
                 <div class="form-group">
@@ -205,7 +205,7 @@
                  Two-step flow: pick a toolbox (#audit-step-1), then
                  scan/reconcile its contents (#audit-step-2). -->
             <div class="card" id="panel-audit" style="display: none; max-width: 750px; width: 100%;">
-                <div class="section-title">📋 Audit Toolbox</div>
+                <div class="section-title"><span class="icon" data-icon="clipboard-list"></span> Audit Toolbox</div>
 
                 <!-- Audit Step 1: select which toolbox to inventory.
                      startAudit() pulls the manifest and advances to
@@ -239,8 +239,8 @@
                         <label class="form-label">Scan Tool to Check Off List</label>
                         <div style="display: flex; gap: 8px;">
                             <input class="form-input" id="audit-scan-input" placeholder="Scan barcode..." onkeydown="if(event.key==='Enter')handleAuditScan()">
-                            <button class="btn-icon" id="btn-open-audit-scanner" onclick="startToolCameraScanner('audit-reader', 'audit-scan-input', handleAuditScan, true)">📷</button>
-                            <button class="btn-icon" id="btn-done-audit-scanner" style="display: none; color: var(--green);" onclick="stopContinuousScanner('audit-reader')" title="Done Scanning">✅</button>
+                            <button class="btn-icon" id="btn-open-audit-scanner" onclick="startToolCameraScanner('audit-reader', 'audit-scan-input', handleAuditScan, true)"><span class="icon" data-icon="camera"></span></button>
+                            <button class="btn-icon" id="btn-done-audit-scanner" style="display: none; color: var(--green);" onclick="stopContinuousScanner('audit-reader')" title="Done Scanning"><span class="icon" data-icon="circle-check"></span></button>
                         </div>
                     </div>
 
@@ -267,7 +267,7 @@
                  by loadTransferQueue() and stays open across multiple
                  actions instead of auto-returning to idle. -->
             <div class="card" id="panel-transfers" style="display: none; max-width: 750px; width: 100%;">
-                <div class="section-title">🔁 Tool Transfers</div>
+                <div class="section-title"><span class="icon" data-icon="repeat"></span> Tool Transfers</div>
 
                 <div style="margin-bottom: 20px;">
                     <h4 style="margin-bottom: 10px;">Incoming — Awaiting Your Acceptance</h4>
@@ -299,7 +299,7 @@
     ============================================================= -->
     <div id="override-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 400px; border-top: 3px solid var(--accent); text-align: center;">
-            <div style="font-size: 40px; margin-bottom: 10px;">🛡️</div>
+            <div style="font-size: 40px; margin-bottom: 10px;"><span class="icon" data-icon="shield"></span></div>
             <h3 style="margin-bottom: 10px;">Buddy Sign-Off Required</h3>
             <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">Any other active coworker must enter their PIN to confirm this transaction.</p>
 
@@ -323,7 +323,7 @@
     ============================================================= -->
     <div id="audit-gate-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 420px; border-top: 3px solid var(--orange); text-align: center;">
-            <div style="font-size: 40px; margin-bottom: 10px;">📋</div>
+            <div style="font-size: 40px; margin-bottom: 10px;"><span class="icon" data-icon="clipboard-list"></span></div>
             <h3 style="margin-bottom: 10px;">Shift Audit Required</h3>
             <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">The following toolbox(es) have not been audited yet this shift (morning 04:00-14:00 or afternoon 14:00-04:00). A checkout cannot be completed until this shift's audit is logged.</p>
 
@@ -337,6 +337,7 @@
          surface transient success/error/warning messages. -->
     <div class="toast" id="kiosk-toast">Toast Message</div>
 
+    <script src="icons.js"></script>
     <script src="kiosk.js"></script>
     <script src="sw-register.js"></script>
 </body>

@@ -30,19 +30,19 @@ function startWorkflow(mode) {
     const authTitle = document.getElementById('auth-header-title');
 
     if (mode === 'OUT') {
-        authIcon.textContent = '📤';
+        authIcon.innerHTML = icon('upload');
         authTitle.textContent = 'Check Out';
     } else if (mode === 'IN') {
-        authIcon.textContent = '📥';
+        authIcon.innerHTML = icon('download');
         authTitle.textContent = 'Check In';
     } else if (mode === 'REPORT') {
-        authIcon.textContent = '⚠️';
+        authIcon.innerHTML = icon('triangle-alert', 'icon-warning');
         authTitle.textContent = 'Issue Report';
     } else if (mode === 'AUDIT') {
-        authIcon.textContent = '📋';
+        authIcon.innerHTML = icon('clipboard-list');
         authTitle.textContent = 'Toolbox Audit';
     } else if (mode === 'TRANSFERS') {
-        authIcon.textContent = '🔁';
+        authIcon.innerHTML = icon('repeat');
         authTitle.textContent = 'Transfers';
     }
 
@@ -89,10 +89,10 @@ async function authenticateUser() {
     const pin = document.getElementById('auth-pin-input').value.trim();
 
     if (!loginId) {
-        return showToast('⚠️ Identifier is required.');
+        return showToast(`${icon('triangle-alert', 'icon-warning')} Identifier is required.`);
     }
     if (!pin) {
-        return showToast('⚠️ PIN is required.');
+        return showToast(`${icon('triangle-alert', 'icon-warning')} PIN is required.`);
     }
 
     try {
@@ -104,7 +104,7 @@ async function authenticateUser() {
         const data = await response.json();
 
         if (!response.ok) {
-            return showToast('❌ ' + (data.error || 'Identity not recognized.'));
+            return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Identity not recognized.'));
         }
 
         activeUser = {
@@ -131,7 +131,7 @@ async function authenticateUser() {
         setupActionScreen();
         loadKioskAuditStatus();
     } catch (err) {
-        showToast('❌ Server error.');
+        showToast(`${icon('circle-x', 'icon-danger')} Server error.`);
     }
 }
 
@@ -156,10 +156,10 @@ async function loadKioskAuditStatus() {
         banner.style.display = 'block';
         if (dept.audit_completed) {
             banner.style.color = 'var(--green)';
-            banner.textContent = `✅ ${dept.name} audited this shift`;
+            banner.innerHTML = `${icon('circle-check')} ${dept.name} audited this shift`;
         } else {
             banner.style.color = 'var(--red)';
-            banner.textContent = `⚠️ ${dept.name} audit pending this shift`;
+            banner.innerHTML = `${icon('triangle-alert')} ${dept.name} audit pending this shift`;
         }
     } catch (err) {
         banner.style.display = 'none';
@@ -192,7 +192,7 @@ async function loadIdleAuditStatus() {
         // icon since this is meant to be glanceable from a few steps away on the kiosk.
         chipsEl.innerHTML = data.departments.map(d => {
             const color = d.audit_completed ? 'var(--muted)' : 'var(--red)';
-            const label = d.audit_completed ? `✅ ${d.name}` : `⚠️ ${d.name}`;
+            const label = d.audit_completed ? `${icon('circle-check')} ${d.name}` : `${icon('triangle-alert')} ${d.name}`;
             return `<span style="font-size:12px; font-weight:bold; padding:5px 12px; border-radius:14px; background: rgba(255,255,255,0.05); color: ${color};">${label}</span>`;
         }).join('');
     } catch (err) {
@@ -232,7 +232,7 @@ function setupActionScreen() {
         loadTransferQueue();
     } else {
         document.getElementById('panel-scanner').style.display = 'block';
-        document.getElementById('action-title').textContent = pendingMode === 'OUT' ? '📤 Scan Tools for Checkout' : '📥 Scan Tools for Check-in';
+        document.getElementById('action-title').innerHTML = pendingMode === 'OUT' ? `${icon('upload')} Scan Tools for Checkout` : `${icon('download')} Scan Tools for Check-in`;
         document.getElementById('btn-submit-action').textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
         focusScanInput('kiosk-scan-input');
     }
@@ -280,7 +280,7 @@ function handleToolScan() {
     if (!qr) return;
     
     if (batchQueue.includes(qr)) { 
-        showToast('⚠️ Already in queue.'); 
+        showToast(`${icon('triangle-alert', 'icon-warning')} Already in queue.`); 
         input.value = ''; 
         return; 
     }
@@ -288,12 +288,12 @@ function handleToolScan() {
     batchQueue.push(qr); 
     renderQueue(); 
     input.value = ''; 
-    showToast(`➕ Added: ${qr}`);
+    showToast(`${icon('plus')} Added: ${qr}`);
 }
 
 /**
  * Redraws the #queue-count and #queue-list UI from the current
- * batchQueue array, including each item's remove ("✕") control.
+ * batchQueue array, including each item's remove (x icon) control.
  * Also updates #queue-count-live, the same count shown on the
  * "Done Scanning" button while a continuous scan session is open.
  */
@@ -303,15 +303,15 @@ function renderQueue() {
     if (liveCount) liveCount.textContent = batchQueue.length;
     document.getElementById('queue-list').innerHTML = batchQueue.map((qr, index) => `
         <div class="batch-item">
-            <div>🔧 <strong>${qr}</strong></div>
-            <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;" onclick="removeItem(${index})">✕</div>
+            <div>${icon('wrench')} <strong>${qr}</strong></div>
+            <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;" onclick="removeItem(${index})">${icon('x')}</div>
         </div>
     `).join('');
 }
 
 /**
  * Removes a single tool from batchQueue by index (invoked from the
- * per-row "✕" control rendered in renderQueue()) and re-renders.
+ * per-row remove (x icon) control rendered in renderQueue()) and re-renders.
  */
 function removeItem(index) {
     batchQueue.splice(index, 1); 
@@ -331,7 +331,7 @@ async function loadAuditDropdown() {
         const data = await res.json();
         document.getElementById('audit-box-select').innerHTML = '<option value="">-- Select a Toolbox --</option>' + data.toolboxes.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
     } catch (e) { 
-        showToast("❌ Failed to load storage infrastructure."); 
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to load storage infrastructure.`); 
     }
 }
 
@@ -345,7 +345,7 @@ async function loadAuditDropdown() {
 async function startAudit() {
     const select = document.getElementById('audit-box-select');
     if (!select.value) {
-        return showToast("⚠️ Select a toolbox.");
+        return showToast(`${icon('triangle-alert', 'icon-warning')} Select a toolbox.`);
     }
     
     auditBoxName = select.value;
@@ -358,7 +358,7 @@ async function startAudit() {
         const filtered = data.tools.filter(t => t.toolbox_name === auditBoxName && t.status !== 'Retired');
         
         if (filtered.length === 0) {
-            return showToast("⚠️ No tools assigned to this box.");
+            return showToast(`${icon('triangle-alert', 'icon-warning')} No tools assigned to this box.`);
         }
 
         auditTools = filtered.map(t => ({ 
@@ -373,7 +373,7 @@ async function startAudit() {
         renderAuditList();
         focusScanInput('audit-scan-input');
     } catch (err) { 
-        showToast("❌ Failed to pull manifest."); 
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to pull manifest.`); 
     }
 }
 
@@ -439,11 +439,11 @@ function handleAuditScan() {
     const toolIndex = auditTools.findIndex(t => t.qr_code === qr);
     
     if (toolIndex === -1) {
-        showToast("⚠️ Tool doesn't belong in this box.");
+        showToast(`${icon('triangle-alert', 'icon-warning')} Tool doesn't belong in this box.`);
     } else {
         auditTools[toolIndex].audit_status = 'Present';
         renderAuditList();
-        showToast(`✅ Checked off: ${qr}`);
+        showToast(`${icon('circle-check', 'icon-success')} Checked off: ${qr}`);
     }
     
     input.value = '';
@@ -498,7 +498,7 @@ async function submitAudit() {
         });
 
         if (!res.ok) {
-            return showToast("❌ Failed to log audit.");
+            return showToast(`${icon('circle-x', 'icon-danger')} Failed to log audit.`);
         }
 
         if (auditGateReturnPending) {
@@ -507,17 +507,17 @@ async function submitAudit() {
             auditTools = [];
             document.getElementById('panel-audit').style.display = 'none';
             document.getElementById('panel-scanner').style.display = 'block';
-            document.getElementById('action-title').textContent = '📤 Scan Tools for Checkout';
+            document.getElementById('action-title').innerHTML = `${icon('upload')} Scan Tools for Checkout`;
             document.getElementById('btn-submit-action').textContent = '✓ Complete Checkout';
             renderQueue();
-            showToast("✅ Audit logged — you can now finalize your checkout.");
+            showToast(`${icon('circle-check', 'icon-success')} Audit logged — you can now finalize your checkout.`);
             return;
         }
 
-        showToast("✅ Audit complete and verified.");
+        showToast(`${icon('circle-check', 'icon-success')} Audit complete and verified.`);
         setTimeout(resetToIdle, 1500);
     } catch (e) {
-        showToast("❌ Connection error.");
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
 }
 
@@ -654,7 +654,7 @@ function executeCameraScan(elementId, successCallback, continuous = false) {
     ).then(() => {
         if (continuous) setContinuousScanUI(elementId, true);
     }).catch(err => {
-        showToast('❌ Camera Error');
+        showToast(`${icon('circle-x', 'icon-danger')} Camera Error`);
         document.getElementById(elementId).style.display = 'none';
     });
 }
@@ -733,7 +733,7 @@ async function submitTransaction(managerPin = null) {
     // failure, the operator now always gets a visible message instead of a dead button.
     let submitBtn;
     try {
-        if (batchQueue.length === 0) return showToast('⚠️ Queue empty.');
+        if (batchQueue.length === 0) return showToast(`${icon('triangle-alert', 'icon-warning')} Queue empty.`);
 
         if (!managerPin) {
             // Universal gate: always require sign-off before finalizing, for BOTH OUT and IN.
@@ -768,40 +768,40 @@ async function submitTransaction(managerPin = null) {
             // Handle Custom Hard-Stops
             if (data.code === 'BAD_TECH_PIN') {
                 document.getElementById('override-modal').style.display = 'none';
-                showToast('❌ Your session PIN is invalid. Please sign in again.');
+                showToast(`${icon('circle-x', 'icon-danger')} Your session PIN is invalid. Please sign in again.`);
                 return resetToIdle();
             }
             else if (data.code === 'SIGNOFF_REQUIRED') {
-                return showToast('⚠️ ' + (data.error || 'Sign-off PIN is required.'));
+                return showToast(icon('triangle-alert', 'icon-warning') + ' ' + (data.error || 'Sign-off PIN is required.'));
             }
             else if (data.code === 'BAD_PIN') {
-                return showToast('❌ Invalid Buddy PIN.');
+                return showToast(`${icon('circle-x', 'icon-danger')} Invalid Buddy PIN.`);
             }
             else if (data.code === 'SIGNOFF_SAME_PERSON') {
-                return showToast('❌ Sign-off must be from a different person.');
+                return showToast(`${icon('circle-x', 'icon-danger')} Sign-off must be from a different person.`);
             }
             else if (data.code === 'CAL_EXPIRED') {
                 document.getElementById('override-modal').style.display = 'none';
-                return showToast('🛑 ' + data.error);
+                return showToast(icon('octagon', 'icon-danger') + ' ' + data.error);
             }
             else if (data.code === 'TOOL_IN_TRANSFER') {
                 document.getElementById('override-modal').style.display = 'none';
-                return showToast('🛑 ' + data.error);
+                return showToast(icon('octagon', 'icon-danger') + ' ' + data.error);
             }
             else if (data.code === 'AUDIT_REQUIRED') {
                 document.getElementById('override-modal').style.display = 'none';
                 showAuditGateModal(data.pending_toolboxes || []);
                 return;
             }
-            return showToast('❌ ' + (data.error || 'Transaction failed.'));
+            return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Transaction failed.'));
         }
 
         document.getElementById('override-modal').style.display = 'none';
-        showToast(`✅ Successfully processed ${batchQueue.length} assets.`);
+        showToast(`${icon('circle-check', 'icon-success')} Successfully processed ${batchQueue.length} assets.`);
         setTimeout(resetToIdle, 1500);
     } catch (err) {
         if(submitBtn) { submitBtn.textContent = 'Error'; submitBtn.disabled = false; }
-        showToast('❌ ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
+        showToast(icon('circle-x', 'icon-danger') + ' ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
     }
 }
 
@@ -814,10 +814,10 @@ async function submitTransaction(managerPin = null) {
 function submitTransactionWithOverride() {
     try {
         const pin = document.getElementById('override-pin-input').value.trim();
-        if (!pin) return showToast('⚠️ PIN is required.');
+        if (!pin) return showToast(`${icon('triangle-alert', 'icon-warning')} PIN is required.`);
         submitTransaction(pin); // Re-run the exact same transaction, but pass the PIN this time
     } catch (err) {
-        showToast('❌ ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
+        showToast(icon('circle-x', 'icon-danger') + ' ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
     }
 }
 
@@ -849,7 +849,7 @@ async function submitProblemReport() {
     const issueType = document.getElementById('report-type').value; // Broken | Missing | Worn | NeedsCalibration
     const notes = document.getElementById('report-notes').value.trim();
 
-    if (!qr) return showToast('⚠️ Tool barcode is required.');
+    if (!qr) return showToast(`${icon('triangle-alert', 'icon-warning')} Tool barcode is required.`);
 
     if (issueType === 'NeedsCalibration') {
         return submitCalibrationTransfer(qr, notes);
@@ -874,14 +874,14 @@ async function submitProblemReport() {
 
         if (!response.ok) {
             if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
-            return showToast('❌ ' + (data.error || 'Failed to log report.'));
+            return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to log report.'));
         }
 
-        showToast(`✅ Reported ${qr} as ${issueType}. ID reserved.`);
+        showToast(`${icon('circle-check', 'icon-success')} Reported ${qr} as ${issueType}. ID reserved.`);
         setTimeout(resetToIdle, 1500);
     } catch (err) {
         if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
-        showToast('❌ Connection error.');
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
 }
 
@@ -894,7 +894,7 @@ async function submitProblemReport() {
  */
 async function submitCalibrationTransfer(qr, notes) {
     const qaDeptId = document.getElementById('report-qa-dept').value;
-    if (!qaDeptId) return showToast('⚠️ Select a QA department.');
+    if (!qaDeptId) return showToast(`${icon('triangle-alert', 'icon-warning')} Select a QA department.`);
 
     const btn = document.querySelector('#panel-report .btn-danger');
     if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
@@ -915,14 +915,14 @@ async function submitCalibrationTransfer(qr, notes) {
 
         if (!response.ok) {
             if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
-            return showToast('❌ ' + (data.error || 'Failed to initiate transfer.'));
+            return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to initiate transfer.'));
         }
 
-        showToast(`✅ ${qr} queued for QA pickup. Awaiting QA acceptance.`);
+        showToast(`${icon('circle-check', 'icon-success')} ${qr} queued for QA pickup. Awaiting QA acceptance.`);
         setTimeout(resetToIdle, 1500);
     } catch (err) {
         if (btn) { btn.textContent = 'Submit Registry Log'; btn.disabled = false; }
-        showToast('❌ Connection error.');
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
 }
 
@@ -952,7 +952,7 @@ async function loadReportQaDeptDropdown() {
             select.innerHTML = '<option value="">-- Select QA Department --</option>' + data.departments.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
         }
     } catch (e) {
-        showToast('❌ Failed to load departments.');
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to load departments.`);
     }
 }
 
@@ -984,7 +984,7 @@ async function loadTransferQueue() {
         const outgoingData = await outgoingRes.json();
 
         if (!incomingRes.ok || !outgoingRes.ok) {
-            showToast('❌ Failed to load transfer queue.');
+            showToast(`${icon('circle-x', 'icon-danger')} Failed to load transfer queue.`);
             return;
         }
 
@@ -1016,7 +1016,7 @@ async function loadTransferQueue() {
             </div>
         `).join('') : '<div style="color: var(--muted); font-size: 13px; padding: 10px 0;">Nothing pending.</div>';
     } catch (err) {
-        showToast('❌ Connection error loading transfers.');
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error loading transfers.`);
     }
 }
 
@@ -1035,12 +1035,12 @@ async function acceptIncomingTransfer(transferId) {
         });
         const data = await res.json();
         if (!res.ok) {
-            showToast('❌ ' + (data.error || 'Failed to accept transfer.'));
+            showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to accept transfer.'));
         } else {
-            showToast('✅ Transfer accepted — tool is now in calibration.');
+            showToast(`${icon('circle-check', 'icon-success')} Transfer accepted — tool is now in calibration.`);
         }
     } catch (err) {
-        showToast('❌ Connection error.');
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
     loadTransferQueue();
 }
@@ -1056,7 +1056,7 @@ async function completeAndReturnTransfer(transferId) {
     const lastCalDate = prompt('Last Calibration Date (YYYY-MM-DD):', new Date().toISOString().slice(0, 10));
     if (!lastCalDate) return;
     const calDueDate = prompt('Calibration Due Date (YYYY-MM-DD):');
-    if (!calDueDate) return showToast('⚠️ Calibration due date is required.');
+    if (!calDueDate) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration due date is required.`);
 
     try {
         const res = await fetch(`/api/transfers/${transferId}/complete-cal`, {
@@ -1071,12 +1071,12 @@ async function completeAndReturnTransfer(transferId) {
         });
         const data = await res.json();
         if (!res.ok) {
-            showToast('❌ ' + (data.error || 'Failed to complete calibration.'));
+            showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to complete calibration.'));
         } else {
-            showToast('✅ Calibration logged — tool is on its way back.');
+            showToast(`${icon('circle-check', 'icon-success')} Calibration logged — tool is on its way back.`);
         }
     } catch (err) {
-        showToast('❌ Connection error.');
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
     loadTransferQueue();
 }
@@ -1095,12 +1095,12 @@ async function acceptReturnedTransfer(transferId) {
         });
         const data = await res.json();
         if (!res.ok) {
-            showToast('❌ ' + (data.error || 'Failed to accept returned tool.'));
+            showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to accept returned tool.'));
         } else {
-            showToast('✅ Tool accepted back into service.');
+            showToast(`${icon('circle-check', 'icon-success')} Tool accepted back into service.`);
         }
     } catch (err) {
-        showToast('❌ Connection error.');
+        showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
     loadTransferQueue();
 }
@@ -1111,11 +1111,12 @@ async function acceptReturnedTransfer(transferId) {
 /**
  * Displays a transient message in the #kiosk-toast element for 3.5
  * seconds. Used throughout the file for success/error/warning
- * feedback.
+ * feedback -- callers prefix msg with an icon() call (colored via the
+ * icon-success/icon-danger/icon-warning modifier classes) rather than a leading emoji.
  */
 function showToast(msg) {
     const el = document.getElementById('kiosk-toast');
-    el.textContent = msg;
+    el.innerHTML = msg;
     el.style.display = 'block';
     setTimeout(() => { el.style.display = 'none'; }, 3500);
 }
@@ -1126,7 +1127,7 @@ function showToast(msg) {
 // no way to know whether to retry, wait, or call for help. Surfacing it as a toast at
 // least tells them something broke, even if the message itself is just the raw error.
 window.addEventListener('error', (event) => {
-    showToast('❌ Unexpected error: ' + (event.message || 'unknown'));
+    showToast(`${icon('circle-x', 'icon-danger')} Unexpected error: ` + (event.message || 'unknown'));
 });
 
 // Auto-refocus logic

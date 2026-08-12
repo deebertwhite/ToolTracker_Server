@@ -20,13 +20,13 @@
 </head>
 <body class="dashboard-layout">
 
-    <a href="index.html" class="persistent-home no-print">🏠 Main Hub</a>
+    <a href="index.html" class="persistent-home no-print"><span class="icon" data-icon="home"></span> Main Hub</a>
 
     <!-- Sidebar navigation tree: global overview link + dynamically-populated storage directory tree -->
     <div class="sidebar no-print">
         <div class="sidebar-header">LTA Telemetry</div>
 
-        <div class="nav-item active" id="nav-global" onclick="loadGlobalDashboard()">🌍 Global Overview</div>
+        <div class="nav-item active" id="nav-global" onclick="loadGlobalDashboard()"><span class="icon" data-icon="globe"></span> Global Overview</div>
 
         <div style="padding: 20px 20px 10px 20px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;">Storage Directory</div>
         <div id="tree-container">
@@ -43,7 +43,7 @@
                  and kept live by loadAuditStatusWidget() in dashboard.js. -->
             <div class="card" style="margin-bottom: 30px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
-                    <h3 style="margin: 0;">🕐 Shift Audit Status</h3>
+                    <h3 style="margin: 0;"><span class="icon" data-icon="clock"></span> Shift Audit Status</h3>
                     <div id="audit-widget-window" style="font-size: 13px; color: var(--muted);">Loading...</div>
                 </div>
                 <div id="audit-widget-chips" style="display: flex; flex-wrap: wrap; gap: 8px;"></div>
@@ -70,7 +70,7 @@
             </div>
 
             <!-- Active Deployments table: tools currently checked out -->
-            <h3 style="margin-bottom: 12px;">📡 Active Deployments (Checked Out)</h3>
+            <h3 style="margin-bottom: 12px;"><span class="icon" data-icon="radio"></span> Active Deployments (Checked Out)</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
                 <table>
                     <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Technician</th><th>Timestamp</th><th>Origin Location</th></tr></thead>
@@ -79,7 +79,7 @@
             </div>
 
             <!-- Maintenance Required table -->
-            <h3 style="margin-bottom: 12px;">⚠️ Maintenance Required</h3>
+            <h3 style="margin-bottom: 12px;"><span class="icon icon-warning" data-icon="triangle-alert"></span> Maintenance Required</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
                 <table>
                     <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Status</th><th>Notes</th><th>Assigned Location</th></tr></thead>
@@ -88,7 +88,7 @@
             </div>
 
             <!-- Calibration Due / Overdue table -->
-            <h3 style="margin-bottom: 12px;">⏳ Calibration Due / Overdue</h3>
+            <h3 style="margin-bottom: 12px;"><span class="icon" data-icon="hourglass"></span> Calibration Due / Overdue</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
                 <table>
                     <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Status</th><th>Due Date</th><th>Assigned Location</th></tr></thead>
@@ -125,7 +125,7 @@
             </div>
 
             <!-- Active Deployments table: tools currently checked out, scoped to this location -->
-            <h3 style="margin-bottom: 12px;">📡 Active Deployments (Checked Out)</h3>
+            <h3 style="margin-bottom: 12px;"><span class="icon" data-icon="radio"></span> Active Deployments (Checked Out)</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
                 <table>
                     <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Technician</th><th>Timestamp</th><th>Origin Location</th></tr></thead>
@@ -134,7 +134,7 @@
             </div>
 
             <!-- Maintenance Required table, scoped to this location -->
-            <h3 style="margin-bottom: 12px;">⚠️ Maintenance Required</h3>
+            <h3 style="margin-bottom: 12px;"><span class="icon icon-warning" data-icon="triangle-alert"></span> Maintenance Required</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
                 <table>
                     <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Status</th><th>Notes</th><th>Assigned Location</th></tr></thead>
@@ -143,7 +143,7 @@
             </div>
 
             <!-- Calibration Due / Overdue table, scoped to this location -->
-            <h3 style="margin-bottom: 12px;">⏳ Calibration Due / Overdue</h3>
+            <h3 style="margin-bottom: 12px;"><span class="icon" data-icon="hourglass"></span> Calibration Due / Overdue</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
                 <table>
                     <thead><tr><th>Barcode ID</th><th>Tool Description</th><th>Status</th><th>Due Date</th><th>Assigned Location</th></tr></thead>
@@ -157,10 +157,10 @@
     <!-- Read-only tool detail modal: opened by clicking any tool row in the global or per-location tables. Permanently view-only -- no edit/delete controls. -->
     <div id="tool-detail-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;" onclick="if (event.target === this) closeToolDetailModal();">
         <div class="card" style="width: 100%; max-width: 450px; position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
-            <button onclick="closeToolDetailModal()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;">✕</button>
+            <button onclick="closeToolDetailModal()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;"><span class="icon" data-icon="x"></span></button>
 
             <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 15px;">
-                <div id="td-thumb" style="width: 60px; height: 60px; border-radius: 8px; background: var(--surface2); display: flex; align-items: center; justify-content: center; font-size: 24px;">🔧</div>
+                <div id="td-thumb" style="width: 60px; height: 60px; border-radius: 8px; background: var(--surface2); display: flex; align-items: center; justify-content: center; font-size: 24px;"><span class="icon" data-icon="wrench"></span></div>
                 <div style="flex: 1;">
                     <div style="font-family: monospace; color: var(--accent); font-size: 11px; margin-bottom: 4px;" id="td-type-badge">TYPE</div>
                     <h3 id="td-title" style="margin: 0;">Tool Name</h3>
@@ -171,6 +171,7 @@
         </div>
     </div>
 
+    <script src="icons.js"></script>
     <script src="dashboard.js"></script>
     <script src="sw-register.js"></script>
 </body>

@@ -106,20 +106,20 @@ function closeSubPanel(workspaceId, subhubId) {
 /**
  * Expands/collapses one node (department, toolbox, or drawer) of the infrastructure tree
  * rendered by renderEditableInfraTree(). Flips the referenced containerId between
- * display:block/none and flips its sibling .toggle-icon glyph between ▼ (expanded) and ▶
- * (collapsed).
+ * display:block/none and flips its sibling .toggle-icon between a chevron-down (expanded)
+ * and chevron-right (collapsed).
  */
 function toggleTreeVisibility(containerId, headerElement) {
     const container = document.getElementById(containerId);
-    const icon = headerElement.querySelector('.toggle-icon');
+    const toggleIcon = headerElement.querySelector('.toggle-icon');
     if (!container) return;
-    
+
     if (container.style.display === 'none') {
         container.style.display = 'block';
-        if (icon) icon.textContent = '▼';
+        if (toggleIcon) toggleIcon.innerHTML = ICONS['chevron-down'];
     } else {
         container.style.display = 'none';
-        if (icon) icon.textContent = '▶';
+        if (toggleIcon) toggleIcon.innerHTML = ICONS['chevron-right'];
     }
 }
 
@@ -234,7 +234,7 @@ async function updateMyAccount() {
 // ==========================================
 // 4. PHOTO UPLOADS
 // ==========================================
-/** Records which entity (type + id) a photo upload is destined for, then opens the hidden #global-photo-upload file picker shared by every "📸 Photo/Upload" button. */
+/** Records which entity (type + id) a photo upload is destined for, then opens the hidden #global-photo-upload file picker shared by every "Photo" button. */
 function triggerPhotoUpload(type, id) {
     uploadTarget = { type, id };
     document.getElementById('global-photo-upload').click();
@@ -295,7 +295,7 @@ async function loadUsers() {
         const response = await fetch('/api/users'); const data = await response.json();
         globalUsersCache = data.users;
         document.getElementById('user-manage-body').innerHTML = data.users.map(u => {
-            const avatar = u.photo_url ? `<img src="${u.photo_url}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">` : `<div style="width: 40px; height: 40px; border-radius: 50%; background: var(--surface2); display: flex; align-items: center; justify-content: center;">👤</div>`;
+            const avatar = u.photo_url ? `<img src="${u.photo_url}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">` : `<div style="width: 40px; height: 40px; border-radius: 50%; background: var(--surface2); display: flex; align-items: center; justify-content: center;">${icon('user')}</div>`;
             return `<tr style="cursor: pointer;" onclick="openEntityModal('user', '${u.badge_id}')">
                         <td><div style="display: flex; align-items: center; gap: 12px;">${avatar} <div><strong>${u.full_name}</strong><br><span style="font-size:11px;color:var(--muted);">${u.email || 'No email'}</span></div></div></td>
                         <td style="font-family: monospace; font-size:12px;">Badge: ${u.badge_id}<br>User: ${u.username || '---'}</td>
@@ -310,7 +310,7 @@ async function loadRosterDirectory() {
     try {
         const res = await fetch(`/api/roster`); const data = await res.json();
         document.getElementById('user-roster-body').innerHTML = data.roster.map(u => {
-            const avatar = u.photo_url ? `<img src="${u.photo_url}" style="width: 30px; height: 30px; border-radius: 50%; object-fit: cover;">` : `<div style="width: 30px; height: 30px; border-radius: 50%; background: var(--surface2); display: flex; align-items: center; justify-content: center;">👤</div>`;
+            const avatar = u.photo_url ? `<img src="${u.photo_url}" style="width: 30px; height: 30px; border-radius: 50%; object-fit: cover;">` : `<div style="width: 30px; height: 30px; border-radius: 50%; background: var(--surface2); display: flex; align-items: center; justify-content: center;">${icon('user')}</div>`;
             return `<tr class="roster-row"><td><div style="display: flex; align-items: center; gap: 10px;">${avatar} <strong>${u.full_name}</strong></div></td><td>${u.department_name || '--'}</td><td>${u.role.toUpperCase()}</td><td style="font-family: monospace;">${u.badge_id}</td></tr>`;
         }).join('');
     } catch (err) { console.error(err); }
@@ -384,11 +384,11 @@ async function submitSmartBox() {
     const payload = { name: document.getElementById('str-box-name').value, dept_id: document.getElementById('str-box-dept-select').value, qr_code: document.getElementById('str-box-id').value, drawer_count: document.getElementById('str-box-drawers').value };
     if (!payload.name || !payload.dept_id) return alert("⚠️ Required fields missing.");
     const btn = document.querySelector('button[onclick="submitSmartBox()"]');
-    btn.textContent = "⏳ Building..."; btn.disabled = true;
+    btn.innerHTML = `${icon('hourglass')} Building...`; btn.disabled = true;
     const res = await fetch('/api/toolboxes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-    if (res.ok) { document.getElementById('str-box-name').value = ''; document.getElementById('str-box-drawers').value = ''; await syncStorageHierarchyDropdowns(); await fetchNextBoxId(); renderEditableInfraTree(); btn.textContent = "✅ Success!"; }
+    if (res.ok) { document.getElementById('str-box-name').value = ''; document.getElementById('str-box-drawers').value = ''; await syncStorageHierarchyDropdowns(); await fetchNextBoxId(); renderEditableInfraTree(); btn.innerHTML = `${icon('circle-check', 'icon-success')} Success!`; }
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
-    setTimeout(() => { btn.textContent = "🔨 Build Storage Structure"; btn.disabled = false; }, 2000);
+    setTimeout(() => { btn.innerHTML = `${icon('hammer')} Build Storage Structure`; btn.disabled = false; }, 2000);
 }
 
 /** Cascade handler for the Add Drawer form's Department select: repopulates the Toolbox select filtered to that department (populateBoxSelect). */
@@ -530,9 +530,9 @@ async function renderEditableInfraTree() {
             // modal (view details, or edit/delete if permitted) -- see openEntityModal().
             html += `<div class="card" style="border-left: 4px solid var(--accent); margin-bottom: 15px; padding: 15px;">
                         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; user-select: none;">
-                            <span class="toggle-icon" style="color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)">▼</span>
+                            <span class="icon toggle-icon" style="color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)">${ICONS['chevron-down']}</span>
                             <h4 style="margin: 0; cursor: pointer;" onclick="openEntityModal('department', '${dept.dept_id}')">
-                                🏢 ${dept.name} <span style="font-weight:normal; color:var(--muted); font-size:13px;">(${dept.prefix_code})</span>
+                                ${icon('building-2')} ${dept.name} <span style="font-weight:normal; color:var(--muted); font-size:13px;">(${dept.prefix_code})</span>
                             </h4>
                         </div>
                         <div id="${deptContentId}">`;
@@ -542,13 +542,13 @@ async function renderEditableInfraTree() {
 
             deptBoxes.forEach(box => {
                 const boxTools = tools.tools.filter(t => { const dr = storage.drawers.find(d => d.drawer_id === t.drawer_id); return dr && dr.box_id === box.box_id; });
-                const thumb = box.photo_url ? `<img src="${box.photo_url}" onclick="openImageModal('${box.photo_url}')" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : `🧰`;
+                const thumb = box.photo_url ? `<img src="${box.photo_url}" onclick="openImageModal('${box.photo_url}')" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : icon('toolbox');
                 const boxContentId = `box-content-${box.box_id}`;
 
                 html += `<div class="tree-node" style="padding: 10px;">
                             <div style="display: flex; align-items: center; gap: 10px; user-select: none;">
                                 ${thumb}
-                                <span class="toggle-icon" style="font-size: 12px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)">▼</span>
+                                <span class="icon toggle-icon" style="font-size: 12px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)">${ICONS['chevron-down']}</span>
                                 <span onclick="openEntityModal('toolbox', '${box.box_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                     <strong>${box.name}</strong>
                                     <span style="background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 10px; color: var(--accent); font-family: monospace;">${box.qr_code || 'NO-ID'}</span>
@@ -562,13 +562,13 @@ async function renderEditableInfraTree() {
                 if(boxDrawers.length > 0) {
                     boxDrawers.forEach(dr => {
                         const drToolsList = tools.tools.filter(t => t.drawer_id === dr.drawer_id);
-                        const drThumb = dr.photo_url ? `<img src="${dr.photo_url}" onclick="openImageModal('${dr.photo_url}')" style="width: 20px; height: 20px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : `📂`;
+                        const drThumb = dr.photo_url ? `<img src="${dr.photo_url}" onclick="openImageModal('${dr.photo_url}')" style="width: 20px; height: 20px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : icon('folder');
                         const drawerContentId = `drawer-content-${dr.drawer_id}`;
 
                         html += `<div class="tree-child" style="padding: 6px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
                                     <div style="display: flex; align-items: center; gap: 8px; user-select: none;">
                                         ${drThumb}
-                                        <span class="toggle-icon" style="font-size: 10px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)">▼</span>
+                                        <span class="icon toggle-icon" style="font-size: 10px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)">${ICONS['chevron-down']}</span>
                                         <span onclick="openEntityModal('drawer', '${dr.drawer_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                             <span style="font-weight: bold;">${dr.name}</span>
                                             <span style="font-size:11px; color:var(--muted); margin-left: 5px;">(${drToolsList.length} tools)</span>
@@ -775,7 +775,7 @@ async function submitInventoryImport() {
     formData.append('csv', file);
 
     const btn = document.getElementById('btn-import-csv');
-    btn.textContent = '⏳ Importing...'; btn.disabled = true;
+    btn.innerHTML = `${icon('hourglass')} Importing...`; btn.disabled = true;
 
     try {
         const res = await fetch('/api/tools/import', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
@@ -787,8 +787,8 @@ async function submitInventoryImport() {
         document.getElementById('import-summary').textContent = `${summary.created} created, ${summary.updated} updated, ${summary.errors} error(s).`;
         document.getElementById('import-results-body').innerHTML = results.map(r => {
             const color = r.result === 'error' ? 'var(--red)' : (r.result === 'created' ? 'var(--green)' : 'var(--accent)');
-            const icon = r.result === 'error' ? '❌' : '✅';
-            return `<tr><td>${r.row}</td><td style="font-family: monospace;">${r.barcode}</td><td style="color: ${color}; font-weight: bold;">${icon} ${r.result}</td><td>${r.message}</td></tr>`;
+            const resultIcon = r.result === 'error' ? icon('circle-x') : icon('circle-check');
+            return `<tr><td>${r.row}</td><td style="font-family: monospace;">${r.barcode}</td><td style="color: ${color}; font-weight: bold;">${resultIcon} ${r.result}</td><td>${r.message}</td></tr>`;
         }).join('');
 
         fileInput.value = '';
@@ -796,7 +796,7 @@ async function submitInventoryImport() {
     } catch (err) {
         alert('❌ Network error during import.');
     } finally {
-        btn.textContent = '⬆️ Import'; btn.disabled = false;
+        btn.innerHTML = `${icon('upload')} Import`; btn.disabled = false;
     }
 }
 
@@ -897,7 +897,7 @@ function openEntityModal(type, id) {
         entity = globalDeptsCache.find(d => d.dept_id == id);
         if(!entity) return;
         document.getElementById('em-type-badge').textContent = `DEPARTMENT [ID: ${entity.dept_id}]`;
-        document.getElementById('em-thumb').innerHTML = '🏢';
+        document.getElementById('em-thumb').innerHTML = icon('building-2');
 
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         readHtml = `<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Prefix Code</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.prefix_code}</div></div>`;
@@ -912,9 +912,9 @@ function openEntityModal(type, id) {
 
         if (canEditDepts) {
             actionsHtml = `
-                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
-                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
-                <button class="btn btn-secondary" onclick="deleteInfraItem('departments', '${entity.dept_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">${icon('save')} Save Changes</button>
+                <button class="btn btn-secondary" onclick="deleteInfraItem('departments', '${entity.dept_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>
             `;
         }
 
@@ -922,17 +922,17 @@ function openEntityModal(type, id) {
         entity = globalBoxesCache.find(b => b.box_id == id);
         if(!entity) return;
         document.getElementById('em-type-badge').textContent = `STORAGE UNIT [ID: ${entity.box_id}]`;
-        document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '🧰';
+        document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : icon('toolbox');
 
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         fieldsHtml = `<div class="form-group"><label class="form-label">Unit Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
 
         if (canEditInfra) {
             actionsHtml = `
-                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
-                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
-                <button class="btn btn-secondary" onclick="triggerPhotoUpload('toolbox', '${entity.box_id}')" style="width:auto;">📸 Photo</button>
-                <button class="btn btn-secondary" onclick="deleteInfraItem('toolboxes', '${entity.box_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">${icon('save')} Save Changes</button>
+                <button class="btn btn-secondary" onclick="triggerPhotoUpload('toolbox', '${entity.box_id}')" style="width:auto;">${icon('camera')} Photo</button>
+                <button class="btn btn-secondary" onclick="deleteInfraItem('toolboxes', '${entity.box_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>
             `;
         }
 
@@ -940,17 +940,17 @@ function openEntityModal(type, id) {
         entity = globalDrawersCache.find(d => d.drawer_id == id);
         if(!entity) return;
         document.getElementById('em-type-badge').textContent = `STORAGE DRAWER [ID: ${entity.drawer_id}]`;
-        document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '📂';
+        document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : icon('folder');
 
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         fieldsHtml = `<div class="form-group"><label class="form-label">Drawer Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
 
         if (canEditInfra) {
             actionsHtml = `
-                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
-                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
-                <button class="btn btn-secondary" onclick="triggerPhotoUpload('drawer', '${entity.drawer_id}')" style="width:auto;">📸 Photo</button>
-                <button class="btn btn-secondary" onclick="deleteInfraItem('drawers', '${entity.drawer_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">${icon('save')} Save Changes</button>
+                <button class="btn btn-secondary" onclick="triggerPhotoUpload('drawer', '${entity.drawer_id}')" style="width:auto;">${icon('camera')} Photo</button>
+                <button class="btn btn-secondary" onclick="deleteInfraItem('drawers', '${entity.drawer_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>
             `;
         }
 
@@ -958,7 +958,7 @@ function openEntityModal(type, id) {
         entity = globalToolsCache.find(t => t.qr_code === id);
         if(!entity) return;
         document.getElementById('em-type-badge').textContent = `ASSET [${entity.qr_code}]`;
-        document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : '🔧';
+        document.getElementById('em-thumb').innerHTML = entity.photo_url ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:8px;object-fit:cover;cursor:zoom-in;">` : icon('wrench');
         
         const lastCal = entity.last_cal_date ? entity.last_cal_date.split('T')[0] : '';
         const dueCal = entity.cal_due_date ? entity.cal_due_date.split('T')[0] : '';
@@ -988,7 +988,7 @@ function openEntityModal(type, id) {
             </div>
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
-        if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">🛒 Open Replacement Link →</a></div>`;
+        if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
 
         // The "Edit" View (Hidden by default)
         const isOut = entity.status === 'Out';
@@ -1084,10 +1084,10 @@ function openEntityModal(type, id) {
 
         if (canEditTools) {
             actionsHtml = `
-                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Details</button>
-                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
-                <button class="btn btn-secondary" onclick="triggerPhotoUpload('tool', '${entity.qr_code}')" style="width:auto;">📸 Photo</button>
-                <button class="btn btn-secondary" onclick="removeToolPermanent('${entity.tool_id}', '${entity.qr_code}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Delete</button>
+                <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Details</button>
+                <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">${icon('save')} Save Changes</button>
+                <button class="btn btn-secondary" onclick="triggerPhotoUpload('tool', '${entity.qr_code}')" style="width:auto;">${icon('camera')} Photo</button>
+                <button class="btn btn-secondary" onclick="removeToolPermanent('${entity.tool_id}', '${entity.qr_code}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>
             `;
         }
 
@@ -1102,7 +1102,7 @@ function openEntityModal(type, id) {
         document.getElementById('em-type-badge').textContent = `PERSONNEL [${entity.badge_id}]`;
         document.getElementById('em-thumb').innerHTML = entity.photo_url
             ? `<img src="${entity.photo_url}" onclick="openImageModal('${entity.photo_url}')" style="width:100%;height:100%;border-radius:50%;object-fit:cover;cursor:zoom-in;">`
-            : '👤';
+            : icon('user');
 
         const grantedNames = (entity.granted_dept_ids || []).map(gid => (globalDeptsCache.find(d => d.dept_id == gid) || {}).name).filter(Boolean);
         titleHtml = `<h3 style="margin:0;">${entity.full_name}</h3>`;
@@ -1138,11 +1138,11 @@ function openEntityModal(type, id) {
         `;
 
         actionsHtml = `
-            <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">✏️ Edit Role</button>
-            <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">💾 Save Changes</button>
-            <button class="btn btn-secondary" onclick="triggerPhotoUpload('user', '${entity.badge_id}')" style="width:auto;">📸 Photo</button>
-            <button class="btn btn-secondary" onclick="resetUserPin('${entity.badge_id}')" style="width:auto;">↺ Reset PIN</button>
-            <button class="btn btn-secondary" onclick="deactivateUser('${entity.badge_id}')" style="width:auto; color: var(--red); border-color: var(--red);">✕ Remove</button>
+            <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Role</button>
+            <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">${icon('save')} Save Changes</button>
+            <button class="btn btn-secondary" onclick="triggerPhotoUpload('user', '${entity.badge_id}')" style="width:auto;">${icon('camera')} Photo</button>
+            <button class="btn btn-secondary" onclick="resetUserPin('${entity.badge_id}')" style="width:auto;">${icon('key-round')} Reset PIN</button>
+            <button class="btn btn-secondary" onclick="deactivateUser('${entity.badge_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Remove</button>
         `;
     }
 
@@ -1272,7 +1272,7 @@ function copyCredentialsToClipboard() {
     const text = lines.join('\n');
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(
-            () => { const btn = document.getElementById('cred-modal-copy-btn'); if (btn) { const original = btn.textContent; btn.textContent = '✅ Copied!'; setTimeout(() => { btn.textContent = original; }, 1500); } },
+            () => { const btn = document.getElementById('cred-modal-copy-btn'); if (btn) { const original = btn.innerHTML; btn.innerHTML = `${icon('circle-check', 'icon-success')} Copied!`; setTimeout(() => { btn.innerHTML = original; }, 1500); } },
             () => alert('Could not copy automatically -- click into each field above to select and copy it manually.')
         );
     } else {

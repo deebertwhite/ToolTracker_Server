@@ -68,7 +68,21 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
 }
 .persistent-home:hover { color: white; border-color: var(--accent); background: var(--surface2); transform: translateX(-50%) translateY(-4px); box-shadow: 0 12px 40px rgba(0,0,0,0.8); }
 
-.btn { 
+/* Flat, single-color icon set (see icons.js) replacing this app's previous emoji icons.
+   Sized off the current font-size (1em) and colored via `color` (the SVGs use
+   stroke="currentColor") so every existing emoji-sized/positioned spot -- .hub-icon at
+   48px, .btn-icon at 16px, inline within button text at whatever size that text already
+   is -- just works without per-instance overrides. The modifier classes below are the one
+   deliberate exception to "everything goes neutral": success/error/warning icons keep
+   semantic color, since that's a real at-a-glance signal (e.g. a CSV import results list),
+   not just decoration. */
+.icon { display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1em; vertical-align: -0.125em; flex-shrink: 0; }
+.icon svg { width: 100%; height: 100%; display: block; }
+.icon-success { color: var(--green); }
+.icon-danger { color: var(--red); }
+.icon-warning { color: var(--orange); }
+
+.btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px; 
     padding: 10px 18px; border-radius: 6px; border: none; cursor: pointer; 
     font-weight: 600; font-size: 14px; transition: 0.2s; width: 100%; text-align: center;
