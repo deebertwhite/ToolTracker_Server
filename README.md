@@ -393,6 +393,7 @@ This doesn't cover a genuine internet outage (DNS resolution for a public domain
 - **bwip-js** — Data Matrix barcode generation for tool labels
 - **csv-parse** / **csv-stringify** — bulk inventory CSV import/export
 - **html5-qrcode** (front-end) — camera-based barcode scanning in the browser
+- **Lucide icons** (vendored, front-end) — the app's flat/monochrome icon set. `public/icons.js` holds the full `ICONS` map plus `icon(name)` (for template-literal-built HTML) and `hydrateIcons()` (for `<span class="icon" data-icon="name">` in static HTML) — add a new icon there, not as a new emoji.
 - **Caddy** — reverse proxy providing automatic, real HTTPS via Let's Encrypt (DNS-01 challenge against DuckDNS)
 - **cors** — cross-origin support for the API
 
