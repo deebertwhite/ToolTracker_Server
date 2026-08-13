@@ -401,7 +401,7 @@ This doesn't cover a genuine internet outage (DNS resolution for a public domain
 - **sharp** — image processing for uploaded photos; also used to rasterize PWA icons
 - **bwip-js** — Data Matrix barcode generation for tool labels
 - **csv-parse** / **csv-stringify** — bulk inventory CSV import/export
-- **html5-qrcode** (front-end) — camera-based barcode scanning in the browser
+- **html5-qrcode** (vendored, front-end) — camera-based barcode scanning in the browser. Used to load from unpkg.com at request time; now vendored as `public/html5-qrcode.min.js` (copied from the `html5-qrcode` npm package) so scanning doesn't silently break with an "Html5Qrcode is not defined" error on a device with no internet access or an unreachable CDN — the same reasoning as vendoring the icon set below.
 - **Lucide icons** (vendored, front-end) — the app's flat/monochrome icon set. `public/icons.js` holds the full `ICONS` map plus `icon(name)` (for template-literal-built HTML) and `hydrateIcons()` (for `<span class="icon" data-icon="name">` in static HTML) — add a new icon there, not as a new emoji.
 - **Caddy** — reverse proxy providing automatic, real HTTPS via Let's Encrypt (DNS-01 challenge against DuckDNS)
 - **cors** — cross-origin support for the API

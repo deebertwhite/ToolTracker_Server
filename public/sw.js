@@ -15,11 +15,11 @@
 // /api/* requests are explicitly never cached or intercepted -- live data must always come
 // from the real server or fail honestly, never a stale cached JSON blob standing in for it.
 
-const CACHE_NAME = 'tooltracker-shell-v2'; // bump this string whenever a cache reset is needed
+const CACHE_NAME = 'tooltracker-shell-v3'; // bump this string whenever a cache reset is needed
 
 const APP_SHELL_FILES = [
     '/', '/index.html', '/kiosk.html', '/admin.html', '/dashboard.html',
-    '/style.css', '/icons.js', '/kiosk.js', '/admin.js', '/dashboard.js',
+    '/style.css', '/icons.js', '/kiosk.js', '/admin.js', '/dashboard.js', '/html5-qrcode.min.js',
     '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png', '/icons/favicon-32.png',
     '/manifest-index.json', '/manifest-kiosk.json', '/manifest-admin.json', '/manifest-dashboard.json',
 ];

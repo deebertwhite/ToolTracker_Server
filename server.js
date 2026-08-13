@@ -71,15 +71,22 @@ app.use(cors({
 }));
 
 // helmet's defaults are used as-is except for the CSP's script-src (and script-src-attr,
-// see below), which is deliberately relaxed to allow: (1) 'unsafe-inline', since
+// see below), which is deliberately relaxed to allow 'unsafe-inline', since
 // admin.html/kiosk.html use inline onclick= handlers throughout (33 and 23 respectively)
 // that a strict default CSP would silently break with no visible error besides a browser
-// console warning; and (2) unpkg.com, which both pages load the html5-qrcode
-// camera-scanning library from. Refactoring every inline handler to addEventListener so a
-// fully strict CSP is possible is a legitimate future improvement, but it's a large,
-// separable, non-security-driven refactor -- not this pass. The rest of helmet's defaults
-// still apply, including X-Frame-Options (real clickjacking protection for the admin
-// panel) and X-Content-Type-Options.
+// console warning. Refactoring every inline handler to addEventListener so a fully strict
+// CSP is possible is a legitimate future improvement, but it's a large, separable,
+// non-security-driven refactor -- not this pass. The rest of helmet's defaults still apply,
+// including X-Frame-Options (real clickjacking protection for the admin panel) and
+// X-Content-Type-Options.
+//
+// html5-qrcode (the camera-scanning library both pages use) used to be loaded from
+// unpkg.com at runtime, which needed an explicit CSP allowance here -- and meant scanning
+// broke with a confusing "Html5Qrcode is not defined" error on any device with no internet
+// access or an unreachable CDN, silently defeating this app's whole offline-resilient
+// design (DuckDNS fallback, service-worker asset caching, etc). It's now vendored locally
+// as public/html5-qrcode.min.js (see 'script-src': ["'self'", ...] below -- no external
+// host needed at all) the same way the icon set was vendored instead of pulled from a CDN.
 //
 // IMPORTANT: script-src-attr is a SEPARATE directive from script-src that specifically
 // governs inline event-handler attributes (onclick=, onchange=, etc.) -- CSP Level 3 does
@@ -91,7 +98,7 @@ app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-            'script-src': ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
+            'script-src': ["'self'", "'unsafe-inline'"],
             'script-src-attr': ["'self'", "'unsafe-inline'"],
         },
     },
