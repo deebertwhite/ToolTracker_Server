@@ -324,6 +324,38 @@
         </div>
     </div>
 
+    <!-- ============================================================
+         CALIBRATION COMPLETE MODAL (#cal-complete-modal)
+         Hidden by default; opened from the QA transfer queue's "Mark
+         Calibration Complete & Return" button (openCalCompleteModal()
+         in kiosk.js). Collects everything POST /api/transfers/:id/
+         complete-cal needs to write a permanent calibration_records
+         row, not just update the tool's current due date -- see
+         migrations/006_calibration_history.sql for why that matters.
+    ============================================================= -->
+    <div id="cal-complete-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px; overflow-y: auto;">
+        <div class="card" style="width: 100%; max-width: 420px; margin: 30px 0;">
+            <h3 style="margin-bottom: 6px;">Log Calibration &amp; Return Tool</h3>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 16px;">Recorded as a permanent calibration record for this tool -- required for FAA-traceable calibration history, not just the current due date.</p>
+
+            <input type="hidden" id="cal-complete-transfer-id">
+
+            <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
+                <div class="form-group"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="cal-last-date"></div>
+                <div class="form-group"><label class="form-label">Due Date</label><input type="date" class="form-input" id="cal-due-date"></div>
+            </div>
+            <div class="form-group"><label class="form-label">Calibration Provider / Lab</label><input class="form-input" id="cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
+            <div class="form-group"><label class="form-label">Certificate / Reference Number</label><input class="form-input" id="cal-cert-number" placeholder="e.g. CERT-2026-04231"></div>
+            <div class="form-group"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-standard" placeholder="e.g. NIST-traceable"></div>
+            <div class="form-group"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-notes"></div>
+
+            <div style="display: flex; gap: 10px; margin-top: 10px;">
+                <button class="btn btn-secondary" onclick="document.getElementById('cal-complete-modal').style.display='none'">Cancel</button>
+                <button class="btn btn-primary" onclick="submitCalibrationComplete()">Submit</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast notification element: shown/hidden by showToast() to
          surface transient success/error/warning messages. -->
     <div class="toast" id="kiosk-toast">Toast Message</div>

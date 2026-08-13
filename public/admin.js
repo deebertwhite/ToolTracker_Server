@@ -989,6 +989,12 @@ function openEntityModal(type, id) {
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
         if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
+        // Populated asynchronously by loadCalibrationHistory() below -- every completed
+        // calibration cycle (see calibration_records / migrations/006), not just the current
+        // due date, so an auditor can see who calibrated it and under what certificate.
+        if (entity.is_calibrated) {
+            readHtml += `<div id="em-cal-history-container" style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div><div style="font-size:12px;color:var(--muted);margin-top:4px;">Loading...</div></div>`;
+        }
 
         // The "Edit" View (Hidden by default)
         const isOut = entity.status === 'Out';
@@ -1154,6 +1160,40 @@ function openEntityModal(type, id) {
     // ALWAYS open in Read-Only mode first!
     toggleModalEditMode(false);
     document.getElementById('entity-modal-overlay').style.display = 'flex';
+
+    if (type === 'tool' && entity.is_calibrated) loadCalibrationHistory(entity.tool_id);
+}
+
+/**
+ * Fills in #em-cal-history-container (a placeholder left by openEntityModal for a calibrated
+ * tool) from GET /api/tools/:id/calibration-history -- every completed calibration cycle,
+ * newest first, not just the tool's current due date. Called with the tool's real numeric
+ * tool_id (not qr_code, unlike most of this file's tool lookups) since that's what the
+ * endpoint expects.
+ */
+async function loadCalibrationHistory(toolId) {
+    const container = document.getElementById('em-cal-history-container');
+    if (!container) return;
+    try {
+        const res = await fetch(`/api/tools/${toolId}/calibration-history`);
+        const data = await res.json();
+        if (!res.ok || !data.records.length) {
+            container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div><div style="font-size:12px;color:var(--muted);margin-top:4px;">No completed calibration cycles on record yet.</div>`;
+            return;
+        }
+        const rows = data.records.map(r => `
+            <div style="padding:8px 0; border-bottom:1px solid var(--border);">
+                <div style="display:flex; justify-content:space-between; font-size:13px;"><strong>${r.cal_date.split('T')[0]}</strong><span style="color:var(--muted);">Due: ${r.due_date.split('T')[0]}</span></div>
+                <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
+                ${r.standard_used ? `<div style="font-size:11px; color:var(--muted);">Standard: ${r.standard_used}</div>` : ''}
+                ${r.notes ? `<div style="font-size:11px; color:var(--muted);">${r.notes}</div>` : ''}
+                <div style="font-size:10px; color:var(--muted); margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
+            </div>
+        `).join('');
+        container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Calibration History (${data.records.length})</div>${rows}`;
+    } catch (e) {
+        container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div><div style="font-size:12px;color:var(--red);margin-top:4px;">Failed to load.</div>`;
+    }
 }
 
 /** Hides the universal entity modal without saving. */

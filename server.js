@@ -615,6 +615,28 @@ app.get('/api/tools', async (req, res) => {
     }
 });
 
+// Full calibration history for one tool -- every completed calibration cycle (see
+// calibration_records / POST /api/transfers/:id/complete-cal), newest first, so an admin or
+// auditor can see who calibrated it, against what standard, and under what certificate
+// number, not just the current due date. requireRole(2) matches the existing view-inventory
+// threshold (tool_rep+), same as the rest of the admin tool detail view.
+app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number,
+                    cr.standard_used, cr.notes, cr.recorded_at, u.full_name AS recorded_by_name
+             FROM calibration_records cr
+             LEFT JOIN users u ON cr.recorded_by_user_id = u.user_id
+             WHERE cr.tool_id = $1
+             ORDER BY cr.cal_date DESC, cr.recorded_at DESC`,
+            [req.params.id]
+        );
+        res.json({ success: true, records: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch calibration history.' });
+    }
+});
+
 // Compute the next sequential numeric suffix for a tool QR code with the given prefix.
 // Finds the lowest unused sequence number for the given prefix, not just MAX+1 -- so a
 // deleted tool's number (e.g. AVI-000002) gets reused on the next ingest instead of being
@@ -2075,9 +2097,13 @@ app.post('/api/transfers/:transfer_id/qa-accept', authLimiter, async (req, res) 
 });
 
 // QA side marks calibration complete and sends the tool back to its home department.
+// provider/certificate_number are required (not just last_cal_date/cal_due_date) so every
+// completed calibration leaves a permanent, traceable calibration_records row -- see
+// migrations/006_calibration_history.sql for why a snapshot on the tools row alone isn't
+// enough for FAA-grade calibration traceability.
 app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin, last_cal_date, cal_due_date } = req.body;
+    const { badge_id, pin, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes } = req.body;
     const client = await pool.connect();
 
     try {
@@ -2112,15 +2138,19 @@ app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, re
             return res.status(403).json({ error: 'Only the QA department may complete this calibration.', code: 'WRONG_DEPT' });
         }
 
-        if (!cal_due_date) {
+        if (!last_cal_date || !cal_due_date) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ error: 'Calibration Due Date is required.', code: 'CAL_DUE_DATE_REQUIRED' });
+            return res.status(400).json({ error: 'Calibration date and due date are both required.', code: 'CAL_DUE_DATE_REQUIRED' });
+        }
+        if (!provider || !certificate_number) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.', code: 'CAL_TRACEABILITY_REQUIRED' });
         }
 
         const toolRes = await client.query(
             `UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true, status = 'Pending Transfer'
              WHERE tool_id = $3 RETURNING tool_id, last_cal_date, cal_due_date`,
-            [last_cal_date || null, cal_due_date, transfer.tool_id]
+            [last_cal_date, cal_due_date, transfer.tool_id]
         );
         const transferUpdRes = await client.query(
             `UPDATE tool_transfers SET status = 'AWAITING_HOME_ACCEPT', cal_completed_by_user_id = $1, cal_completed_at = NOW(), updated_at = NOW()
@@ -2128,8 +2158,13 @@ app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, re
             [user.user_id, transfer_id]
         );
         await client.query(
-            "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, 'Calibration completed; awaiting home department acceptance')",
-            [user.user_id, transfer.tool_id]
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [transfer.tool_id, last_cal_date, cal_due_date, provider, certificate_number, standard_used || null, notes || null, user.user_id]
+        );
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
+            [user.user_id, transfer.tool_id, `Calibration completed by ${provider} (cert ${certificate_number}); awaiting home department acceptance`]
         );
 
         await client.query('COMMIT');

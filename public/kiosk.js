@@ -250,8 +250,10 @@ function setupActionScreen() {
 function isAnyKioskModalOpen() {
     const overrideModal = document.getElementById('override-modal');
     const auditGateModal = document.getElementById('audit-gate-modal');
+    const calCompleteModal = document.getElementById('cal-complete-modal');
     return (overrideModal && overrideModal.style.display === 'flex') ||
-           (auditGateModal && auditGateModal.style.display === 'flex');
+           (auditGateModal && auditGateModal.style.display === 'flex') ||
+           (calCompleteModal && calCompleteModal.style.display === 'flex');
 }
 
 /**
@@ -979,7 +981,7 @@ async function loadTransferQueue() {
             <div class="batch-item" style="flex-direction: column; align-items: stretch; gap: 6px;">
                 <div><strong>${t.tool_name}</strong> <span style="color: var(--muted); font-family: monospace;">(${t.qr_code})</span></div>
                 <div style="font-size: 12px; color: var(--muted);">Home Dept: ${t.home_dept_name}${t.notes ? ' — ' + t.notes : ''}</div>
-                <button class="btn btn-success" style="width: auto; align-self: flex-start;" onclick="completeAndReturnTransfer(${t.transfer_id})">Mark Calibration Complete & Return</button>
+                <button class="btn btn-success" style="width: auto; align-self: flex-start;" onclick="openCalCompleteModal(${t.transfer_id})">Mark Calibration Complete & Return</button>
             </div>
         `).join('') : '<div style="color: var(--muted); font-size: 13px; padding: 10px 0;">Nothing pending.</div>';
 
@@ -1021,17 +1023,41 @@ async function acceptIncomingTransfer(transferId) {
 }
 
 /**
- * QA-side action: finishes calibration on an in-progress transfer.
- * Prompts inline (via prompt()) for last_cal_date and cal_due_date —
- * the simplest reasonable UI for two small date inputs — then POSTs
- * to POST /api/transfers/:id/complete-cal. Toasts and refreshes the
- * queue in place regardless of outcome.
+ * QA-side action: opens #cal-complete-modal for the given in-progress transfer, prefilling
+ * today's date as the calibration date. submitCalibrationComplete() below does the actual
+ * POST once the form -- including the calibration provider and certificate/reference number,
+ * required for a traceable calibration_records row -- is filled in.
  */
-async function completeAndReturnTransfer(transferId) {
-    const lastCalDate = prompt('Last Calibration Date (YYYY-MM-DD):', new Date().toISOString().slice(0, 10));
-    if (!lastCalDate) return;
-    const calDueDate = prompt('Calibration Due Date (YYYY-MM-DD):');
-    if (!calDueDate) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration due date is required.`);
+function openCalCompleteModal(transferId) {
+    document.getElementById('cal-complete-transfer-id').value = transferId;
+    document.getElementById('cal-last-date').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('cal-due-date').value = '';
+    document.getElementById('cal-provider').value = '';
+    document.getElementById('cal-cert-number').value = '';
+    document.getElementById('cal-standard').value = '';
+    document.getElementById('cal-notes').value = '';
+    document.getElementById('cal-complete-modal').style.display = 'flex';
+}
+
+/**
+ * Finishes calibration on the transfer recorded in #cal-complete-modal: validates the
+ * required fields client-side (POST /api/transfers/:id/complete-cal enforces the same
+ * server-side, so this is just faster feedback, not the real check), then POSTs to log both
+ * the tool's new due date and a permanent calibration_records entry. Toasts and refreshes
+ * the queue in place regardless of outcome.
+ */
+async function submitCalibrationComplete() {
+    const transferId = document.getElementById('cal-complete-transfer-id').value;
+    const lastCalDate = document.getElementById('cal-last-date').value;
+    const calDueDate = document.getElementById('cal-due-date').value;
+    const provider = document.getElementById('cal-provider').value.trim();
+    const certificateNumber = document.getElementById('cal-cert-number').value.trim();
+    const standardUsed = document.getElementById('cal-standard').value.trim();
+    const notes = document.getElementById('cal-notes').value.trim();
+
+    if (!lastCalDate || !calDueDate) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration date and due date are both required.`);
+    if (!provider) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration provider/lab is required.`);
+    if (!certificateNumber) return showToast(`${icon('triangle-alert', 'icon-warning')} Certificate/reference number is required.`);
 
     try {
         const res = await fetch(`/api/transfers/${transferId}/complete-cal`, {
@@ -1041,16 +1067,22 @@ async function completeAndReturnTransfer(transferId) {
                 badge_id: activeUser.badgeId,
                 pin: activeUser.pin,
                 last_cal_date: lastCalDate,
-                cal_due_date: calDueDate
+                cal_due_date: calDueDate,
+                provider,
+                certificate_number: certificateNumber,
+                standard_used: standardUsed || null,
+                notes: notes || null
             })
         });
         const data = await res.json();
+        document.getElementById('cal-complete-modal').style.display = 'none';
         if (!res.ok) {
             showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to complete calibration.'));
         } else {
             showToast(`${icon('circle-check', 'icon-success')} Calibration logged — tool is on its way back.`);
         }
     } catch (err) {
+        document.getElementById('cal-complete-modal').style.display = 'none';
         showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
     loadTransferQueue();
