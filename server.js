@@ -28,7 +28,7 @@ const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
-const { generatePngAtSize } = require('./scripts/lib/datamatrix');
+const { generatePngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
 
 const app = express();
 
@@ -612,14 +612,20 @@ const BARCODE_LABEL_BACKGROUND = 'FFFFFF'; // bwip-js's own background is fully 
  * multer uses for photo uploads: a tool's barcode value is immutable once set (retiring a
  * tool mangles its OLD qr_code with a "-RET-<id>" suffix rather than reusing it -- see
  * POST /api/tools), so there's no collision risk and no old file to clean up on replacement
- * the way user-uploaded photos need (see deletePhotoFile()).
+ * the way user-uploaded photos need (see deletePhotoFile()). Overwrites any existing file
+ * at that path, which is exactly what's wanted when re-called after a rename (see
+ * PUT /api/tools/:id) -- the label always reflects the tool's current name.
  * @param {string} qrCode
+ * @param {string} [name] - the tool's name, rendered as a second row below the ID (see
+ *   addNameRow in scripts/lib/datamatrix.js); omitted/blank leaves the label as just the
+ *   code + ID, same as before that feature existed.
  * @returns {Promise<string>} the saved image's /uploads/... URL
  */
-async function generateBarcodeLabel(qrCode) {
+async function generateBarcodeLabel(qrCode, name) {
     const safeName = qrCode.replace(/[^A-Za-z0-9_-]/g, '_');
     const { png } = await generatePngAtSize(qrCode, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET, BARCODE_LABEL_BACKGROUND);
-    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), png);
+    const labeled = await addNameRow(png, name);
+    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), labeled);
     return `/uploads/barcodes/${safeName}.png`;
 }
 
@@ -1303,7 +1309,7 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
         // since the tool record is already valid and useful without one (it can be filled in
         // later via scripts/backfill-barcode-labels.js).
         try {
-            const barcodeUrl = await generateBarcodeLabel(qr_code);
+            const barcodeUrl = await generateBarcodeLabel(qr_code, name);
             await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, newToolId]);
         } catch (labelErr) {
             console.error('Barcode label generation failed for', qr_code, labelErr.message);
@@ -1378,10 +1384,11 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // param name. Resolving to the real tool_id up front (rather than trying to use the
         // qr_code text directly in a WHERE tool_id = ... comparison) is what was missing:
         // that mismatch made every save throw "invalid input syntax for type integer".
-        const currentRes = await client.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [req.params.id]);
+        const currentRes = await client.query('SELECT tool_id, status, name FROM tools WHERE qr_code = $1', [req.params.id]);
         if (currentRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
         const toolId = currentRes.rows[0].tool_id;
         const previousStatus = currentRes.rows[0].status;
+        const previousName = currentRes.rows[0].name;
 
         const transition = checkToolStatusTransition(previousStatus, status);
         if (!transition.allowed) {
@@ -1432,6 +1439,20 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         }
 
         await client.query('COMMIT');
+
+        // Done outside the transaction (a filesystem write, not something to roll back) and
+        // best-effort, same reasoning as label generation on tool creation -- a rename that
+        // saved fine shouldn't be reported as failed just because regenerating its label
+        // image (which just shows the name below the ID, see addNameRow) hit an error.
+        if (name !== previousName) {
+            try {
+                const barcodeUrl = await generateBarcodeLabel(req.params.id, name);
+                await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, toolId]);
+            } catch (labelErr) {
+                console.error('Barcode label regeneration failed for', req.params.id, labelErr.message);
+            }
+        }
+
         res.json({ success: true });
     } catch (err) {
         await client.query('ROLLBACK');
@@ -1682,7 +1703,7 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
             };
             const requestedStatus = row['Status']?.trim() || 'In';
 
-            const existingRes = await pool.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [qr_code]);
+            const existingRes = await pool.query('SELECT tool_id, status, name FROM tools WHERE qr_code = $1', [qr_code]);
 
             if (existingRes.rows.length > 0) {
                 const existing = existingRes.rows[0];
@@ -1703,7 +1724,23 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                      fields.serial_number, fields.part_number, drawerId, existing.tool_id]
                 );
                 updated++;
-                results.push({ row: rowNum, barcode: qr_code, result: 'updated', message: 'Updated existing tool.' });
+
+                // Same reasoning as PUT /api/tools/:id -- a renamed tool's label is stale
+                // until regenerated, and a bulk export -> rename in Excel -> re-import is
+                // exactly the workflow where a bunch of names would otherwise go stale at
+                // once. Best-effort: a label failure shouldn't turn a successful row edit
+                // into a reported error.
+                let updateMessage = 'Updated existing tool.';
+                if (fields.name !== existing.name) {
+                    try {
+                        const barcodeUrl = await generateBarcodeLabel(qr_code, fields.name);
+                        await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, existing.tool_id]);
+                    } catch (labelErr) {
+                        console.error('Barcode label regeneration failed for', qr_code, labelErr.message);
+                        updateMessage = 'Updated existing tool (barcode label regeneration failed -- can be regenerated later).';
+                    }
+                }
+                results.push({ row: rowNum, barcode: qr_code, result: 'updated', message: updateMessage });
             } else {
                 await pool.query(
                     `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number)
@@ -1717,7 +1754,7 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 // failure shouldn't turn an otherwise-successful row into a reported error.
                 let message = 'Created new tool.';
                 try {
-                    const barcodeUrl = await generateBarcodeLabel(qr_code);
+                    const barcodeUrl = await generateBarcodeLabel(qr_code, fields.name);
                     await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE qr_code = $2', [barcodeUrl, qr_code]);
                 } catch (labelErr) {
                     console.error('Barcode label generation failed for', qr_code, labelErr.message);

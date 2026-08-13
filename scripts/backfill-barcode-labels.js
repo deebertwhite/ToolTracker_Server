@@ -1,21 +1,29 @@
 // ==========================================
-// Barcode label backfill (one-time, run once after migrations/004_barcode_images.sql)
+// Barcode label backfill / rebase
 // ==========================================
-// Generates a Data Matrix label PNG for every non-retired tool that doesn't have one yet,
-// using the exact same generation settings (size, padding) as generateBarcodeLabel() in
-// server.js -- this script exists only to cover tools created before that feature existed;
-// every tool created from here on gets its label generated automatically at creation time.
-// Idempotent: only touches rows where barcode_image_url is still NULL, so it's safe to
-// re-run if interrupted partway through. Retired tools are skipped -- their qr_code has
-// already been mangled with a "-RET-<id>" suffix (see POST /api/tools) and a label for a
-// retired tool serves no purpose.
+// Generates a Data Matrix label PNG for tools that need one, using the exact same
+// generation settings (size, padding, name row) as generateBarcodeLabel() in server.js --
+// every tool created or renamed from here on gets its label generated/regenerated
+// automatically, so this script exists for two distinct cases:
 //
-// Usage: node scripts/backfill-barcode-labels.js
+//   node scripts/backfill-barcode-labels.js          -- default, idempotent: only fills in
+//       tools that don't have a label yet (barcode_image_url IS NULL). Safe to re-run any
+//       time, e.g. after a bulk CSV import, or to cover tools created before this feature
+//       existed at all.
+//
+//   node scripts/backfill-barcode-labels.js --all    -- rebase: regenerates EVERY
+//       non-retired tool's label from scratch and overwrites its existing file, even if one
+//       already exists. Use this after a label-format change (e.g. adding the name row
+//       below the ID) so every already-generated label picks up the new format, not just
+//       tools created afterward.
+//
+// Retired tools are always skipped -- their qr_code has already been mangled with a
+// "-RET-<id>" suffix (see POST /api/tools) and a label for a retired tool serves no purpose.
 
 const fs = require('fs');
 const path = require('path');
 const { getPool } = require('./lib/db');
-const { generatePngAtSize } = require('./lib/datamatrix');
+const { generatePngAtSize, addNameRow } = require('./lib/datamatrix');
 
 // Mirrors BASE_STORAGE_PATH's resolution in server.js (process.env.BASE_STORAGE_PATH,
 // falling back to the project root) so this writes to the exact same directory the running
@@ -27,12 +35,16 @@ const BARCODE_LABEL_PADDING = 20;
 const BARCODE_LABEL_TEXT_YOFFSET = -12;
 const BARCODE_LABEL_BACKGROUND = 'FFFFFF';
 
+const REBASE_ALL = process.argv.includes('--all');
+
 async function main() {
     fs.mkdirSync(BARCODE_LABEL_DIR, { recursive: true });
 
     const pool = getPool();
     const { rows } = await pool.query(
-        `SELECT tool_id, qr_code FROM tools WHERE barcode_image_url IS NULL AND status != 'Retired' ORDER BY tool_id ASC`
+        REBASE_ALL
+            ? `SELECT tool_id, qr_code, name FROM tools WHERE status != 'Retired' ORDER BY tool_id ASC`
+            : `SELECT tool_id, qr_code, name FROM tools WHERE barcode_image_url IS NULL AND status != 'Retired' ORDER BY tool_id ASC`
     );
 
     if (rows.length === 0) {
@@ -41,14 +53,15 @@ async function main() {
         return;
     }
 
-    console.log(`Generating barcode labels for ${rows.length} tool(s)...\n`);
+    console.log(`${REBASE_ALL ? 'Rebasing' : 'Generating'} barcode labels for ${rows.length} tool(s)...\n`);
 
     let failures = 0;
     for (const tool of rows) {
         try {
             const safeName = tool.qr_code.replace(/[^A-Za-z0-9_-]/g, '_');
             const { png } = await generatePngAtSize(tool.qr_code, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET, BARCODE_LABEL_BACKGROUND);
-            fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), png);
+            const labeled = await addNameRow(png, tool.name);
+            fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), labeled);
             const barcodeUrl = `/uploads/barcodes/${safeName}.png`;
             await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, tool.tool_id]);
             console.log(`  OK    ${tool.qr_code}`);
@@ -62,7 +75,7 @@ async function main() {
 
     console.log(`\nDone. ${rows.length - failures} succeeded, ${failures} failed.`);
     if (failures > 0) {
-        console.error('One or more tools failed to generate a label -- safe to re-run (only NULL barcode_image_url rows are touched).');
+        console.error('One or more tools failed to generate a label -- safe to re-run.');
         process.exit(1);
     }
 }

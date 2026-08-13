@@ -3,6 +3,7 @@
 // physical sizing the exact same way.
 
 const bwipjs = require('bwip-js');
+const sharp = require('sharp');
 
 const MM_PER_INCH = 25.4;
 
@@ -162,4 +163,76 @@ async function generateSvgAtSize(text, targetMm, withText = true) {
     return { svg: sized, widthMm, heightMm, codeWidthMm: targetMm };
 }
 
-module.exports = { getModuleGridSize, generatePngAtSize, generateSvgAtSize, textOptions };
+function escapeXml(str) {
+    return str.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+}
+
+// Greedy word-wrap into at most maxLines lines of at most maxCharsPerLine characters each.
+// If the text still doesn't fit, the last line is truncated with an ellipsis rather than
+// silently dropping words -- a shortened-but-honest name beats one that just cuts off.
+function wrapText(text, maxCharsPerLine, maxLines) {
+    const words = text.trim().split(/\s+/).filter(Boolean);
+    const allLines = [];
+    let current = '';
+    for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length <= maxCharsPerLine) {
+            current = candidate;
+        } else {
+            if (current) allLines.push(current);
+            current = word;
+        }
+    }
+    if (current) allLines.push(current);
+
+    if (allLines.length <= maxLines) return allLines;
+
+    const lines = allLines.slice(0, maxLines);
+    let last = lines[maxLines - 1];
+    if (last.length > maxCharsPerLine - 1) last = last.slice(0, maxCharsPerLine - 1);
+    lines[maxLines - 1] = last.trimEnd() + '…';
+    return lines;
+}
+
+/**
+ * Composites a tool name as a second, smaller text row underneath an already-rendered
+ * Data Matrix + ID label PNG (see generatePngAtSize). Not done via bwip-js's own
+ * `alttext` -- confirmed empirically that an embedded newline there just collapses to a
+ * single line rather than stacking, and letting a long name widen bwip-js's own canvas
+ * (its normal behavior when text is wider than the code) would blow out the label's
+ * on-screen proportions instead of sitting cleanly underneath it. Rendering the name as
+ * its own SVG text row and compositing it on with sharp (already a project dependency)
+ * gives full control over wrapping/centering instead.
+ * @param {Buffer} labelPng - a PNG buffer from generatePngAtSize (code + ID row)
+ * @param {string} name - the tool's name; falsy/blank returns labelPng unchanged
+ * @returns {Promise<Buffer>} a new PNG, taller than the input by the name row's height
+ */
+async function addNameRow(labelPng, name) {
+    if (!name || !name.trim()) return labelPng;
+
+    const { width, height } = await sharp(labelPng).metadata();
+
+    // Sized relative to the label's own width so it scales with BARCODE_LABEL_SIZE_MM
+    // rather than assuming a fixed pixel size -- visually confirmed at the default 15mm/
+    // 1200dpi settings to read clearly while staying smaller than the ID row above it.
+    const fontSize = Math.round(width * 0.052);
+    const lineHeight = Math.round(fontSize * 1.35);
+    const maxCharsPerLine = Math.max(6, Math.floor((width * 0.92) / (fontSize * 0.56)));
+    const lines = wrapText(name, maxCharsPerLine, 2);
+    const topPad = Math.round(fontSize * 0.5);
+    const rowHeight = topPad + lineHeight * lines.length;
+
+    const textRows = lines.map((line, i) =>
+        `<text x="50%" y="${topPad + i * lineHeight + fontSize * 0.8}" text-anchor="middle" font-family="monospace" font-size="${fontSize}" fill="#000000">${escapeXml(line)}</text>`
+    ).join('');
+    const nameSvg = `<svg width="${width}" height="${rowHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#ffffff"/>${textRows}</svg>`;
+    const nameRowPng = await sharp(Buffer.from(nameSvg)).png().toBuffer();
+
+    return sharp(labelPng)
+        .extend({ bottom: rowHeight, background: '#ffffff' })
+        .composite([{ input: nameRowPng, top: height, left: 0 }])
+        .png()
+        .toBuffer();
+}
+
+module.exports = { getModuleGridSize, generatePngAtSize, generateSvgAtSize, textOptions, addNameRow };
