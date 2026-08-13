@@ -221,44 +221,35 @@
                     <button class="btn btn-primary" onclick="startAudit()">Begin Physical Audit</button>
                 </div>
 
-                <!-- Audit Step 2: scan tools to check them off the
-                     manifest and reconcile status/notes per tool.
-                     submitAudit() finalizes and logs the audit. -->
+                <!-- Audit Step 2: a single physical-inspection attestation for the whole
+                     box, not a per-tool checklist -- see submitAudit() in kiosk.js for why
+                     (deliberately deferred until there's real per-drawer/per-box electronic
+                     scanning hardware; for now this relies on the person doing the audit to
+                     do it properly, same as a paper shadow-board check). Reporting an
+                     actual problem with a specific tool is a separate workflow
+                     (startWorkflow('REPORT')), not part of this screen. -->
                 <div id="audit-step-2" style="display: none;">
 
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                        <h4 id="audit-box-title">Box Name</h4>
-                        <div style="background: rgba(34, 197, 94, 0.1); padding: 5px 10px; border-radius: 6px; color: var(--green); font-weight: 700; font-size: 14px;" id="audit-progress">
-                            0 / 0 Scanned
-                        </div>
-                    </div>
+                    <h4 id="audit-box-title" style="margin-bottom: 6px;">Box Name</h4>
+                    <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">
+                        Physically open this toolbox and visually confirm every tool below is present and in serviceable condition. Something wrong with a specific tool? Use "Report Issue" from the main menu instead of (or in addition to) this audit.
+                    </p>
 
-                    <div id="audit-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
-
-                    <div class="form-group">
-                        <label class="form-label">Scan Tool to Check Off List</label>
-                        <div style="display: flex; gap: 8px;">
-                            <input class="form-input" id="audit-scan-input" placeholder="Scan barcode..." onkeydown="if(event.key==='Enter')handleAuditScan()">
-                            <button class="btn-icon" id="btn-open-audit-scanner" onclick="startToolCameraScanner('audit-reader', 'audit-scan-input', handleAuditScan, true)"><span class="icon" data-icon="camera"></span></button>
-                            <button class="btn-icon" id="btn-done-audit-scanner" style="display: none; color: var(--green);" onclick="stopContinuousScanner('audit-reader')" title="Done Scanning"><span class="icon" data-icon="circle-check"></span></button>
-                        </div>
-                    </div>
-
-                    <div class="table-responsive-wrapper" style="max-height: 400px; overflow-y: auto; margin-bottom: 20px;">
-                        <table style="min-width: 550px;">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Tool Description</th>
-                                    <th>Condition</th>
-                                    <th>Notes</th>
-                                </tr>
-                            </thead>
+                    <div class="table-responsive-wrapper" style="max-height: 350px; overflow-y: auto; margin-bottom: 12px;">
+                        <table style="min-width: 400px;">
+                            <thead><tr><th>ID</th><th>Tool Description</th></tr></thead>
                             <tbody id="audit-tool-list"></tbody>
                         </table>
                     </div>
 
-                    <button class="btn btn-success" style="width: 100%; padding: 14px; font-size: 16px;" onclick="submitAudit()">✓ Finalize & Log Audit</button>
+                    <div id="audit-excluded-note" style="font-size: 12px; color: var(--muted); margin-bottom: 20px;"></div>
+
+                    <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer; font-size: 14px; margin-bottom: 16px; background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+                        <input type="checkbox" id="audit-attest-checkbox" style="margin-top: 3px;" onchange="document.getElementById('btn-submit-audit').disabled = !this.checked">
+                        <span>I have physically opened this toolbox and visually confirmed the tool(s) listed above are present and in serviceable condition.</span>
+                    </label>
+
+                    <button class="btn btn-success" id="btn-submit-audit" style="width: 100%; padding: 14px; font-size: 16px;" onclick="submitAudit()" disabled><span class="icon" data-icon="circle-check"></span> Confirm &amp; Submit Audit</button>
                 </div>
             </div>
 

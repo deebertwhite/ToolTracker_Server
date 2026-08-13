@@ -7,7 +7,8 @@ let batchQueue = [];
 let html5QrScannerInstance = null;
 
 // Specific Audit State Variables
-let auditTools = [];
+let auditTools = []; // tools currently 'In' this box -- what the attestation actually confirms
+let auditExcludedCount = 0; // tools in this box left out of auditTools (Out, or already Missing/Broken/Worn) -- shown as an informational note, never touched
 let auditBoxName = '';
 // Set by jumpToAuditFromGate() when the audit workflow was entered via the
 // AUDIT_REQUIRED gate (mid-checkout); checked/cleared at the end of
@@ -62,6 +63,7 @@ function resetToIdle() {
     pendingMode = null;
     batchQueue = [];
     auditTools = [];
+    auditExcludedCount = 0;
     auditGateReturnPending = false;
 
     document.getElementById('auth-badge-input').value = '';
@@ -212,6 +214,7 @@ async function loadIdleAuditStatus() {
 function setupActionScreen() {
     batchQueue = [];
     auditTools = [];
+    auditExcludedCount = 0;
     renderQueue();
 
     document.getElementById('panel-scanner').style.display = 'none';
@@ -252,28 +255,17 @@ function isAnyKioskModalOpen() {
 }
 
 /**
- * Focuses the given scan input, but only while #screen-action is
- * actually visible (guards against stealing focus after navigating
- * away), no modal is currently open on top of it, and the operator
- * hasn't just clicked into one of the audit table's own per-row
- * controls (the Condition <select> or Notes <input>) -- without
- * these checks, the auto-refocus blur listeners below would yank
- * focus back to the scan input the instant an operator clicked
- * anywhere else. This is exactly what made the Buddy Sign-Off PIN
- * field appear to "immediately unclick" itself (its own focus blurs
- * the scan input, which re-triggers this function 200ms later) --
- * and, unfixed, made a Condition dropdown in the audit table
- * impossible to open at all, since the browser closes a <select>'s
- * native popup the moment focus moves away from it, which is exactly
- * what a stray .focus() call on the scan input 200ms into opening it
- * would do. Used both directly (scan-box click) and by the
- * auto-refocus blur listeners set up on DOMContentLoaded.
+ * Focuses the given scan input, but only while #screen-action is actually visible (guards
+ * against stealing focus after navigating away) and no modal is currently open on top of it
+ * -- without that second check, the auto-refocus blur listener below would yank focus back
+ * to the scan input the instant an operator clicked into the Buddy Sign-Off PIN field (its
+ * own focus blurs the scan input, which re-triggers this function 200ms later), making the
+ * PIN field appear to "immediately unclick" itself. Used both directly (scan-box click) and
+ * by the auto-refocus blur listener set up on DOMContentLoaded.
  */
 function focusScanInput(inputId) {
     const input = document.getElementById(inputId);
-    const auditList = document.getElementById('audit-tool-list');
-    const focusedInAuditRow = auditList && auditList.contains(document.activeElement);
-    if (input && document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen() && !focusedInAuditRow) {
+    if (input && document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen()) {
         input.focus();
     }
 }
@@ -383,167 +375,94 @@ async function loadAuditDropdown() {
 }
 
 /**
- * Begins the physical audit for the toolbox selected in
- * #audit-box-select: fetches the full tool manifest via
- * GET /api/tools, filters it down to non-retired tools assigned to
- * that box, seeds auditTools with an initial 'Pending' status per
- * tool, then advances the UI from audit-step-1 to audit-step-2.
+ * Begins the physical audit for the toolbox selected in #audit-box-select: fetches the full
+ * tool manifest via GET /api/tools and splits it into auditTools (tools currently 'In' --
+ * expected to be sitting in this box, and what physically confirming the box means checking
+ * against) and auditExcludedCount (tools currently 'Out', 'Missing', 'Broken', or 'Worn' --
+ * not expected to be physically present, or already a tracked issue via the separate Report
+ * Issue workflow, so they're shown as an informational count only and never touched by this
+ * audit). Retired/Pending Transfer/In Calibration tools are dropped entirely, matching
+ * getAuditGatePendingToolboxes()'s own exclusion set in server.js. Advances the UI from
+ * audit-step-1 to audit-step-2.
  */
 async function startAudit() {
     const select = document.getElementById('audit-box-select');
     if (!select.value) {
         return showToast(`${icon('triangle-alert', 'icon-warning')} Select a toolbox.`);
     }
-    
+
     auditBoxName = select.value;
     document.getElementById('audit-box-title').textContent = auditBoxName;
 
     try {
         const res = await fetch('/api/tools');
         const data = await res.json();
-        
-        const filtered = data.tools.filter(t => t.toolbox_name === auditBoxName && t.status !== 'Retired');
-        
-        if (filtered.length === 0) {
+
+        const inBox = data.tools.filter(t => t.toolbox_name === auditBoxName && !['Retired', 'Pending Transfer', 'In Calibration'].includes(t.status));
+
+        if (inBox.length === 0) {
             return showToast(`${icon('triangle-alert', 'icon-warning')} No tools assigned to this box.`);
         }
 
-        auditTools = filtered.map(t => ({ 
-            ...t, 
-            audit_status: 'Pending', 
-            audit_notes: '' 
-        }));
-        
+        auditTools = inBox.filter(t => t.status === 'In');
+        auditExcludedCount = inBox.length - auditTools.length;
+
         document.getElementById('audit-step-1').style.display = 'none';
         document.getElementById('audit-step-2').style.display = 'block';
-        
+        document.getElementById('audit-attest-checkbox').checked = false;
+        document.getElementById('btn-submit-audit').disabled = true;
+
         renderAuditList();
-        focusScanInput('audit-scan-input');
-    } catch (err) { 
-        showToast(`${icon('circle-x', 'icon-danger')} Failed to pull manifest.`); 
+    } catch (err) {
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to pull manifest.`);
     }
 }
 
 /**
- * Redraws the #audit-progress counter/coloring and the
- * #audit-tool-list table rows from the current auditTools array,
- * including each row's status <select> and notes <input> controls.
+ * Redraws #audit-tool-list (read-only: ID + description, no per-row controls -- see
+ * submitAudit() for why) from the current auditTools array, plus #audit-excluded-note
+ * summarizing how many other tools in this box were left out (currently checked out, or
+ * already flagged Missing/Broken/Worn) and therefore aren't part of this attestation.
  */
 function renderAuditList() {
-    const scannedCount = auditTools.filter(t => t.audit_status === 'Present').length;
-    const progressEl = document.getElementById('audit-progress');
-    
-    progressEl.textContent = `${scannedCount} / ${auditTools.length} Scanned`;
-    
-    if (scannedCount === auditTools.length) {
-        progressEl.style.background = 'rgba(34, 197, 94, 0.2)';
-        progressEl.style.color = 'var(--green)';
-    } else {
-        progressEl.style.background = 'rgba(203, 96, 21, 0.1)';
-        progressEl.style.color = 'var(--accent)';
-    }
-
-    document.getElementById('audit-tool-list').innerHTML = auditTools.map((t, index) => {
-        let borderCol = 'transparent';
-        if (t.audit_status === 'Present') borderCol = 'var(--green)';
-        if (t.audit_status === 'Missing') borderCol = 'var(--red)';
-        if (t.audit_status === 'Broken') borderCol = 'var(--orange)';
-
-        return `
-        <tr style="border-left: 3px solid ${borderCol}; background: ${t.audit_status !== 'Pending' ? 'rgba(255,255,255,0.02)' : 'transparent'};">
+    document.getElementById('audit-tool-list').innerHTML = auditTools.map(t => `
+        <tr>
             <td style="font-family: monospace;">${t.qr_code}</td>
             <td>
                 <strong>${t.name}</strong><br>
                 <span style="font-size:11px;color:var(--muted);">${t.drawer_name || '--'}</span>
             </td>
-            <td>
-                <select onchange="updateAuditItem('${t.qr_code}', 'audit_status', this.value)" class="form-select" style="padding: 6px; font-size: 13px;">
-                    <option value="Pending" ${t.audit_status === 'Pending' ? 'selected' : ''}>Pending</option>
-                    <option value="Present" ${t.audit_status === 'Present' ? 'selected' : ''}>Present</option>
-                    <option value="Missing" ${t.audit_status === 'Missing' ? 'selected' : ''}>Missing</option>
-                    <option value="Broken" ${t.audit_status === 'Broken' ? 'selected' : ''}>Broken</option>
-                </select>
-            </td>
-            <td>
-                <input class="form-input" style="padding: 6px; font-size: 13px;" placeholder="Notes..." value="${t.audit_notes}" onchange="updateAuditItem('${t.qr_code}', 'audit_notes', this.value)">
-            </td>
         </tr>
-        `;
-    }).join('');
+    `).join('');
+
+    document.getElementById('audit-excluded-note').textContent = auditExcludedCount > 0
+        ? `${auditExcludedCount} other tool(s) in this box are currently checked out or already flagged, and aren't part of this checklist.`
+        : '';
 }
 
 /**
- * Reads #audit-scan-input and, if the scanned QR matches a tool in
- * the current auditTools manifest, marks that tool 'Present' and
- * re-renders the list; otherwise warns that it doesn't belong here.
- */
-function handleAuditScan() {
-    const input = document.getElementById('audit-scan-input');
-    const qr = input.value.trim().toUpperCase();
-    
-    if (!qr) return;
-
-    const toolIndex = auditTools.findIndex(t => t.qr_code === qr);
-    
-    if (toolIndex === -1) {
-        showToast(`${icon('triangle-alert', 'icon-warning')} Tool doesn't belong in this box.`);
-    } else {
-        auditTools[toolIndex].audit_status = 'Present';
-        renderAuditList();
-        showToast(`${icon('circle-check', 'icon-success')} Checked off: ${qr}`);
-    }
-    
-    input.value = '';
-}
-
-/**
- * Manually edits a single auditTools entry's field (audit_status or
- * audit_notes) by qr_code, in response to the row-level <select>/
- * <input> onchange handlers rendered by renderAuditList().
- */
-function updateAuditItem(qr, field, value) {
-    const idx = auditTools.findIndex(t => t.qr_code === qr);
-    if (idx !== -1) {
-        auditTools[idx][field] = value;
-        renderAuditList();
-    }
-}
-
-/**
- * Finalizes the audit and POSTs the results to /api/audits/submit.
- * Before submitting, if any tools are still 'Pending' (never
- * scanned), prompts the user via confirm() to auto-mark them as
- * 'Missing'; if the user declines that confirmation, the submit is
- * aborted entirely so nothing is sent. On success, shows a toast and
- * either returns to #panel-scanner with the original batchQueue still
- * intact (if this audit was reached via the AUDIT_REQUIRED gate
- * mid-checkout, auditGateReturnPending) so the tech can finalize the
- * checkout that triggered the gate, or otherwise back to
- * audit-step-1 (toolbox selection) -- NOT the idle screen -- so
- * several boxes can be audited in one visit without re-authenticating
- * for each one. The operator stays signed in until they explicitly
- * hit "Cancel & Log Out".
+ * Finalizes the audit and POSTs the results to /api/audits/submit: every tool in auditTools
+ * (everything currently 'In' this box -- see startAudit()) is submitted as 'Present', since
+ * reaching this point already required checking #audit-attest-checkbox, i.e. an affirmative
+ * statement that the operator physically opened the box and confirmed all of them. There's
+ * no per-tool ambiguity to resolve here by design (see the comment above #audit-step-2 in
+ * kiosk.html for why) -- an actual problem with a specific tool goes through the separate
+ * Report Issue workflow instead. On success, shows a toast and either returns to
+ * #panel-scanner with the original batchQueue still intact (if this audit was reached via
+ * the AUDIT_REQUIRED gate mid-checkout, auditGateReturnPending) so the tech can finalize the
+ * checkout that triggered the gate, or otherwise back to audit-step-1 (toolbox selection) --
+ * NOT the idle screen -- so several boxes can be audited in one visit without
+ * re-authenticating for each one. The operator stays signed in until they explicitly hit
+ * "Cancel & Log Out".
  */
 async function submitAudit() {
-    const pendingCount = auditTools.filter(t => t.audit_status === 'Pending').length;
-
-    if (pendingCount > 0) {
-        const confirmMissing = confirm(`You have ${pendingCount} tools still pending. Auto-mark them as Missing?`);
-        if (!confirmMissing) return;
-
-        auditTools.forEach(t => {
-            if (t.audit_status === 'Pending') t.audit_status = 'Missing';
-        });
-    }
-
     try {
         const res = await fetch('/api/audits/submit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 badge_id: activeUser.badgeId,
-                box_id: auditBoxName,
-                results: auditTools
+                results: auditTools.map(t => ({ tool_id: t.tool_id, audit_status: 'Present', audit_notes: '' }))
             })
         });
 
@@ -555,6 +474,7 @@ async function submitAudit() {
             auditGateReturnPending = false;
             pendingMode = 'OUT';
             auditTools = [];
+            auditExcludedCount = 0;
             document.getElementById('panel-audit').style.display = 'none';
             document.getElementById('panel-scanner').style.display = 'block';
             document.getElementById('action-title').innerHTML = `${icon('upload')} Scan Tools for Checkout`;
@@ -569,6 +489,7 @@ async function submitAudit() {
         // one visit used to mean re-scanning a badge and re-entering a PIN for every single
         // one. The operator stays signed in until they explicitly hit "Cancel & Log Out".
         auditTools = [];
+        auditExcludedCount = 0;
         auditBoxName = '';
         document.getElementById('audit-step-2').style.display = 'none';
         document.getElementById('audit-step-1').style.display = 'block';
@@ -611,8 +532,8 @@ async function jumpToAuditFromGate(boxName) {
 /**
  * Camera lifecycle: safely stops the shared html5QrScannerInstance
  * if it is currently scanning, then hides every possible camera
- * preview element (#reader, #auth-reader, #report-reader,
- * #audit-reader) regardless of which one was active. Called
+ * preview element (#reader, #auth-reader, #report-reader)
+ * regardless of which one was active. Called
  * whenever a workflow is abandoned (e.g. resetToIdle()) to make sure
  * no camera is left running in the background.
  */
@@ -622,13 +543,11 @@ function killActiveCamera() {
             document.getElementById('reader').style.display = 'none';
             document.getElementById('auth-reader').style.display = 'none';
             document.getElementById('report-reader').style.display = 'none';
-            document.getElementById('audit-reader').style.display = 'none';
         }).catch(e => { console.error("Error stopping camera", e); });
     }
-    // Always resync both continuous-scan button pairs, not just when isScanning was true --
+    // Always resync the continuous-scan button pair, not just when isScanning was true --
     // callers like resetToIdle() should never leave a stray "Done Scanning" button visible.
     setContinuousScanUI('reader', false);
-    setContinuousScanUI('audit-reader', false);
 }
 
 // Maps each reader element that supports continuous (batch) scanning to its Open/Done
@@ -637,7 +556,6 @@ function killActiveCamera() {
 // report-reader) are single-shot only and have no Done button to manage.
 const CONTINUOUS_SCAN_BUTTONS = {
     'reader': { openBtn: 'btn-open-scanner', doneBtn: 'btn-done-scanner' },
-    'audit-reader': { openBtn: 'btn-open-audit-scanner', doneBtn: 'btn-done-audit-scanner' },
 };
 
 /** Shows the "Done Scanning" control and hides "Open Camera Scanner" (or vice versa) for a given reader, if it has a registered button pair in CONTINUOUS_SCAN_BUTTONS. */
@@ -731,14 +649,14 @@ function startAuthCameraScanner() {
 
 /**
  * Camera lifecycle: generic tool-scan camera opener reused by the
- * scanner, report, and audit panels (each passes its own reader
+ * scanner and report panels (each passes its own reader
  * element id and text input id). Opens the given camera preview via
  * executeCameraScan(), fills the given input with the decoded text,
  * and optionally invokes triggerFunc() afterward (e.g.
- * handleToolScan or handleAuditScan) to process the scan immediately.
- * Pass continuous=true (checkout/check-in and audit scanning both
- * do) to keep the camera open across multiple scans instead of
- * closing it after the first one -- see executeCameraScan().
+ * handleToolScan) to process the scan immediately.
+ * Pass continuous=true (checkout/check-in scanning does) to keep the
+ * camera open across multiple scans instead of closing it after the
+ * first one -- see executeCameraScan().
  */
 function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuous = false) {
     executeCameraScan(readerId, (txt) => {
@@ -1188,22 +1106,17 @@ window.addEventListener('error', (event) => {
 });
 
 // Auto-refocus logic
-// On initial page load, wires up blur listeners on the two
-// persistent scan inputs (#kiosk-scan-input for checkout/check-in,
-// #audit-scan-input for the audit workflow) so that if either input
-// loses focus (e.g. after a hardware scanner "types" a value and the
-// browser blurs it, or a stray tap elsewhere on the kiosk), focus is
-// automatically restored shortly after via focusScanInput(). The
-// short setTimeout lets any in-flight click/scan handling finish
-// first. focusScanInput() itself only refocuses while #screen-action
-// is visible, so this is a no-op once a workflow has ended.
+// On initial page load, wires up a blur listener on the persistent checkout/check-in scan
+// input (#kiosk-scan-input) so that if it loses focus (e.g. after a hardware scanner "types"
+// a value and the browser blurs it, or a stray tap elsewhere on the kiosk), focus is
+// automatically restored shortly after via focusScanInput(). The short setTimeout lets any
+// in-flight click/scan handling finish first. focusScanInput() itself only refocuses while
+// #screen-action is visible, so this is a no-op once a workflow has ended. The audit
+// workflow no longer has a scan input of its own (see #audit-step-2 in kiosk.html) so it
+// needs no equivalent listener.
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('kiosk-scan-input').addEventListener('blur', () => {
         setTimeout(() => focusScanInput('kiosk-scan-input'), 200);
-    });
-
-    document.getElementById('audit-scan-input').addEventListener('blur', () => {
-        setTimeout(() => focusScanInput('audit-scan-input'), 200);
     });
 
     // Idle-screen audit status: load once now, then keep it fresh every 60s since this
