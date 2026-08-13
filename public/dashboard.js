@@ -171,6 +171,13 @@ async function loadGlobalDashboard() {
         const kpiCal = document.getElementById('kpi-cal');
         if (kpiCal) kpiCal.textContent = calAlertCount;
 
+        // 4.5 Render charts (see section 4.5 below) from the same globalTools this view
+        // already fetched -- no extra round trip for these two; the activity trend is a
+        // separate fetch since it's not part of either payload above.
+        renderStatusBreakdownChart();
+        renderCalComplianceChart();
+        loadActivityTrendChart();
+
         // 5. Render 'Out' Tools Table
         const outBody = document.getElementById('dash-out-body');
         if (outTools.length === 0) { 
@@ -242,6 +249,172 @@ async function loadGlobalDashboard() {
         
         const calBody = document.getElementById('dash-cal-body');
         if (calBody) calBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--red);">Crash: ${errorMsg}</td></tr>`;
+    }
+}
+
+// ==========================================
+// 4.5 CHARTS (hand-rolled SVG -- no charting library)
+// ==========================================
+// Deliberately not a charting library: matches this app's existing preference for vendoring
+// small, self-contained pieces (see icons.js) over adding a runtime dependency, and every
+// chart here is simple enough (a donut, a grouped bar chart) that hand-rolling the SVG is
+// less code than wiring up a library would be. Colors are hardcoded hex (not var(--x)) since
+// these strings get parsed as literal SVG attribute values, not CSS -- no cascade to resolve
+// a custom property against.
+const CHART_COLORS = {
+    in: '#22c55e', out: '#CB6015', missing: '#ef4444', broken: '#f59e0b',
+    worn: '#eab308', retired: '#6b7280', transfer: '#3b82f6',
+    compliant: '#22c55e', dueSoon: '#f59e0b', overdue: '#ef4444',
+    checkout: '#CB6015', checkin: '#3b82f6',
+};
+
+/**
+ * Renders a donut chart into containerId from segments (array of {label, value, color}),
+ * plus a text legend with counts. Segments with value 0 are dropped from the ring but still
+ * listed in the legend (at 0) so a category's absence is visible, not just missing.
+ */
+function renderDonutChart(containerId, segments, options = {}) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const total = segments.reduce((sum, s) => sum + s.value, 0);
+    if (total === 0) {
+        container.innerHTML = `<div style="text-align:center; color:var(--muted); padding:30px 0; font-size:13px;">No data yet.</div>`;
+        return;
+    }
+
+    const size = options.size || 150;
+    const strokeWidth = options.strokeWidth || 24;
+    const radius = (size - strokeWidth) / 2;
+    const circumference = 2 * Math.PI * radius;
+
+    let offset = 0;
+    const rings = segments.filter(s => s.value > 0).map(s => {
+        const dash = (s.value / total) * circumference;
+        const circle = `<circle cx="${size / 2}" cy="${size / 2}" r="${radius}" fill="none" stroke="${s.color}" stroke-width="${strokeWidth}" stroke-dasharray="${dash} ${circumference - dash}" stroke-dashoffset="${-offset}" transform="rotate(-90 ${size / 2} ${size / 2})"><title>${s.label}: ${s.value}</title></circle>`;
+        offset += dash;
+        return circle;
+    }).join('');
+
+    const legend = segments.map(s => `
+        <div style="display:flex; align-items:center; gap:6px; font-size:12px; margin-bottom:5px;">
+            <span style="width:10px; height:10px; border-radius:2px; background:${s.color}; flex-shrink:0;"></span>
+            <span style="color:var(--muted);">${s.label}</span>
+            <strong style="margin-left:auto;">${s.value}</strong>
+        </div>
+    `).join('');
+
+    container.innerHTML = `
+        <div style="display:flex; align-items:center; gap:20px; flex-wrap:wrap;">
+            <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex-shrink:0;">
+                ${rings}
+                <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central" style="fill:var(--text); font-size:22px; font-weight:700;">${total}</text>
+            </svg>
+            <div style="flex:1; min-width:130px;">${legend}</div>
+        </div>
+    `;
+}
+
+/**
+ * Renders a two-series grouped bar chart into containerId from points (array of
+ * {label, a, b}) -- used for the checkout/check-in activity trend. Only every few x-axis
+ * labels are drawn (spaced out by labelEvery) since 30 individual day labels would overlap
+ * at any reasonable chart width.
+ */
+function renderBarChart(containerId, points, options = {}) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!points.length) {
+        container.innerHTML = `<div style="text-align:center; color:var(--muted); padding:30px 0; font-size:13px;">No activity in this window yet.</div>`;
+        return;
+    }
+
+    const width = options.width || 760;
+    const height = options.height || 160;
+    const paddingBottom = 22;
+    const plotHeight = height - paddingBottom;
+    const maxVal = Math.max(1, ...points.map(p => Math.max(p.a, p.b)));
+    const groupWidth = width / points.length;
+    const barWidth = Math.max(2, Math.min(14, groupWidth / 2.5));
+    const labelEvery = Math.max(1, Math.ceil(points.length / 10));
+
+    const bars = points.map((p, i) => {
+        const groupCenter = i * groupWidth + groupWidth / 2;
+        const aHeight = (p.a / maxVal) * plotHeight;
+        const bHeight = (p.b / maxVal) * plotHeight;
+        const label = i % labelEvery === 0
+            ? `<text x="${groupCenter}" y="${height - 6}" text-anchor="middle" style="fill:var(--muted); font-size:9px;">${p.label}</text>`
+            : '';
+        return `
+            <rect x="${groupCenter - barWidth - 1}" y="${plotHeight - aHeight}" width="${barWidth}" height="${Math.max(0, aHeight)}" fill="${CHART_COLORS.checkout}" rx="1.5"><title>${p.label} checkout: ${p.a}</title></rect>
+            <rect x="${groupCenter + 1}" y="${plotHeight - bHeight}" width="${barWidth}" height="${Math.max(0, bHeight)}" fill="${CHART_COLORS.checkin}" rx="1.5"><title>${p.label} check-in: ${p.b}</title></rect>
+            ${label}
+        `;
+    }).join('');
+
+    container.innerHTML = `<svg width="100%" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
+}
+
+/** Builds the Tool Status Breakdown donut from the already-fetched globalTools -- no extra request. Retired tools are included (unlike most KPIs on this page, which exclude them) since this chart's whole point is showing the full inventory's status mix. */
+function renderStatusBreakdownChart() {
+    const counts = { In: 0, Out: 0, Missing: 0, Broken: 0, Worn: 0, Retired: 0, 'Pending Transfer': 0, 'In Calibration': 0 };
+    globalTools.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
+    renderDonutChart('chart-status-breakdown', [
+        { label: 'In', value: counts.In, color: CHART_COLORS.in },
+        { label: 'Out', value: counts.Out, color: CHART_COLORS.out },
+        { label: 'Missing', value: counts.Missing, color: CHART_COLORS.missing },
+        { label: 'Broken', value: counts.Broken, color: CHART_COLORS.broken },
+        { label: 'Worn', value: counts.Worn, color: CHART_COLORS.worn },
+        { label: 'In Transfer/Cal', value: counts['Pending Transfer'] + counts['In Calibration'], color: CHART_COLORS.transfer },
+        { label: 'Retired', value: counts.Retired, color: CHART_COLORS.retired },
+    ]);
+}
+
+/** Builds the Calibration Compliance donut (Compliant / Due within 30 days / Overdue) from the already-fetched globalTools, mirroring the same 30-day window the "Cal Due" KPI card already uses. Only tools flagged is_calibrated count -- tools that don't require it aren't part of this picture at all. */
+function renderCalComplianceChart() {
+    const today = new Date();
+    const thirtyDaysFromNow = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
+    let compliant = 0, dueSoon = 0, overdue = 0;
+    globalTools.forEach(t => {
+        if (!t.is_calibrated || !t.cal_due_date) return;
+        const due = new Date(t.cal_due_date);
+        if (due < today) overdue++;
+        else if (due <= thirtyDaysFromNow) dueSoon++;
+        else compliant++;
+    });
+    renderDonutChart('chart-cal-compliance', [
+        { label: 'Compliant (30+ days)', value: compliant, color: CHART_COLORS.compliant },
+        { label: 'Due Within 30 Days', value: dueSoon, color: CHART_COLORS.dueSoon },
+        { label: 'Overdue', value: overdue, color: CHART_COLORS.overdue },
+    ]);
+}
+
+/** Fetches GET /api/dashboard/activity-trend and builds the 30-day checkout/check-in grouped bar chart, zero-filling every day in the window (not just days with rows) so the x-axis stays evenly spaced and a quiet day reads as zero, not a gap. */
+async function loadActivityTrendChart() {
+    try {
+        const res = await fetch('/api/dashboard/activity-trend?days=30');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load');
+
+        const byDay = {};
+        data.data.forEach(row => {
+            if (!byDay[row.day]) byDay[row.day] = { a: 0, b: 0 };
+            if (row.action === 'CHECKOUT_TOOL') byDay[row.day].a = parseInt(row.count, 10);
+            if (row.action === 'CHECKIN_TOOL') byDay[row.day].b = parseInt(row.count, 10);
+        });
+
+        const points = [];
+        for (let i = data.days - 1; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            const key = d.toISOString().split('T')[0];
+            const entry = byDay[key] || { a: 0, b: 0 };
+            points.push({ label: `${d.getMonth() + 1}/${d.getDate()}`, a: entry.a, b: entry.b });
+        }
+
+        renderBarChart('chart-activity-trend', points);
+    } catch (e) {
+        const container = document.getElementById('chart-activity-trend');
+        if (container) container.innerHTML = `<div style="text-align:center; color:var(--red); padding:30px 0; font-size:13px;">Failed to load activity trend.</div>`;
     }
 }
 

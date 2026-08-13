@@ -989,12 +989,38 @@ function openEntityModal(type, id) {
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
         if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
-        // Populated asynchronously by loadCalibrationHistory() below -- every completed
-        // calibration cycle (see calibration_records / migrations/006), not just the current
-        // due date, so an auditor can see who calibrated it and under what certificate.
-        if (entity.is_calibrated) {
-            readHtml += `<div id="em-cal-history-container" style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div><div style="font-size:12px;color:var(--muted);margin-top:4px;">Loading...</div></div>`;
-        }
+        // #em-cal-history-list is populated asynchronously by loadCalibrationHistory() below
+        // -- every completed calibration cycle (see calibration_records / migrations/006), not
+        // just the current due date, so an auditor can see who calibrated it and under what
+        // certificate. Shown for every tool, not just ones already flagged is_calibrated --
+        // "+ Log Calibration" is also how an existing tool (whose last_cal_date/cal_due_date
+        // were set by the ingest form, a direct edit, or CSV import, with no traceable record
+        // at all) gets its history backfilled, and logging one sets is_calibrated
+        // automatically -- see submitCalLogForm().
+        readHtml += `
+            <div id="em-cal-history-container" style="margin-top:15px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div>
+                    <button type="button" class="btn-icon" style="width:auto; padding:4px 10px; font-size:11px;" onclick="toggleCalLogForm(true)">${icon('plus')} Log Calibration</button>
+                </div>
+                <div id="em-cal-history-list" style="font-size:12px;color:var(--muted);margin-top:4px;">Loading...</div>
+
+                <div id="em-cal-log-form" style="display:none; margin-top:10px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
+                    <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom:10px;">
+                        <div class="form-group" style="margin:0;"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="em-cal-date"></div>
+                        <div class="form-group" style="margin:0;"><label class="form-label">Due Date</label><input type="date" class="form-input" id="em-cal-due"></div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Provider / Lab</label><input class="form-input" id="em-cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Certificate / Reference #</label><input class="form-input" id="em-cal-cert" placeholder="e.g. CERT-2026-04231"></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-standard" placeholder="e.g. NIST-traceable"></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-notes"></div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-secondary" style="width:auto;" onclick="toggleCalLogForm(false)">Cancel</button>
+                        <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitCalLogForm('${entity.tool_id}', '${entity.qr_code}')">Save Record</button>
+                    </div>
+                </div>
+            </div>
+        `;
 
         // The "Edit" View (Hidden by default)
         const isOut = entity.status === 'Out';
@@ -1161,38 +1187,85 @@ function openEntityModal(type, id) {
     toggleModalEditMode(false);
     document.getElementById('entity-modal-overlay').style.display = 'flex';
 
-    if (type === 'tool' && entity.is_calibrated) loadCalibrationHistory(entity.tool_id);
+    if (type === 'tool') loadCalibrationHistory(entity.tool_id);
 }
 
 /**
- * Fills in #em-cal-history-container (a placeholder left by openEntityModal for a calibrated
- * tool) from GET /api/tools/:id/calibration-history -- every completed calibration cycle,
- * newest first, not just the tool's current due date. Called with the tool's real numeric
- * tool_id (not qr_code, unlike most of this file's tool lookups) since that's what the
- * endpoint expects.
+ * Fills in #em-cal-history-list (inside the #em-cal-history-container block rendered by
+ * openEntityModal for every tool) from GET /api/tools/:id/calibration-history -- every
+ * completed calibration cycle, newest first, not just the tool's current due date. Called
+ * with the tool's real numeric tool_id (not qr_code, unlike most of this file's tool
+ * lookups) since that's what the endpoint expects. Leaves the header/"+ Log Calibration"
+ * button/form alone -- only the list itself is replaced, so re-calling this after
+ * submitCalLogForm() doesn't need to re-render the whole container.
  */
 async function loadCalibrationHistory(toolId) {
-    const container = document.getElementById('em-cal-history-container');
-    if (!container) return;
+    const listEl = document.getElementById('em-cal-history-list');
+    if (!listEl) return;
     try {
         const res = await fetch(`/api/tools/${toolId}/calibration-history`);
         const data = await res.json();
         if (!res.ok || !data.records.length) {
-            container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div><div style="font-size:12px;color:var(--muted);margin-top:4px;">No completed calibration cycles on record yet.</div>`;
+            listEl.innerHTML = `No completed calibration cycles on record yet.`;
             return;
         }
-        const rows = data.records.map(r => `
+        listEl.innerHTML = data.records.map(r => `
             <div style="padding:8px 0; border-bottom:1px solid var(--border);">
-                <div style="display:flex; justify-content:space-between; font-size:13px;"><strong>${r.cal_date.split('T')[0]}</strong><span style="color:var(--muted);">Due: ${r.due_date.split('T')[0]}</span></div>
+                <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text);">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
                 <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
-                ${r.standard_used ? `<div style="font-size:11px; color:var(--muted);">Standard: ${r.standard_used}</div>` : ''}
-                ${r.notes ? `<div style="font-size:11px; color:var(--muted);">${r.notes}</div>` : ''}
-                <div style="font-size:10px; color:var(--muted); margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
+                ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
+                ${r.notes ? `<div style="font-size:11px;">${r.notes}</div>` : ''}
+                <div style="font-size:10px; margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
             </div>
         `).join('');
-        container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Calibration History (${data.records.length})</div>${rows}`;
     } catch (e) {
-        container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration History</div><div style="font-size:12px;color:var(--red);margin-top:4px;">Failed to load.</div>`;
+        listEl.innerHTML = `<span style="color:var(--red);">Failed to load.</span>`;
+    }
+}
+
+/** Shows/hides the "+ Log Calibration" inline form (#em-cal-log-form) in the tool modal, resetting its fields to blank (calibration date defaulted to today) each time it's opened. */
+function toggleCalLogForm(show) {
+    document.getElementById('em-cal-log-form').style.display = show ? 'block' : 'none';
+    if (show) {
+        document.getElementById('em-cal-date').value = new Date().toISOString().slice(0, 10);
+        document.getElementById('em-cal-due').value = '';
+        document.getElementById('em-cal-provider').value = '';
+        document.getElementById('em-cal-cert').value = '';
+        document.getElementById('em-cal-standard').value = '';
+        document.getElementById('em-cal-notes').value = '';
+    }
+}
+
+/**
+ * Submits the "+ Log Calibration" form to POST /api/tools/:id/calibration-history --
+ * directly logging (or backfilling) a calibration record outside the kiosk's QA transfer
+ * flow, e.g. for a tool that already had calibration dates set some other way and has no
+ * traceable history yet. On success, refreshes the infrastructure tree (so
+ * globalToolsCache's is_calibrated/cal_due_date reflect the now-most-recent record) and
+ * reopens this same tool's modal fresh, which re-triggers loadCalibrationHistory().
+ */
+async function submitCalLogForm(toolId, qrCode) {
+    const calDate = document.getElementById('em-cal-date').value;
+    const dueDate = document.getElementById('em-cal-due').value;
+    const provider = document.getElementById('em-cal-provider').value.trim();
+    const certificateNumber = document.getElementById('em-cal-cert').value.trim();
+    const standardUsed = document.getElementById('em-cal-standard').value.trim();
+    const notes = document.getElementById('em-cal-notes').value.trim();
+
+    if (!calDate || !dueDate) return alert('⚠️ Calibration date and due date are both required.');
+    if (!provider || !certificateNumber) return alert('⚠️ Calibration provider and certificate/reference number are both required.');
+
+    try {
+        const res = await fetch(`/api/tools/${toolId}/calibration-history`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, notes: notes || null })
+        });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to log calibration record.')); }
+        await renderEditableInfraTree();
+        openEntityModal('tool', qrCode);
+    } catch (e) {
+        alert('Network Error.');
     }
 }
 

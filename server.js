@@ -637,6 +637,59 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
     }
 });
 
+// Logs a calibration record directly from the admin panel -- NOT tied to a QA transfer, so
+// existing inventory (whose last_cal_date/cal_due_date were set by the ingest form, a direct
+// edit, or CSV import, with no calibration_records row at all) can get a traceable record
+// backfilled, and a shop can log a calibration that happened outside the formal kiosk QA
+// transfer workflow. requireRole(2) matches the existing tool-edit threshold (tool_rep+).
+// Keeps tools.last_cal_date/cal_due_date/is_calibrated in sync afterward, but recomputed from
+// the single most-recent calibration_records row for this tool (by cal_date) rather than
+// just whatever was submitted -- so backfilling an OLD record after a newer one already
+// exists doesn't clobber the tool's current due date with stale data.
+app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { cal_date, due_date, provider, certificate_number, standard_used, notes } = req.body;
+    if (!cal_date || !due_date) return res.status(400).json({ error: 'Calibration date and due date are both required.' });
+    if (!provider || !certificate_number) return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.' });
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const toolRes = await client.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
+        if (toolRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
+
+        await client.query(
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, notes || null, req.authUser.user_id]
+        );
+
+        const latestRes = await client.query(
+            'SELECT cal_date, due_date FROM calibration_records WHERE tool_id = $1 ORDER BY cal_date DESC LIMIT 1',
+            [req.params.id]
+        );
+        const latest = latestRes.rows[0];
+        await client.query(
+            'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
+            [latest.cal_date, latest.due_date, req.params.id]
+        );
+
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
+            [req.authUser.user_id, req.params.id, `Calibration logged directly by admin: ${provider} (cert ${certificate_number})`]
+        );
+
+        await client.query('COMMIT');
+        res.json({ success: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Add Calibration Record Error:', err);
+        res.status(500).json({ error: 'Failed to log calibration record.' });
+    } finally {
+        client.release();
+    }
+});
+
 // Compute the next sequential numeric suffix for a tool QR code with the given prefix.
 // Finds the lowest unused sequence number for the given prefix, not just MAX+1 -- so a
 // deleted tool's number (e.g. AVI-000002) gets reused on the next ingest instead of being
@@ -2346,6 +2399,28 @@ app.get('/api/dashboard', async (req, res) => {
             cal_tools: calTools.rows // Sending the new array to the frontend
         });
     } catch (err) { res.status(500).json({ error: 'Failed to fetch dashboard data.' }); }
+});
+
+// Daily checkout/check-in counts for the last N days (default 30), for the dashboard's
+// activity-trend chart. No role check, matching the rest of this file's dashboard/telemetry
+// endpoints (dashboard.html itself has no auth wall -- it's a read-only global view). Days
+// with zero activity are still included (zero-filled client-side, not here) so the chart's
+// x-axis stays evenly spaced; this endpoint only returns days that actually have rows.
+app.get('/api/dashboard/activity-trend', async (req, res) => {
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 30));
+    try {
+        const result = await pool.query(
+            `SELECT to_char(date_trunc('day', timestamp), 'YYYY-MM-DD') AS day, action, COUNT(*) AS count
+             FROM audit_logs
+             WHERE action IN ('CHECKOUT_TOOL', 'CHECKIN_TOOL') AND timestamp >= NOW() - ($1 || ' days')::interval
+             GROUP BY day, action
+             ORDER BY day ASC`,
+            [days]
+        );
+        res.json({ success: true, days, data: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch activity trend.' });
+    }
 });
 
 // Generate an AUDIT or FLAGGED report, scoped to a department if the requester is a dept_admin.

@@ -69,6 +69,30 @@
                 </div>
             </div>
 
+            <!-- Analytics: 3 lightweight self-contained SVG charts (no charting library --
+                 see renderDonutChart()/renderBarChart() in dashboard.js), computed from data
+                 the page already fetches for the tables below (tool status/calibration
+                 breakdown from GET /api/tools) or a small dedicated endpoint
+                 (GET /api/dashboard/activity-trend for the 30-day checkout/check-in trend). -->
+            <div class="grid-container" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 30px;">
+                <div class="card" style="margin: 0;">
+                    <h3 style="margin-bottom: 12px; font-size: 15px;">Tool Status Breakdown</h3>
+                    <div id="chart-status-breakdown">Loading...</div>
+                </div>
+                <div class="card" style="margin: 0;">
+                    <h3 style="margin-bottom: 12px; font-size: 15px;">Calibration Compliance</h3>
+                    <div id="chart-cal-compliance">Loading...</div>
+                </div>
+                <div class="card" style="margin: 0; grid-column: 1 / -1;">
+                    <h3 style="margin-bottom: 12px; font-size: 15px;">Checkout / Check-in Activity (Last 30 Days)</h3>
+                    <div id="chart-activity-trend">Loading...</div>
+                    <div style="display:flex; gap:16px; margin-top:8px; font-size:11px; color:var(--muted);">
+                        <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#CB6015;margin-right:5px;"></span>Checkout</span>
+                        <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#3b82f6;margin-right:5px;"></span>Check-in</span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Active Deployments table: tools currently checked out -->
             <h3 style="margin-bottom: 12px;"><span class="icon" data-icon="radio"></span> Active Deployments (Checked Out)</h3>
             <div class="table-responsive-wrapper" style="margin-bottom: 40px;">
