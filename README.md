@@ -152,6 +152,11 @@ Skip this part if the Pi already has an OS on it and you can SSH in.
    sudo usermod -aG docker $USER
    ```
    Log out and back in (or `newgrp docker`) for the `docker` group membership to take effect. Confirm both installed correctly: `node -v` and `docker compose version`.
+
+   Also install `fontconfig` and a base font -- Raspberry Pi OS Lite ships neither, so `sharp`'s bundled SVG rasterizer (used to composite the tool-name row onto barcode labels, see `addNameRow()` in `scripts/lib/datamatrix.js`) silently renders blank text instead of erroring: the canvas and background still come out fine, so this is easy to miss without actually opening a generated label image.
+   ```bash
+   sudo apt install -y fontconfig fonts-dejavu-core
+   ```
 8. Give the Pi a **static/reserved IP** via a DHCP reservation on the router now, before going further — the DuckDNS setup later assumes this IP never changes.
 
    > **Note**: a fresh Docker install provides `docker compose` (a subcommand, no hyphen) rather than the older standalone `docker-compose` binary this README otherwise uses interchangeably with it. Both do the same thing; use whichever is actually installed (`docker compose version` vs `docker-compose --version` to check).
