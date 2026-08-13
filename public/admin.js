@@ -1021,6 +1021,33 @@ function openEntityModal(type, id) {
                 </div>
             </div>
         `;
+        // #em-incident-history-list is populated asynchronously by loadIncidentHistory()
+        // below -- every reported Missing/Broken/Worn cycle (see tool_incidents /
+        // migrations/007), not just the tool's current status, and -- critically -- how/
+        // when/by whom each one was RESOLVED, which previously left no trace at all (a
+        // status edit alone wrote no audit_logs row). #em-incident-resolve-form only shows
+        // once an open incident is known to exist -- see loadIncidentHistory().
+        readHtml += `
+            <div id="em-incident-history-container" style="margin-top:15px;">
+                <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Incident History</div>
+                <div id="em-incident-history-list" style="font-size:12px;color:var(--muted);margin-top:4px;">Loading...</div>
+
+                <div id="em-incident-resolve-form" style="display:none; margin-top:10px; background: rgba(239,68,68,0.08); padding:12px; border-radius:8px; border:1px solid var(--red);">
+                    <div style="font-size:13px; font-weight:bold; color:var(--red); margin-bottom:8px;">Resolve Open Incident</div>
+                    <div class="form-group" style="margin-bottom:10px;">
+                        <label class="form-label">Resolution</label>
+                        <select class="form-select" id="em-incident-resolution">
+                            <option value="RESOLVED">Found / Repaired -- Return to Service</option>
+                            <option value="WRITTEN_OFF">Write Off -- Retire Permanently</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Resolution Notes</label><input class="form-input" id="em-incident-notes" placeholder="e.g. Found in Drawer 3, mislabeled during last audit"></div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitIncidentResolve('${entity.tool_id}', '${entity.qr_code}')">Submit Resolution</button>
+                    </div>
+                </div>
+            </div>
+        `;
 
         // The "Edit" View (Hidden by default)
         const isOut = entity.status === 'Out';
@@ -1187,7 +1214,7 @@ function openEntityModal(type, id) {
     toggleModalEditMode(false);
     document.getElementById('entity-modal-overlay').style.display = 'flex';
 
-    if (type === 'tool') loadCalibrationHistory(entity.tool_id);
+    if (type === 'tool') { loadCalibrationHistory(entity.tool_id); loadIncidentHistory(entity.tool_id); }
 }
 
 /**
@@ -1262,6 +1289,77 @@ async function submitCalLogForm(toolId, qrCode) {
             body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, notes: notes || null })
         });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to log calibration record.')); }
+        await renderEditableInfraTree();
+        openEntityModal('tool', qrCode);
+    } catch (e) {
+        alert('Network Error.');
+    }
+}
+
+/**
+ * Fills in #em-incident-history-list from GET /api/tools/:id/incidents -- every reported
+ * Missing/Broken/Worn cycle, newest first, including how/when/by whom it was resolved. If
+ * the most recent incident is still OPEN, also reveals #em-incident-resolve-form (hidden
+ * the rest of the time) so resolving it is the obvious next action, not a hunt for a button.
+ */
+async function loadIncidentHistory(toolId) {
+    const listEl = document.getElementById('em-incident-history-list');
+    const resolveForm = document.getElementById('em-incident-resolve-form');
+    if (!listEl) return;
+    try {
+        const res = await fetch(`/api/tools/${toolId}/incidents`);
+        const data = await res.json();
+        if (!res.ok || !data.incidents.length) {
+            listEl.innerHTML = `No incidents on record.`;
+            if (resolveForm) resolveForm.style.display = 'none';
+            return;
+        }
+
+        listEl.innerHTML = data.incidents.map(inc => {
+            const statusColor = inc.status === 'OPEN' ? 'var(--red)' : (inc.status === 'WRITTEN_OFF' ? 'var(--muted)' : 'var(--green)');
+            const statusLabel = inc.status === 'OPEN' ? 'OPEN' : (inc.status === 'WRITTEN_OFF' ? 'Written Off' : 'Resolved');
+            return `
+            <div style="padding:8px 0; border-bottom:1px solid var(--border);">
+                <div style="display:flex; justify-content:space-between; font-size:13px;">
+                    <strong style="color:var(--text);">${inc.incident_type}</strong>
+                    <span style="color:${statusColor}; font-weight:bold;">${statusLabel}</span>
+                </div>
+                <div style="font-size:11px;">Reported ${new Date(inc.reported_at).toLocaleString()} by ${inc.reported_by_name || 'Unknown'}${inc.last_known_location ? ' -- last known at ' + inc.last_known_location : ''}</div>
+                ${inc.description ? `<div style="font-size:12px; color:var(--text); margin-top:2px;">${inc.description}</div>` : ''}
+                ${inc.status !== 'OPEN' ? `<div style="font-size:11px; margin-top:2px;">Resolved ${new Date(inc.resolved_at).toLocaleString()} by ${inc.resolved_by_name || 'Unknown'}${inc.resolution_notes ? ' -- ' + inc.resolution_notes : ''}</div>` : ''}
+            </div>
+        `;
+        }).join('');
+
+        if (resolveForm) {
+            const hasOpenIncident = data.incidents.some(inc => inc.status === 'OPEN');
+            resolveForm.style.display = hasOpenIncident ? 'block' : 'none';
+            if (hasOpenIncident) resolveForm.dataset.incidentId = data.incidents.find(inc => inc.status === 'OPEN').incident_id;
+        }
+    } catch (e) {
+        listEl.innerHTML = `<span style="color:var(--red);">Failed to load.</span>`;
+    }
+}
+
+/**
+ * Submits #em-incident-resolve-form to POST /api/tools/:id/incidents/:incident_id/resolve --
+ * the recommended way to resolve an open incident (over just changing the tool's status via
+ * the general edit form) since it collects resolution notes and doesn't require switching to
+ * edit mode. On success, refreshes the infrastructure tree and reopens this tool's modal
+ * fresh, same pattern as submitCalLogForm().
+ */
+async function submitIncidentResolve(toolId, qrCode) {
+    const incidentId = document.getElementById('em-incident-resolve-form').dataset.incidentId;
+    const resolution = document.getElementById('em-incident-resolution').value;
+    const notes = document.getElementById('em-incident-notes').value.trim();
+
+    try {
+        const res = await fetch(`/api/tools/${toolId}/incidents/${incidentId}/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ resolution, resolution_notes: notes || null })
+        });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to resolve incident.')); }
         await renderEditableInfraTree();
         openEntityModal('tool', qrCode);
     } catch (e) {

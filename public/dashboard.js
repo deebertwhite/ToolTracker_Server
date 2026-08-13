@@ -177,6 +177,7 @@ async function loadGlobalDashboard() {
         renderStatusBreakdownChart();
         renderCalComplianceChart();
         loadActivityTrendChart();
+        loadAuditComplianceTrendChart();
 
         // 5. Render 'Out' Tools Table
         const outBody = document.getElementById('dash-out-body');
@@ -386,6 +387,66 @@ function renderCalComplianceChart() {
         { label: 'Due Within 30 Days', value: dueSoon, color: CHART_COLORS.dueSoon },
         { label: 'Overdue', value: overdue, color: CHART_COLORS.overdue },
     ]);
+}
+
+/**
+ * Renders a single-series bar chart into containerId from points (array of {label, pct}),
+ * one bar per shift window, colored by compliance level (green = fully audited, amber =
+ * partially, red = not at all, gray = no auditable toolboxes that window at all -- N/A, not
+ * a failure). Structurally similar to renderBarChart() but one bar per point instead of a
+ * pair, since compliance is a single percentage, not two comparable series.
+ */
+function renderComplianceTrendChart(containerId, points) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!points.length) {
+        container.innerHTML = `<div style="text-align:center; color:var(--muted); padding:30px 0; font-size:13px;">No shift windows yet.</div>`;
+        return;
+    }
+
+    const width = 760, height = 160, paddingBottom = 30, plotHeight = height - paddingBottom;
+    const groupWidth = width / points.length;
+    const barWidth = Math.max(4, Math.min(28, groupWidth * 0.6));
+
+    const bars = points.map((p, i) => {
+        const center = i * groupWidth + groupWidth / 2;
+        const pct = p.pct === null ? 0 : p.pct;
+        const barHeight = (pct / 100) * plotHeight;
+        const color = p.pct === null ? '#6b7280' : (p.pct >= 100 ? CHART_COLORS.compliant : (p.pct > 0 ? CHART_COLORS.dueSoon : CHART_COLORS.overdue));
+        const title = p.pct === null ? `${p.label}: no auditable toolboxes` : `${p.label}: ${p.pct}% audited`;
+        return `
+            <rect x="${center - barWidth / 2}" y="${plotHeight - barHeight}" width="${barWidth}" height="${Math.max(1, barHeight)}" fill="${color}" rx="2"><title>${title}</title></rect>
+            <text x="${center}" y="${height - 6}" text-anchor="middle" style="fill:var(--muted); font-size:9px;">${p.label}</text>
+        `;
+    }).join('');
+
+    container.innerHTML = `<svg width="100%" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
+}
+
+/**
+ * Fetches GET /api/dashboard/audit-compliance-trend and builds the last-7-days shift-audit
+ * compliance chart -- one bar per shift window (14 = 7 days x 2 windows/day), colored by
+ * how much of that window's auditable inventory actually got audited. Ties the mandatory
+ * shift-audit gate (see getAuditWindowStart in server.js) to a visible trend instead of only
+ * ever showing the CURRENT window's pass/fail on the audit-status widget above.
+ */
+async function loadAuditComplianceTrendChart() {
+    try {
+        const res = await fetch('/api/dashboard/audit-compliance-trend?windows=14');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load');
+
+        const points = data.windows.map(w => {
+            const d = new Date(w.window_start);
+            const label = `${d.getMonth() + 1}/${d.getDate()} ${w.is_morning ? 'AM' : 'PM'}`;
+            return { label, pct: w.compliance_pct };
+        });
+
+        renderComplianceTrendChart('chart-audit-compliance-trend', points);
+    } catch (e) {
+        const container = document.getElementById('chart-audit-compliance-trend');
+        if (container) container.innerHTML = `<div style="text-align:center; color:var(--red); padding:30px 0; font-size:13px;">Failed to load audit compliance trend.</div>`;
+    }
 }
 
 /** Fetches GET /api/dashboard/activity-trend and builds the 30-day checkout/check-in grouped bar chart, zero-filling every day in the window (not just days with rows) so the x-axis stays evenly spaced and a quiet day reads as zero, not a gap. */

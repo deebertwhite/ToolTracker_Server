@@ -398,6 +398,23 @@ function getAuditWindowEnd(windowStart) {
 }
 
 /**
+ * Returns the Date marking when the shift window immediately BEFORE windowStart began --
+ * the mirror image of getAuditWindowEnd(), stepping backward instead of forward. Used by the
+ * dashboard's audit-compliance trend chart to walk back through the last N shift windows.
+ * @param {Date} windowStart - a value returned by getAuditWindowStart()
+ */
+function getPreviousAuditWindowStart(windowStart) {
+    const prev = new Date(windowStart);
+    if (windowStart.getHours() === AUDIT_MORNING_START_HOUR) {
+        prev.setDate(prev.getDate() - 1);
+        prev.setHours(AUDIT_AFTERNOON_START_HOUR);
+    } else {
+        prev.setHours(AUDIT_MORNING_START_HOUR);
+    }
+    return prev;
+}
+
+/**
  * AUDIT GATE: returns the list of toolboxes in the given department that still
  * need an AUDIT since windowStart. A toolbox only counts if it currently has at
  * least one non-retired, non-transferred tool in it. Empty array => department passes.
@@ -1320,14 +1337,18 @@ app.put('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res)
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
 app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
     const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number, drawer_id } = req.body;
+
+    // If they checked the box but didn't provide a due date, throw an error
+    if (is_calibrated && !cal_due_date) {
+        return res.status(400).json({ error: 'Calibration Due Date is required.' });
+    }
+    if (!drawer_id) {
+        return res.status(400).json({ error: 'A drawer/location is required.' });
+    }
+
+    const client = await pool.connect();
     try {
-        // If they checked the box but didn't provide a due date, throw an error
-        if (is_calibrated && !cal_due_date) {
-            return res.status(400).json({ error: 'Calibration Due Date is required.' });
-        }
-        if (!drawer_id) {
-            return res.status(400).json({ error: 'A drawer/location is required.' });
-        }
+        await client.query('BEGIN');
 
         // The entity modal's edit form always identifies a tool by its barcode ID (qr_code),
         // matching how it's looked up/opened everywhere else in admin.js (openEntityModal,
@@ -1335,12 +1356,14 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // param name. Resolving to the real tool_id up front (rather than trying to use the
         // qr_code text directly in a WHERE tool_id = ... comparison) is what was missing:
         // that mismatch made every save throw "invalid input syntax for type integer".
-        const currentRes = await pool.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [req.params.id]);
-        if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        const currentRes = await client.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [req.params.id]);
+        if (currentRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
         const toolId = currentRes.rows[0].tool_id;
+        const previousStatus = currentRes.rows[0].status;
 
-        const transition = checkToolStatusTransition(currentRes.rows[0].status, status);
+        const transition = checkToolStatusTransition(previousStatus, status);
         if (!transition.allowed) {
+            await client.query('ROLLBACK');
             return res.status(409).json({ error: 'That status change is not allowed.', code: transition.code });
         }
 
@@ -1348,10 +1371,10 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // department -- straight from the edit modal's Location cascade. Not blocked while
         // 'Out': the tool isn't physically in any drawer at that point anyway, so reassigning
         // where it lives once returned is a legitimate, unrelated action.
-        const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
-        if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid drawer selected.' });
+        const drawerRes = await client.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
+        if (drawerRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Invalid drawer selected.' }); }
 
-        await pool.query(
+        await client.query(
             `UPDATE tools
              SET name = $1, description = $2, replacement_url = $3, status = $4,
                  is_calibrated = $5, last_cal_date = $6, cal_due_date = $7,
@@ -1361,10 +1384,116 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
              is_calibrated || false, last_cal_date || null, cal_due_date || null,
              serial_number || null, part_number || null, drawer_id, toolId]
         );
+
+        // If this save just moved the tool OUT of a flagged state (Missing/Broken/Worn),
+        // auto-close whatever OPEN tool_incidents row is behind it and log the resolution --
+        // previously this whole path left no trace at all of who resolved a lost/broken tool
+        // report or when. Doesn't require going through the dedicated resolve endpoint below;
+        // that one exists for collecting resolution notes, but a plain edit-form save that
+        // happens to change the status still gets the incident properly closed either way.
+        if (['Missing', 'Broken', 'Worn'].includes(previousStatus) && previousStatus !== status) {
+            const openIncidentRes = await client.query(
+                "SELECT incident_id FROM tool_incidents WHERE tool_id = $1 AND status = 'OPEN' ORDER BY reported_at DESC LIMIT 1",
+                [toolId]
+            );
+            if (openIncidentRes.rows.length > 0) {
+                const resolution = status === 'Retired' ? 'WRITTEN_OFF' : 'RESOLVED';
+                await client.query(
+                    `UPDATE tool_incidents SET status = $1, resolved_by_user_id = $2, resolved_at = NOW() WHERE incident_id = $3`,
+                    [resolution, req.authUser.user_id, openIncidentRes.rows[0].incident_id]
+                );
+                await client.query(
+                    "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'INCIDENT_RESOLVED', $2, $3)",
+                    [req.authUser.user_id, toolId, `Status changed from ${previousStatus} to ${status} via tool edit`]
+                );
+            }
+        }
+
+        await client.query('COMMIT');
         res.json({ success: true });
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error("Tool Update Error:", err);
         res.status(500).json({ error: 'Failed to update tool.' });
+    } finally {
+        client.release();
+    }
+});
+
+// Full incident history for one tool -- every reported Missing/Broken/Worn cycle (see
+// tool_incidents / migrations/007), newest first, so an admin can see the full lifecycle:
+// when it was reported, where it was last known to be, and how/when/by whom it was
+// resolved. requireRole(2) matches the existing view-inventory threshold (tool_rep+).
+app.get('/api/tools/:id/incidents', requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT ti.incident_id, ti.incident_type, ti.reported_at, ti.last_known_status, ti.last_known_location,
+                    ti.description, ti.status, ti.resolution_notes, ti.resolved_at,
+                    ru.full_name AS reported_by_name, xu.full_name AS resolved_by_name
+             FROM tool_incidents ti
+             LEFT JOIN users ru ON ti.reported_by_user_id = ru.user_id
+             LEFT JOIN users xu ON ti.resolved_by_user_id = xu.user_id
+             WHERE ti.tool_id = $1
+             ORDER BY ti.reported_at DESC`,
+            [req.params.id]
+        );
+        res.json({ success: true, incidents: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch incident history.' });
+    }
+});
+
+// Resolves an OPEN incident from the admin panel, collecting resolution notes -- the
+// recommended path (over just editing the tool's status directly, which PUT /api/tools/:id
+// above still supports and will auto-close the incident for too, just without notes).
+// requireRole(2) matches the tool-edit threshold. resolution must be 'RESOLVED' (tool is
+// back in service, status -> 'In') or 'WRITTEN_OFF' (permanently retired, status -> 'Retired').
+app.post('/api/tools/:id/incidents/:incident_id/resolve', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { resolution, resolution_notes } = req.body;
+    if (!['RESOLVED', 'WRITTEN_OFF'].includes(resolution)) {
+        return res.status(400).json({ error: "Resolution must be 'RESOLVED' or 'WRITTEN_OFF'." });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const incidentRes = await client.query(
+            "SELECT incident_id, tool_id, incident_type FROM tool_incidents WHERE incident_id = $1 AND tool_id = $2 AND status = 'OPEN'",
+            [req.params.incident_id, req.params.id]
+        );
+        if (incidentRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Open incident not found for this tool.' });
+        }
+        const incident = incidentRes.rows[0];
+
+        const newStatus = resolution === 'WRITTEN_OFF' ? 'Retired' : 'In';
+        const transitionRes = await client.query('SELECT status FROM tools WHERE tool_id = $1', [incident.tool_id]);
+        const transition = checkToolStatusTransition(transitionRes.rows[0].status, newStatus);
+        if (!transition.allowed) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'That resolution is not allowed from this tool\'s current state.', code: transition.code });
+        }
+
+        await client.query('UPDATE tools SET status = $1, status_reason = NULL WHERE tool_id = $2', [newStatus, incident.tool_id]);
+        await client.query(
+            `UPDATE tool_incidents SET status = $1, resolution_notes = $2, resolved_by_user_id = $3, resolved_at = NOW() WHERE incident_id = $4`,
+            [resolution, resolution_notes || null, req.authUser.user_id, incident.incident_id]
+        );
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'INCIDENT_RESOLVED', $2, $3)",
+            [req.authUser.user_id, incident.tool_id, `${incident.incident_type} incident ${resolution.toLowerCase()}${resolution_notes ? ': ' + resolution_notes : ''}`]
+        );
+
+        await client.query('COMMIT');
+        res.json({ success: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Resolve Incident Error:', err);
+        res.status(500).json({ error: 'Failed to resolve incident.' });
+    } finally {
+        client.release();
     }
 });
 
@@ -1942,7 +2071,19 @@ app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
         const user = userRes.rows[0];
         await resetFailedPinAttempts(badge_id);
 
-        const toolRes = await client.query('SELECT tool_id, status FROM tools WHERE qr_code = $1', [qr_code]);
+        // Location/department snapshotted now (as text, not a foreign key) since it
+        // describes where the tool WAS when this incident was reported -- if it's later
+        // physically moved (or its drawer reassigned), the incident record shouldn't
+        // silently follow it.
+        const toolRes = await client.query(
+            `SELECT t.tool_id, t.status, d.name AS dept_name, b.name AS box_name, dr.name AS drawer_name
+             FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             LEFT JOIN departments d ON b.dept_id = d.dept_id
+             WHERE t.qr_code = $1`,
+            [qr_code]
+        );
         if (toolRes.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'Tool not found.', code: 'TOOL_NOT_FOUND' });
@@ -1960,6 +2101,13 @@ app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
 
         await client.query('UPDATE tools SET status = $1, status_reason = $2 WHERE tool_id = $3', [issue_type, notes || null, tool.tool_id]);
         await client.query('INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)', [user.user_id, 'ISSUE_REPORT', tool.tool_id, notes || null]);
+
+        const locationParts = [tool.dept_name, tool.box_name, tool.drawer_name].filter(Boolean);
+        await client.query(
+            `INSERT INTO tool_incidents (tool_id, incident_type, reported_by_user_id, last_known_status, last_known_location, description)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [tool.tool_id, issue_type, user.user_id, tool.status, locationParts.join(' / ') || null, notes || null]
+        );
 
         await client.query('COMMIT');
         res.json({ success: true, tool: { tool_id: tool.tool_id, status: issue_type } });
@@ -2427,6 +2575,64 @@ app.get('/api/dashboard/activity-trend', async (req, res) => {
         res.json({ success: true, days, data: result.rows });
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch activity trend.' });
+    }
+});
+
+// Mandatory-shift-audit compliance for each of the last N shift windows (default 14, i.e.
+// the last 7 days), across every department -- was every currently-auditable toolbox
+// actually audited in that window? Unlike getAuditGatePendingToolboxes() (which only checks
+// "since windowStart" against right now, fine for the live gate but wrong for a past
+// window), this bounds each window on both ends so an audit from a LATER window can't be
+// mistaken for satisfying an EARLIER one. "Auditable" is evaluated against tools' CURRENT
+// status, same simplification the live gate already makes -- this app doesn't track
+// historical tool status, so a window from a week ago is judged by today's inventory shape.
+app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
+    const windowCount = Math.min(60, Math.max(1, parseInt(req.query.windows, 10) || 14));
+    try {
+        const deptsRes = await pool.query('SELECT dept_id, name FROM departments ORDER BY name');
+        const depts = deptsRes.rows;
+
+        const windows = [];
+        let cursor = getAuditWindowStart();
+        for (let i = 0; i < windowCount; i++) {
+            windows.unshift({ start: new Date(cursor), end: getAuditWindowEnd(cursor) });
+            cursor = getPreviousAuditWindowStart(cursor);
+        }
+
+        const results = [];
+        for (const w of windows) {
+            const perDept = [];
+            for (const dept of depts) {
+                const countsRes = await pool.query(
+                    `WITH auditable_boxes AS (
+                        SELECT b.box_id FROM toolboxes b WHERE b.dept_id = $1
+                          AND EXISTS (SELECT 1 FROM tools t JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                                      WHERE dr.box_id = b.box_id AND t.status NOT IN ('Retired','Pending Transfer','In Calibration'))
+                     )
+                     SELECT
+                       (SELECT COUNT(*) FROM auditable_boxes) AS total,
+                       (SELECT COUNT(DISTINCT b.box_id) FROM audit_logs a
+                          JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
+                          WHERE a.action = 'AUDIT' AND a.timestamp >= $2 AND a.timestamp < $3 AND b.box_id IN (SELECT box_id FROM auditable_boxes)
+                       ) AS audited`,
+                    [dept.dept_id, w.start, w.end]
+                );
+                perDept.push({ dept_id: dept.dept_id, name: dept.name, total: parseInt(countsRes.rows[0].total, 10), audited: parseInt(countsRes.rows[0].audited, 10) });
+            }
+            const total = perDept.reduce((sum, d) => sum + d.total, 0);
+            const audited = perDept.reduce((sum, d) => sum + d.audited, 0);
+            results.push({
+                window_start: w.start.toISOString(),
+                is_morning: w.start.getHours() === AUDIT_MORNING_START_HOUR,
+                total, audited,
+                compliance_pct: total === 0 ? null : Math.round((audited / total) * 100),
+                departments: perDept,
+            });
+        }
+
+        res.json({ success: true, windows: results });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch audit compliance trend.' });
     }
 });
 
