@@ -4,6 +4,7 @@
 
 const bwipjs = require('bwip-js');
 const sharp = require('sharp');
+const { crc32 } = require('./crc32');
 
 const MM_PER_INCH = 25.4;
 
@@ -30,22 +31,6 @@ function textOptions(text, textYOffset) {
 async function getModuleGridSize(text) {
     const png = await bwipjs.toBuffer({ bcid: 'datamatrix', text, scale: 1, paddingwidth: 0, paddingheight: 0 });
     return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
-}
-
-// --- Standard CRC32 (used by the PNG chunk format) -- Node has no built-in CRC32. ---
-const CRC_TABLE = (() => {
-    const table = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) {
-        let c = n;
-        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-        table[n] = c >>> 0;
-    }
-    return table;
-})();
-function crc32(buf) {
-    let c = 0xFFFFFFFF;
-    for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
-    return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
 /**

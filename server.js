@@ -29,6 +29,7 @@ const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
 const { generatePngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
+const { buildZip } = require('./scripts/lib/zip');
 
 const app = express();
 
@@ -1626,6 +1627,49 @@ app.get('/api/toolboxes/export', requireRole(2), async (req, res) => {
     } catch (err) {
         console.error("Structure Export Error:", err);
         res.status(500).json({ error: 'Failed to export structure.' });
+    }
+});
+
+// Bulk-download every non-retired tool's barcode label image as one ZIP -- the only way to
+// get all of them off the Pi previously was pulling files by hand over SSH, which doesn't
+// scale past a handful of tools and isn't something a non-technical admin can do at all.
+// Built on a hand-rolled ZIP writer (scripts/lib/zip.js, stored/uncompressed -- the PNGs are
+// already compressed at the image level) rather than a dependency, same reasoning as the
+// hand-rolled PNG pHYs chunk in datamatrix.js. Flat archive (no per-department folders) to
+// match how the CSV exports above are flat too -- filenames are already the barcode ID, which
+// is enough to tell labels apart when printing.
+app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT qr_code, barcode_image_url FROM tools
+             WHERE barcode_image_url IS NOT NULL AND status != 'Retired'
+             ORDER BY qr_code ASC`
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'No barcode labels to export yet.' });
+        }
+
+        const files = [];
+        for (const tool of result.rows) {
+            const filePath = path.join(BARCODE_LABEL_DIR, path.basename(tool.barcode_image_url));
+            try {
+                files.push({ name: `${tool.qr_code}.png`, data: fs.readFileSync(filePath) });
+            } catch (readErr) {
+                // Best-effort -- a tool whose label file is missing on disk (e.g. manually
+                // deleted) shouldn't block everyone else's labels from exporting.
+                console.error('Skipping missing label file for', tool.qr_code, readErr.message);
+            }
+        }
+
+        const zip = buildZip(files);
+        const filename = `tooltracker-barcode-labels-${new Date().toISOString().split('T')[0]}.zip`;
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(zip);
+    } catch (err) {
+        console.error("Label Export Error:", err);
+        res.status(500).json({ error: 'Failed to export labels.' });
     }
 });
 
