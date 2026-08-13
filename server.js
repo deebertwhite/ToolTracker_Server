@@ -422,6 +422,16 @@ function getPreviousAuditWindowStart(windowStart) {
  * @param {number} deptId - department to check
  * @param {Date} [windowStart] - defaults to the start of the CURRENT mandatory-audit window (see getAuditWindowStart)
  * @returns {Promise<Array<{box_id: number, name: string}>>} pending toolboxes (empty = audited since windowStart)
+ * @note windowStart/windowEnd are computed with LOCAL-time Date methods (correct -- shifts
+ *   reset at 4am/2pm shop time, not UTC), but audit_logs.timestamp is `timestamp without
+ *   time zone` written in UTC (DB session timezone is UTC). node-postgres serializes a bound
+ *   Date parameter as local-time digits + offset (e.g. "04:00:00-07:00"); Postgres's literal
+ *   parser for `timestamp without time zone` silently DISCARDS that offset and takes the
+ *   digits as-is, giving a boundary that's off by the local UTC offset unless the parameter is
+ *   explicitly cast to `::timestamptz` first (forces offset-aware parsing, then Postgres
+ *   promotes the timestamp-without-tz column for the comparison using its own UTC session
+ *   timezone -- the correct absolute-instant comparison). Every query comparing one of these
+ *   Date objects against audit_logs.timestamp must cast the parameter this way.
  */
 const getAuditGatePendingToolboxes = async (client, deptId, windowStart = getAuditWindowStart()) => {
     const query = `
@@ -432,7 +442,7 @@ const getAuditGatePendingToolboxes = async (client, deptId, windowStart = getAud
         ), audited_in_window AS (
           SELECT DISTINCT b.box_id FROM audit_logs a
             JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
-            WHERE a.action='AUDIT' AND a.timestamp >= $2 AND b.dept_id = $1
+            WHERE a.action='AUDIT' AND a.timestamp >= $2::timestamptz AND b.dept_id = $1
         )
         SELECT ab.box_id, ab.name FROM auditable_boxes ab LEFT JOIN audited_in_window at ON ab.box_id = at.box_id WHERE at.box_id IS NULL;
     `;
@@ -454,7 +464,7 @@ async function getAuditWindowCompletionInfo(deptId, windowStart) {
         `SELECT a.timestamp, u.full_name, u.badge_id
          FROM audit_logs a JOIN users u ON a.user_id = u.user_id
          JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
-         WHERE a.action = 'AUDIT' AND a.timestamp >= $2 AND b.dept_id = $1
+         WHERE a.action = 'AUDIT' AND a.timestamp >= $2::timestamptz AND b.dept_id = $1
          ORDER BY a.timestamp DESC LIMIT 1`,
         [deptId, windowStart]
     );
@@ -2613,7 +2623,7 @@ app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
                        (SELECT COUNT(*) FROM auditable_boxes) AS total,
                        (SELECT COUNT(DISTINCT b.box_id) FROM audit_logs a
                           JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
-                          WHERE a.action = 'AUDIT' AND a.timestamp >= $2 AND a.timestamp < $3 AND b.box_id IN (SELECT box_id FROM auditable_boxes)
+                          WHERE a.action = 'AUDIT' AND a.timestamp >= $2::timestamptz AND a.timestamp < $3::timestamptz AND b.box_id IN (SELECT box_id FROM auditable_boxes)
                        ) AS audited`,
                     [dept.dept_id, w.start, w.end]
                 );
