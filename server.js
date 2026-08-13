@@ -8,7 +8,19 @@ const helmet = require('helmet');
 const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
 const rateLimit = require('express-rate-limit');
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// Every "timestamp" column in this schema is `timestamp without time zone`, and every row is
+// written while the DB session's timezone is UTC (see docker-compose.yml -- the stock
+// postgres:15 image defaults to Etc/UTC) -- so the wall-clock digits stored ARE UTC. But
+// node-postgres's default parser for that type (OID 1114) builds the returned JS Date using
+// the *Node process's own local timezone*, not UTC, silently shifting every timestamp this
+// app ever reads back by the server's local UTC offset (discovered via the audit-compliance
+// endpoint reporting 0 audits for a window real audits fell well inside). Overriding the
+// parser to treat the digits as UTC fixes every timestamp read app-wide (audit_logs,
+// tool_incidents, calibration_records, etc.) without touching a single stored value or
+// requiring a schema migration to `timestamptz`.
+types.setTypeParser(1114, (val) => new Date(val + 'Z'));
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
