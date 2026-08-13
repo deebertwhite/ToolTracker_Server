@@ -800,6 +800,34 @@ async function submitInventoryImport() {
     }
 }
 
+/**
+ * Audio + haptic confirmation that a barcode was just successfully captured -- see the
+ * identical helper in kiosk.js for the full reasoning (synthesized Web Audio beep, no
+ * asset file; vibration is Android-only since iOS Safari has never implemented the
+ * Vibration API). Kept as its own copy here rather than a shared file since admin.js and
+ * kiosk.js are already independently self-contained per page (see initCameraCore below vs.
+ * kiosk.js's executeCameraScan -- same pattern, not shared either).
+ */
+let scanFeedbackAudioCtx = null;
+function playScanFeedback() {
+    try {
+        if (!scanFeedbackAudioCtx) scanFeedbackAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const ctx = scanFeedbackAudioCtx;
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = 1400;
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+        oscillator.start();
+        oscillator.stop(ctx.currentTime + 0.12);
+    } catch (e) { /* Web Audio unavailable/blocked -- scanning itself still works fine without the beep */ }
+
+    if (navigator.vibrate) navigator.vibrate(60);
+}
+
 /** Shared html5-qrcode bootstrap: reveals the given reader element, tears down any previous scanner instance, and starts scanning using the rear-facing camera specifically (`facingMode: "environment"`, requested directly rather than enumerating devices and guessing which index is the rear camera -- that order is unpredictable across phones/browsers, and iOS in particular often lists the front camera first). Falls back to whatever camera is available if no rear camera exists (e.g. a laptop webcam). Invokes callback(decodedText) once a code is read (stopping the scanner and hiding the reader first). Alerts the operator if the scanner fails to start (no camera, permission denied, etc). */
 function initCameraCore(elementId, callback) {
     document.getElementById(elementId).style.display = 'block';
@@ -808,7 +836,7 @@ function initCameraCore(elementId, callback) {
     html5QrAdminInstance.start(
         { facingMode: "environment" },
         { fps: 12, qrbox: 250, aspectRatio: 1.0 }, // matches the .camera-reader CSS's fixed 1:1 box so the preview doesn't stretch/squish when the phone rotates
-        (txt) => { html5QrAdminInstance.stop().then(() => { document.getElementById(elementId).style.display = 'none'; callback(txt); }); }
+        (txt) => { playScanFeedback(); html5QrAdminInstance.stop().then(() => { document.getElementById(elementId).style.display = 'none'; callback(txt); }); }
     ).catch((err) => { alert("Camera Error"); document.getElementById(elementId).style.display = 'none'; });
 }
 /** Opens the login-screen scanner and writes the decoded badge id into #admin-badge. */

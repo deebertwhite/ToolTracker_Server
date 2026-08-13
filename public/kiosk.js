@@ -577,6 +577,37 @@ function stopContinuousScanner(readerId) {
 }
 
 /**
+ * Audio + haptic confirmation that a barcode was just successfully captured -- a single
+ * synthesized beep via the Web Audio API (no audio file asset needed, and no risk of a
+ * browser autoplay block since this only ever runs from inside a user-gesture call stack:
+ * a button click or an Enter keydown) plus a short vibration where the platform supports
+ * it. Vibration is Android-only in practice -- iOS Safari has never implemented the
+ * Vibration API, even installed as a PWA, so `navigator.vibrate` is simply undefined there;
+ * this silently ends up audio-only on iPhone/iPad/desktop rather than erroring.
+ * One AudioContext is created lazily and reused (rather than one per scan) since browsers
+ * cap how many can exist at once and there's no reason to pay that cost repeatedly.
+ */
+let scanFeedbackAudioCtx = null;
+function playScanFeedback() {
+    try {
+        if (!scanFeedbackAudioCtx) scanFeedbackAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const ctx = scanFeedbackAudioCtx;
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = 1400;
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+        oscillator.start();
+        oscillator.stop(ctx.currentTime + 0.12);
+    } catch (e) { /* Web Audio unavailable/blocked -- scanning itself still works fine without the beep */ }
+
+    if (navigator.vibrate) navigator.vibrate(60);
+}
+
+/**
  * Camera lifecycle: shared low-level driver behind all camera scan
  * buttons. Reveals the given preview element, (re)creates the
  * html5QrScannerInstance against it, and starts scanning using the
@@ -620,8 +651,10 @@ function executeCameraScan(elementId, successCallback, continuous = false) {
                 if (text === lastContinuousScanCode && (now - lastContinuousScanTime) < 2000) return;
                 lastContinuousScanCode = text;
                 lastContinuousScanTime = now;
+                playScanFeedback();
                 successCallback(text);
             } else {
+                playScanFeedback();
                 html5QrScannerInstance.stop().then(() => {
                     document.getElementById(elementId).style.display = 'none';
                     successCallback(text);
