@@ -655,8 +655,9 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
     try {
         await client.query('BEGIN');
 
-        const toolRes = await client.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
+        const toolRes = await client.query('SELECT tool_id, last_cal_date FROM tools WHERE tool_id = $1', [req.params.id]);
         if (toolRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
+        const currentLastCal = toolRes.rows[0].last_cal_date;
 
         await client.query(
             `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id)
@@ -664,15 +665,21 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
             [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, notes || null, req.authUser.user_id]
         );
 
-        const latestRes = await client.query(
-            'SELECT cal_date, due_date FROM calibration_records WHERE tool_id = $1 ORDER BY cal_date DESC LIMIT 1',
-            [req.params.id]
-        );
-        const latest = latestRes.rows[0];
-        await client.query(
-            'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
-            [latest.cal_date, latest.due_date, req.params.id]
-        );
+        // Only advance the tool's snapshot fields if this record is now the most recent
+        // calibration event for it. Comparing against calibration_records alone (e.g. "is
+        // this the newest row for this tool") isn't enough: existing inventory can have a
+        // last_cal_date that predates ANY calibration_records row (set directly by the
+        // ingest form, a plain edit, or CSV import, with no traceable record behind it at
+        // all) -- backfilling an older historical record for that tool must not regress a
+        // legacy date that's already there just because it happens to be untracked.
+        if (!currentLastCal || new Date(cal_date) >= new Date(currentLastCal)) {
+            await client.query(
+                'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
+                [cal_date, due_date, req.params.id]
+            );
+        } else {
+            await client.query('UPDATE tools SET is_calibrated = true WHERE tool_id = $1', [req.params.id]);
+        }
 
         await client.query(
             "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
