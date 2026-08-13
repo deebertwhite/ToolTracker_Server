@@ -236,6 +236,36 @@ function requireRole(minWeight) {
 }
 
 /**
+ * Resolves a badge_id to { user_id, role, dept_id, accessibleDeptIds } -- accessibleDeptIds
+ * is home dept_id plus any explicitly granted ones (see migrations/005), same shape as
+ * req.authUser in requireRole() above. Does NOT special-case super_admin as "unrestricted":
+ * matching every other use of accessibleDeptIds in this file, callers check
+ * role === 'super_admin' themselves wherever unrestricted access should apply. Returns null
+ * for an unknown or deactivated badge. Shared by endpoints that need department-access info
+ * outside the session-based requireRole path -- currently just the kiosk's one-off
+ * badge+PIN-authenticated audit submission, which has no session to attach req.authUser to.
+ */
+async function getUserAccess(badgeId) {
+    const result = await pool.query(
+        `SELECT u.user_id, u.role, u.dept_id,
+                COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+         FROM users u
+         LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
+         WHERE u.badge_id = $1 AND u.is_active = true
+         GROUP BY u.user_id`,
+        [badgeId]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+        user_id: row.user_id,
+        role: row.role,
+        dept_id: row.dept_id,
+        accessibleDeptIds: [...new Set([row.dept_id, ...row.granted_dept_ids].filter(id => id !== null))],
+    };
+}
+
+/**
  * Lightweight CSRF defense for the session-cookie-based admin endpoints: requires a
  * custom header that cross-site <form>/<img> CSRF vectors cannot set, only same-origin
  * fetch() calls can (which is all admin.js ever does). Combined with the session
@@ -681,9 +711,17 @@ app.post('/api/logout', (req, res) => {
 app.post('/api/kiosk-auth', authLimiter, async (req, res) => {
     const { login_id, pin } = req.body;
     try {
+        // granted_dept_ids rides along here (same pattern as requireRole in the admin session
+        // path) so the kiosk can filter/group the audit toolbox picker to what this person can
+        // actually access, without a second round trip -- kiosk-auth is a one-off identity
+        // check per action, not a persistent session, so this is the one place to get it from.
         const query = `
-            SELECT user_id, badge_id, full_name, role, is_active, dept_id, pin_hash
-            FROM users WHERE (badge_id ILIKE $1 OR username ILIKE $1)
+            SELECT u.user_id, u.badge_id, u.full_name, u.role, u.is_active, u.dept_id, u.pin_hash,
+                   COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+            FROM users u
+            LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
+            WHERE (u.badge_id ILIKE $1 OR u.username ILIKE $1)
+            GROUP BY u.user_id
         `;
         const result = await pool.query(query, [login_id]);
 
@@ -1694,17 +1732,40 @@ app.get('/api/audit', requireRole(3), async (req, res) => {
     }
 });
 
-// Process a full Toolbox Audit from the Kiosk. No role check beyond a valid active badge.
+// Process a full Toolbox Audit from the Kiosk. No minimum role (any active badge may audit
+// their own department), but department-scoped roles are restricted to tools they can
+// actually access -- see getUserAccess().
 app.post('/api/audits/submit', async (req, res) => {
-    const { badge_id, box_id, results } = req.body;
+    const { badge_id, results } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
-        
-        const userRes = await client.query('SELECT user_id FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0) throw new Error('Invalid badge.');
-        const userId = userRes.rows[0].user_id;
+
+        const access = await getUserAccess(badge_id);
+        if (!access) throw new Error('Invalid badge.');
+        const userId = access.user_id;
+
+        // Department-scoped roles may only audit tools in a department they can access;
+        // super_admin is unrestricted. Checked against the actual department of every
+        // tool_id in the submission (not just whichever toolbox the kiosk UI thinks it's
+        // auditing) so this can't be bypassed by posting directly to this endpoint with a
+        // different toolbox's tool_ids -- the client-side dropdown filter is a convenience,
+        // this is the real enforcement.
+        if (access.role !== 'super_admin') {
+            const toolIds = results.map(item => item.tool_id);
+            const deptCheck = await client.query(
+                `SELECT t.tool_id, d.dept_id
+                 FROM tools t
+                 LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                 LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+                 LEFT JOIN departments d ON b.dept_id = d.dept_id
+                 WHERE t.tool_id = ANY($1::int[])`,
+                [toolIds]
+            );
+            const unauthorized = deptCheck.rows.some(row => !access.accessibleDeptIds.includes(row.dept_id));
+            if (unauthorized) throw new Error('You do not have access to audit one or more of these tools.');
+        }
 
         // Iterate through the array of audited tools
         for (let item of results) {

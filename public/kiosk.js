@@ -112,7 +112,9 @@ async function authenticateUser() {
             name: data.user.full_name,
             initials: data.user.full_name.split(' ').map(n => n[0]).join(''),
             pin: pin,
-            deptId: data.user.dept_id
+            deptId: data.user.dept_id,
+            role: data.user.role,
+            grantedDeptIds: data.user.granted_dept_ids || []
         };
 
         if (data.user.photo_url) {
@@ -252,18 +254,26 @@ function isAnyKioskModalOpen() {
 /**
  * Focuses the given scan input, but only while #screen-action is
  * actually visible (guards against stealing focus after navigating
- * away) AND no modal is currently open on top of it -- without that
- * second check, the auto-refocus blur listeners below would yank
- * focus back to the scan input the instant an operator clicked into
- * the Buddy Sign-Off PIN field (its own focus blurs the scan
- * input, which re-triggers this function 200ms later), making the
- * PIN field appear to "immediately unclick" itself. Used both
- * directly (scan-box click) and by the auto-refocus blur listeners
- * set up on DOMContentLoaded.
+ * away), no modal is currently open on top of it, and the operator
+ * hasn't just clicked into one of the audit table's own per-row
+ * controls (the Condition <select> or Notes <input>) -- without
+ * these checks, the auto-refocus blur listeners below would yank
+ * focus back to the scan input the instant an operator clicked
+ * anywhere else. This is exactly what made the Buddy Sign-Off PIN
+ * field appear to "immediately unclick" itself (its own focus blurs
+ * the scan input, which re-triggers this function 200ms later) --
+ * and, unfixed, made a Condition dropdown in the audit table
+ * impossible to open at all, since the browser closes a <select>'s
+ * native popup the moment focus moves away from it, which is exactly
+ * what a stray .focus() call on the scan input 200ms into opening it
+ * would do. Used both directly (scan-box click) and by the
+ * auto-refocus blur listeners set up on DOMContentLoaded.
  */
 function focusScanInput(inputId) {
     const input = document.getElementById(inputId);
-    if (input && document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen()) {
+    const auditList = document.getElementById('audit-tool-list');
+    const focusedInAuditRow = auditList && auditList.contains(document.activeElement);
+    if (input && document.getElementById('screen-action').style.display === 'flex' && !isAnyKioskModalOpen() && !focusedInAuditRow) {
         input.focus();
     }
 }
@@ -322,16 +332,53 @@ function removeItem(index) {
 // 5. AUDIT WORKFLOW
 // ==========================================
 /**
- * Populates the #audit-box-select dropdown (audit-step-1) from
- * GET /api/storage so the user can pick which toolbox to inventory.
+ * The logged-in activeUser's home department plus any explicitly granted ones (see
+ * migrations/005) -- same shape/meaning as accessibleDeptIds server-side, and same
+ * convention: does NOT treat super_admin as unrestricted here, since a super_admin has no
+ * real "home" department scoping to apply in the first place. Callers check
+ * activeUser.role === 'super_admin' themselves wherever unrestricted access should apply
+ * (see loadAuditDropdown() below), matching how server.js's own accessibleDeptIds is used.
+ */
+function getAccessibleDeptIds() {
+    if (!activeUser) return [];
+    return [...new Set([activeUser.deptId, ...(activeUser.grantedDeptIds || [])].filter(id => id !== null && id !== undefined))];
+}
+
+/**
+ * Populates the #audit-box-select dropdown (audit-step-1) from GET /api/storage so the user
+ * can pick which toolbox to inventory. Grouped into one <optgroup> per department (sorted by
+ * department name, toolboxes sorted within each), and restricted to departments the logged-in
+ * activeUser can access -- their home department plus any explicitly granted ones, or every
+ * department for a super_admin. This is a convenience filter, not the real enforcement: the
+ * server independently checks the same access on submit (see getUserAccess() in server.js),
+ * so this can't be bypassed by editing the DOM or calling the API directly.
  */
 async function loadAuditDropdown() {
     try {
         const res = await fetch('/api/storage');
         const data = await res.json();
-        document.getElementById('audit-box-select').innerHTML = '<option value="">-- Select a Toolbox --</option>' + data.toolboxes.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
-    } catch (e) { 
-        showToast(`${icon('circle-x', 'icon-danger')} Failed to load storage infrastructure.`); 
+
+        const accessibleDeptIds = getAccessibleDeptIds();
+        const visibleDepts = (activeUser && activeUser.role === 'super_admin')
+            ? data.departments
+            : data.departments.filter(d => accessibleDeptIds.includes(d.dept_id));
+
+        const html = visibleDepts
+            .slice()
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map(dept => {
+                const boxes = data.toolboxes
+                    .filter(b => b.dept_id === dept.dept_id)
+                    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+                if (boxes.length === 0) return '';
+                const options = boxes.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
+                return `<optgroup label="${dept.name}">${options}</optgroup>`;
+            })
+            .join('');
+
+        document.getElementById('audit-box-select').innerHTML = '<option value="">-- Select a Toolbox --</option>' + html;
+    } catch (e) {
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to load storage infrastructure.`);
     }
 }
 
@@ -468,11 +515,14 @@ function updateAuditItem(qr, field, value) {
  * scanned), prompts the user via confirm() to auto-mark them as
  * 'Missing'; if the user declines that confirmation, the submit is
  * aborted entirely so nothing is sent. On success, shows a toast and
- * either returns to the idle screen after a short delay, or — if this
- * audit was reached via the AUDIT_REQUIRED gate mid-checkout
- * (auditGateReturnPending) — returns to #panel-scanner with the
- * original batchQueue still intact so the tech can finalize the
- * checkout that triggered the gate.
+ * either returns to #panel-scanner with the original batchQueue still
+ * intact (if this audit was reached via the AUDIT_REQUIRED gate
+ * mid-checkout, auditGateReturnPending) so the tech can finalize the
+ * checkout that triggered the gate, or otherwise back to
+ * audit-step-1 (toolbox selection) -- NOT the idle screen -- so
+ * several boxes can be audited in one visit without re-authenticating
+ * for each one. The operator stays signed in until they explicitly
+ * hit "Cancel & Log Out".
  */
 async function submitAudit() {
     const pendingCount = auditTools.filter(t => t.audit_status === 'Pending').length;
@@ -515,7 +565,14 @@ async function submitAudit() {
         }
 
         showToast(`${icon('circle-check', 'icon-success')} Audit complete and verified.`);
-        setTimeout(resetToIdle, 1500);
+        // Return to toolbox selection rather than logging out -- auditing several boxes in
+        // one visit used to mean re-scanning a badge and re-entering a PIN for every single
+        // one. The operator stays signed in until they explicitly hit "Cancel & Log Out".
+        auditTools = [];
+        auditBoxName = '';
+        document.getElementById('audit-step-2').style.display = 'none';
+        document.getElementById('audit-step-1').style.display = 'block';
+        loadAuditDropdown();
     } catch (e) {
         showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }
