@@ -124,18 +124,21 @@ async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, pa
  *
  * Not calibrated for precise physical sizing the way generatePngAtSize() is for
  * engraving -- this is on-screen/print-at-home only, so `scale` is just tuned by eye to
- * read clearly, and bwip-js's own default bar height is left alone rather than computing
- * an exact mm target.
+ * read clearly (confirmed empirically that it scales width and height together, unlike
+ * bwip-js's separate `height` option which controls bar height alone -- not used here since
+ * a single knob is enough for the small/medium/large presets in server.js's BARCODE_SIZES).
  * @param {string} text
+ * @param {number} [scale=3] - bwip-js pixels-per-module; higher reads clearer/bigger on
+ *   screen and print, lower saves label space. 3 matches this function's original default.
  * @param {string} [backgroundColor] - hex, no '#' -- see generatePngAtSize() for why this
  *   matters (bwip-js's own background is fully transparent, invisible on a dark UI).
  * @returns {Promise<{ png: Buffer }>}
  */
-async function generateLinearBarcodePng(text, backgroundColor) {
+async function generateLinearBarcodePng(text, scale = 3, backgroundColor) {
     const opts = {
         bcid: 'code128',
         text,
-        scale: 3,
+        scale,
         includetext: true,
         textxalign: 'center',
         textsize: 9,

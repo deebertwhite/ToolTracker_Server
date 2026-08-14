@@ -1049,29 +1049,40 @@ function openEntityModal(type, id) {
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Status</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${entity.status}</div></div>
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration</div><div style="font-size:14px;margin-top:4px;font-weight:bold;">${calText}</div></div>
             </div>
-            <div style="display: flex; align-items: center; gap: 14px; margin-bottom:10px; background: var(--surface2); padding: 12px; border-radius: 8px;">
-                <div style="flex:1;">
-                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Data Matrix Label</div>
-                    <div style="font-size:12px;margin-top:4px;color:var(--muted);">${entity.barcode_image_url ? 'Auto-generated -- click to view/print.' : 'Not generated yet.'}</div>
+            <div style="margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Barcode Labels</div>
+                    ${(entity.barcode_image_url || entity.linear_barcode_image_url) ? `
+                        <a href="/api/tools/labels/export?qr_code=${encodeURIComponent(entity.qr_code)}" style="color:var(--blue); font-size:11px; text-decoration:none;">${icon('download')} Download All (ZIP)</a>
+                    ` : ''}
                 </div>
-                ${entity.barcode_image_url
-                    ? `<img src="${entity.barcode_image_url}" onclick="openImageModal('${entity.barcode_image_url}')" style="width:50px;height:50px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
-                    : ''}
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr style="font-size:10px; color:var(--muted); text-transform:uppercase;">
+                            <th style="text-align:left; font-weight:normal; padding-bottom:6px;"></th>
+                            <th style="text-align:center; font-weight:normal; padding-bottom:6px;">Data Matrix</th>
+                            <th style="text-align:center; font-weight:normal; padding-bottom:6px;">Code 128</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${['small', 'medium', 'large'].map(size => {
+                            const dmUrl = entity[size === 'medium' ? 'barcode_image_url' : `barcode_image_url_${size}`];
+                            const linUrl = entity[size === 'medium' ? 'linear_barcode_image_url' : `linear_barcode_image_url_${size}`];
+                            const dmCell = dmUrl
+                                ? `<img src="${dmUrl}" onclick="openImageModal('${dmUrl}')" style="width:40px;height:40px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
+                                : `<span style="color:var(--muted); font-size:11px;">--</span>`;
+                            const linCell = linUrl
+                                ? `<img src="${linUrl}" onclick="openImageModal('${linUrl}')" style="width:60px;height:30px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
+                                : `<span style="color:var(--muted); font-size:11px;">--</span>`;
+                            return `<tr>
+                                <td style="font-size:11px; color:var(--muted); text-transform:capitalize; padding:6px 0;">${size}</td>
+                                <td style="text-align:center; padding:6px 0;">${dmCell}</td>
+                                <td style="text-align:center; padding:6px 0;">${linCell}</td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
             </div>
-            <div style="display: flex; align-items: center; gap: 14px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
-                <div style="flex:1;">
-                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Code 128 Label</div>
-                    <div style="font-size:12px;margin-top:4px;color:var(--muted);">${entity.linear_barcode_image_url ? 'For 1D-only barcode scanners -- click to view/print.' : 'Not generated yet.'}</div>
-                </div>
-                ${entity.linear_barcode_image_url
-                    ? `<img src="${entity.linear_barcode_image_url}" onclick="openImageModal('${entity.linear_barcode_image_url}')" style="width:70px;height:35px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
-                    : ''}
-            </div>
-            ${(entity.barcode_image_url || entity.linear_barcode_image_url) ? `
-                <div style="margin-bottom:15px;">
-                    <a href="/api/tools/labels/export?qr_code=${encodeURIComponent(entity.qr_code)}" style="color:var(--blue); font-size:12px; text-decoration:none;">${icon('download')} Download Both Labels (ZIP)</a>
-                </div>
-            ` : ''}
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
         if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;

@@ -604,57 +604,106 @@ if (!fs.existsSync(BARCODE_LABEL_DIR)) {
     fs.mkdirSync(BARCODE_LABEL_DIR, { recursive: true });
 }
 
-const BARCODE_LABEL_SIZE_MM = 15; // matches the default physical size scripts/generate-tool-labels.js uses
 const BARCODE_LABEL_PADDING = 20; // bwip-js module units -- visually confirmed to give clear breathing room around the code and its human-readable ID without looking excessive; see scripts/lib/datamatrix.js for why this differs from the 0-padding bulk print/engrave scripts
 const BARCODE_LABEL_TEXT_YOFFSET = -12; // bwip-js's own default gap between the code and the human-readable ID reads as touching/too tight on screen -- visually confirmed clear at -12; see textOptions() in scripts/lib/datamatrix.js for the sign convention
 const BARCODE_LABEL_BACKGROUND = 'FFFFFF'; // bwip-js's own background is fully transparent (alpha 0, not opaque white) -- invisible against the dark image-lightbox modal in admin.js. See generatePngAtSize() in scripts/lib/datamatrix.js.
 
+// Three named sizes generated and stored for every tool (migrations/010_barcode_size_variants.sql)
+// -- a batch print run can then pick whichever actually fits a given tool instead of one
+// compromise size for everything. dmMm/linearScale anchored to
+// scripts/generate-size-test-sheet.js's own already-validated candidate range (3-20mm)
+// rather than arbitrary numbers. "medium" is this feature's original (and still default)
+// size, unchanged, so existing labels/filenames/columns for it never move.
+const BARCODE_SIZES = {
+    small: { dmMm: 10, linearScale: 2 },
+    medium: { dmMm: 15, linearScale: 3 },
+    large: { dmMm: 20, linearScale: 5 },
+};
+
+// Maps "<format>-<size>" to the tools column that size/format combination is stored in.
+// "medium" reuses the two pre-existing columns from migrations 004/008; small/large are new.
+const BARCODE_LABEL_COLUMNS = {
+    'datamatrix-small': 'barcode_image_url_small',
+    'datamatrix-medium': 'barcode_image_url',
+    'datamatrix-large': 'barcode_image_url_large',
+    'linear-small': 'linear_barcode_image_url_small',
+    'linear-medium': 'linear_barcode_image_url',
+    'linear-large': 'linear_barcode_image_url_large',
+};
+
 /**
- * Generates a Data Matrix label PNG for a tool's barcode and saves it to
- * public/uploads/barcodes/<qr_code>.png, returning the /uploads/... URL to store in
- * tools.barcode_image_url. This is a distinct file/column from a tool's photo_url (its
- * actual picture) -- one is auto-generated from the barcode value, the other is a manual
- * upload of what the tool physically looks like.
+ * Generates one size/format combination of a tool's barcode label and saves it to
+ * public/uploads/barcodes/, returning the /uploads/... URL to store in the matching
+ * tools column (see BARCODE_LABEL_COLUMNS). "medium" keeps the exact filenames this feature
+ * originally used (no suffix) so existing rows/files for that size never need to move;
+ * small/large get a filename suffix. This is a distinct file/column from a tool's photo_url
+ * (its actual picture) -- auto-generated from the barcode value, not a manual upload.
  *
  * The filename is derived directly from qr_code rather than the random-suffixed pattern
  * multer uses for photo uploads: a tool's barcode value is immutable once set (retiring a
  * tool mangles its OLD qr_code with a "-RET-<id>" suffix rather than reusing it -- see
  * POST /api/tools), so there's no collision risk and no old file to clean up on replacement
- * the way user-uploaded photos need (see deletePhotoFile()). Overwrites any existing file
- * at that path, which is exactly what's wanted when re-called after a rename (see
- * PUT /api/tools/:id) -- the label always reflects the tool's current name.
+ * the way user-uploaded photos need (see deletePhotoFile()). Overwrites any existing file at
+ * that path, which is exactly what's wanted when re-called after a rename.
  * @param {string} qrCode
  * @param {string} [name] - the tool's name, rendered as a second row below the ID (see
- *   addNameRow in scripts/lib/datamatrix.js); omitted/blank leaves the label as just the
- *   code + ID, same as before that feature existed.
+ *   addNameRow in scripts/lib/datamatrix.js); omitted/blank leaves just the code + ID.
+ * @param {'small'|'medium'|'large'} size
+ * @param {'datamatrix'|'linear'} format
  * @returns {Promise<string>} the saved image's /uploads/... URL
  */
-async function generateBarcodeLabel(qrCode, name) {
+async function generateOneBarcodeLabel(qrCode, name, size, format) {
     const safeName = qrCode.replace(/[^A-Za-z0-9_-]/g, '_');
-    const { png } = await generatePngAtSize(qrCode, BARCODE_LABEL_SIZE_MM, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET, BARCODE_LABEL_BACKGROUND);
+    const sizeSuffix = size === 'medium' ? '' : `-${size}`;
+    const { dmMm, linearScale } = BARCODE_SIZES[size];
+
+    let png, filename;
+    if (format === 'datamatrix') {
+        ({ png } = await generatePngAtSize(qrCode, dmMm, 1200, true, BARCODE_LABEL_PADDING, BARCODE_LABEL_TEXT_YOFFSET, BARCODE_LABEL_BACKGROUND));
+        filename = `${safeName}${sizeSuffix}.png`;
+    } else {
+        ({ png } = await generateLinearBarcodePng(qrCode, linearScale, BARCODE_LABEL_BACKGROUND));
+        filename = `${safeName}-1d${sizeSuffix}.png`;
+    }
     const labeled = await addNameRow(png, name);
-    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), labeled);
-    return `/uploads/barcodes/${safeName}.png`;
+    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, filename), labeled);
+    return `/uploads/barcodes/${filename}`;
 }
 
 /**
- * Generates a second, linear (1D) Code 128 label PNG for the same tool, saved alongside
- * the Data Matrix one as public/uploads/barcodes/<qr_code>-1d.png, stored in
- * tools.linear_barcode_image_url (migrations/008_linear_barcode_images.sql). Not a
- * replacement for the Data Matrix label -- some barcode scanners in the field are 1D-only
- * and physically cannot read a 2D symbol, so tools carry both. See generateLinearBarcodePng()
- * in scripts/lib/datamatrix.js for why Code 128 specifically. Same overwrite-on-rename
- * behavior as generateBarcodeLabel() above.
+ * Generates all 6 label images (2 formats x 3 sizes) for a tool and returns them keyed by
+ * their DB column name, ready to spread into saveBarcodeLabelUrls(). Used at every place a
+ * tool's labels get (re)generated -- creation, rename, CSV import create/update -- so all
+ * six always exist together rather than some sizes silently lagging behind the others.
  * @param {string} qrCode
- * @param {string} [name] - rendered as a second row below the ID, same as the Data Matrix label
- * @returns {Promise<string>} the saved image's /uploads/... URL
+ * @param {string} [name]
+ * @returns {Promise<Record<string,string>>} column name -> /uploads/... URL
  */
-async function generateLinearBarcodeLabel(qrCode, name) {
-    const safeName = qrCode.replace(/[^A-Za-z0-9_-]/g, '_');
-    const { png } = await generateLinearBarcodePng(qrCode, BARCODE_LABEL_BACKGROUND);
-    const labeled = await addNameRow(png, name);
-    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}-1d.png`), labeled);
-    return `/uploads/barcodes/${safeName}-1d.png`;
+async function generateAllBarcodeLabels(qrCode, name) {
+    const urls = {};
+    for (const format of ['datamatrix', 'linear']) {
+        for (const size of ['small', 'medium', 'large']) {
+            urls[BARCODE_LABEL_COLUMNS[`${format}-${size}`]] = await generateOneBarcodeLabel(qrCode, name, size, format);
+        }
+    }
+    return urls;
+}
+
+/**
+ * Writes all 6 barcode label URLs (see generateAllBarcodeLabels) onto a tool in one UPDATE.
+ * @param {'tool_id'|'qr_code'} idColumn - which column identifies the row
+ * @param {number|string} idValue
+ * @param {Record<string,string>} urls - as returned by generateAllBarcodeLabels()
+ */
+async function saveBarcodeLabelUrls(idColumn, idValue, urls) {
+    await pool.query(
+        `UPDATE tools SET barcode_image_url = $1, barcode_image_url_small = $2, barcode_image_url_large = $3,
+                linear_barcode_image_url = $4, linear_barcode_image_url_small = $5, linear_barcode_image_url_large = $6
+         WHERE ${idColumn} = $7`,
+        [urls.barcode_image_url, urls.barcode_image_url_small, urls.barcode_image_url_large,
+         urls.linear_barcode_image_url, urls.linear_barcode_image_url_small, urls.linear_barcode_image_url_large,
+         idValue]
+    );
 }
 
 // ==========================================
@@ -1337,9 +1386,8 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
         // itself, since the tool record is already valid and useful without one (it can be
         // filled in later via scripts/backfill-barcode-labels.js).
         try {
-            const barcodeUrl = await generateBarcodeLabel(qr_code, name);
-            const linearBarcodeUrl = await generateLinearBarcodeLabel(qr_code, name);
-            await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE tool_id = $3', [barcodeUrl, linearBarcodeUrl, newToolId]);
+            const labelUrls = await generateAllBarcodeLabels(qr_code, name);
+            await saveBarcodeLabelUrls('tool_id', newToolId, labelUrls);
         } catch (labelErr) {
             console.error('Barcode label generation failed for', qr_code, labelErr.message);
         }
@@ -1358,11 +1406,20 @@ app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req
         try {
             await client.query('BEGIN');
             await client.query('DELETE FROM audit_logs WHERE tool_id = $1', [tool_id]);
-            const result = await client.query('DELETE FROM tools WHERE tool_id = $1 RETURNING photo_url, barcode_image_url, linear_barcode_image_url', [tool_id]);
+            const result = await client.query(
+                `DELETE FROM tools WHERE tool_id = $1
+                 RETURNING photo_url, barcode_image_url, barcode_image_url_small, barcode_image_url_large,
+                           linear_barcode_image_url, linear_barcode_image_url_small, linear_barcode_image_url_large`,
+                [tool_id]
+            );
             await client.query('COMMIT');
             deletePhotoFile(result.rows[0]?.photo_url);
             deletePhotoFile(result.rows[0]?.barcode_image_url);
+            deletePhotoFile(result.rows[0]?.barcode_image_url_small);
+            deletePhotoFile(result.rows[0]?.barcode_image_url_large);
             deletePhotoFile(result.rows[0]?.linear_barcode_image_url);
+            deletePhotoFile(result.rows[0]?.linear_barcode_image_url_small);
+            deletePhotoFile(result.rows[0]?.linear_barcode_image_url_large);
             res.json({ success: true });
         } catch (err) {
             await client.query('ROLLBACK'); throw err;
@@ -1476,9 +1533,8 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // image (which just shows the name below the ID, see addNameRow) hit an error.
         if (name !== previousName) {
             try {
-                const barcodeUrl = await generateBarcodeLabel(req.params.id, name);
-                const linearBarcodeUrl = await generateLinearBarcodeLabel(req.params.id, name);
-                await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE tool_id = $3', [barcodeUrl, linearBarcodeUrl, toolId]);
+                const labelUrls = await generateAllBarcodeLabels(req.params.id, name);
+                await saveBarcodeLabelUrls('tool_id', toolId, labelUrls);
             } catch (labelErr) {
                 console.error('Barcode label regeneration failed for', req.params.id, labelErr.message);
             }
@@ -1711,7 +1767,8 @@ app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
 
     try {
         const result = await pool.query(
-            `SELECT t.qr_code, t.barcode_image_url, t.linear_barcode_image_url
+            `SELECT t.qr_code, t.barcode_image_url, t.barcode_image_url_small, t.barcode_image_url_large,
+                    t.linear_barcode_image_url, t.linear_barcode_image_url_small, t.linear_barcode_image_url_large
              FROM tools t
              LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
              LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -1728,24 +1785,21 @@ app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
             return res.status(404).json({ error: 'No barcode labels to export for that selection.' });
         }
 
-        // Split into datamatrix/ and code128/ subfolders rather than one flat list -- these
-        // two formats exist for different scanners (2D-capable vs. 1D-only), so whoever's
-        // printing a batch for a specific scanner/label stock can grab just the one folder
-        // they need instead of picking through a mixed pile by filename suffix.
+        // Organized as <format>/<size>/<qr_code>.png rather than one flat list -- format
+        // (datamatrix vs. code128) matters for which scanner can read it at all, size for
+        // which physical label stock it fits, so whoever's printing a batch for a specific
+        // scanner/stock can grab just the one folder they need.
         const files = [];
         for (const tool of result.rows) {
-            if (tool.barcode_image_url) {
-                try {
-                    files.push({ name: `datamatrix/${tool.qr_code}.png`, data: fs.readFileSync(path.join(BARCODE_LABEL_DIR, path.basename(tool.barcode_image_url))) });
-                } catch (readErr) {
-                    console.error('Skipping missing Data Matrix label file for', tool.qr_code, readErr.message);
-                }
-            }
-            if (tool.linear_barcode_image_url) {
-                try {
-                    files.push({ name: `code128/${tool.qr_code}.png`, data: fs.readFileSync(path.join(BARCODE_LABEL_DIR, path.basename(tool.linear_barcode_image_url))) });
-                } catch (readErr) {
-                    console.error('Skipping missing Code 128 label file for', tool.qr_code, readErr.message);
+            for (const [formatDir, format] of [['datamatrix', 'datamatrix'], ['code128', 'linear']]) {
+                for (const size of ['small', 'medium', 'large']) {
+                    const url = tool[BARCODE_LABEL_COLUMNS[`${format}-${size}`]];
+                    if (!url) continue;
+                    try {
+                        files.push({ name: `${formatDir}/${size}/${tool.qr_code}.png`, data: fs.readFileSync(path.join(BARCODE_LABEL_DIR, path.basename(url))) });
+                    } catch (readErr) {
+                        console.error(`Skipping missing ${formatDir}/${size} label file for`, tool.qr_code, readErr.message);
+                    }
                 }
             }
         }
@@ -1866,9 +1920,8 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 let updateMessage = 'Updated existing tool.';
                 if (fields.name !== existing.name) {
                     try {
-                        const barcodeUrl = await generateBarcodeLabel(qr_code, fields.name);
-                        const linearBarcodeUrl = await generateLinearBarcodeLabel(qr_code, fields.name);
-                        await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE tool_id = $3', [barcodeUrl, linearBarcodeUrl, existing.tool_id]);
+                        const labelUrls = await generateAllBarcodeLabels(qr_code, fields.name);
+                        await saveBarcodeLabelUrls('tool_id', existing.tool_id, labelUrls);
                     } catch (labelErr) {
                         console.error('Barcode label regeneration failed for', qr_code, labelErr.message);
                         updateMessage = 'Updated existing tool (barcode label regeneration failed -- can be regenerated later).';
@@ -1888,9 +1941,8 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 // failure shouldn't turn an otherwise-successful row into a reported error.
                 let message = 'Created new tool.';
                 try {
-                    const barcodeUrl = await generateBarcodeLabel(qr_code, fields.name);
-                    const linearBarcodeUrl = await generateLinearBarcodeLabel(qr_code, fields.name);
-                    await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE qr_code = $3', [barcodeUrl, linearBarcodeUrl, qr_code]);
+                    const labelUrls = await generateAllBarcodeLabels(qr_code, fields.name);
+                    await saveBarcodeLabelUrls('qr_code', qr_code, labelUrls);
                 } catch (labelErr) {
                     console.error('Barcode label generation failed for', qr_code, labelErr.message);
                     message = 'Created new tool (barcode label generation failed -- can be filled in later).';
