@@ -1699,16 +1699,33 @@ app.get('/api/toolboxes/export', requireRole(2), async (req, res) => {
 // hand-rolled PNG pHYs chunk in datamatrix.js. Flat archive (no per-department folders) to
 // match how the CSV exports above are flat too -- filenames are already the barcode ID, which
 // is enough to tell labels apart when printing.
+// Scope is one of: ?dept_id=, ?box_id=, ?qr_code= (single tool), or none of those for
+// every non-retired tool. Exactly one may be given -- combining them would be ambiguous
+// about which takes precedence, so it's rejected rather than silently picking one.
 app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
+    const { dept_id, box_id, qr_code } = req.query;
+    const scopeCount = [dept_id, box_id, qr_code].filter(v => v !== undefined && v !== '').length;
+    if (scopeCount > 1) {
+        return res.status(400).json({ error: 'Provide at most one of dept_id, box_id, or qr_code.' });
+    }
+
     try {
         const result = await pool.query(
-            `SELECT qr_code, barcode_image_url, linear_barcode_image_url FROM tools
-             WHERE (barcode_image_url IS NOT NULL OR linear_barcode_image_url IS NOT NULL) AND status != 'Retired'
-             ORDER BY qr_code ASC`
+            `SELECT t.qr_code, t.barcode_image_url, t.linear_barcode_image_url
+             FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE (t.barcode_image_url IS NOT NULL OR t.linear_barcode_image_url IS NOT NULL)
+               AND t.status != 'Retired'
+               AND ($1::int IS NULL OR b.dept_id = $1)
+               AND ($2::int IS NULL OR b.box_id = $2)
+               AND ($3::text IS NULL OR t.qr_code = $3)
+             ORDER BY t.qr_code ASC`,
+            [dept_id || null, box_id || null, qr_code || null]
         );
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'No barcode labels to export yet.' });
+            return res.status(404).json({ error: 'No barcode labels to export for that selection.' });
         }
 
         // Split into datamatrix/ and code128/ subfolders rather than one flat list -- these
@@ -1734,7 +1751,8 @@ app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
         }
 
         const zip = buildZip(files);
-        const filename = `tooltracker-barcode-labels-${new Date().toISOString().split('T')[0]}.zip`;
+        const scopeLabel = qr_code ? `-${qr_code}` : dept_id ? `-dept${dept_id}` : box_id ? `-box${box_id}` : '';
+        const filename = `tooltracker-barcode-labels${scopeLabel}-${new Date().toISOString().split('T')[0]}.zip`;
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.send(zip);

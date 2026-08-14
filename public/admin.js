@@ -484,7 +484,36 @@ async function syncStorageHierarchyDropdowns() {
         if (newDeptEl) newDeptEl.innerHTML = '<option value="">-- No Department (Global Admin only) --</option>' + deptOptions;
         const repDeptEl = document.getElementById('rep-dept');
         if (repDeptEl) repDeptEl.innerHTML = '<option value="ALL">Global (All Departments)</option>' + deptOptions;
+
+        const labelExportDeptEl = document.getElementById('label-export-dept');
+        if (labelExportDeptEl) labelExportDeptEl.innerHTML = '<option value="">All Departments</option>' + deptOptions;
     } catch(e) { console.error(e); }
+}
+
+/**
+ * Cascades the barcode-label export's Toolbox select to the chosen Department -- see the
+ * "4. Export Inventory" card. Scoped to globalBoxesCache (already kept in sync by
+ * syncStorageHierarchyDropdowns()), not a fresh fetch.
+ */
+function onLabelExportDeptChange() {
+    const deptId = document.getElementById('label-export-dept').value;
+    const boxSelect = document.getElementById('label-export-box');
+    const boxes = deptId ? globalBoxesCache.filter(b => b.dept_id == deptId) : globalBoxesCache;
+    boxSelect.innerHTML = '<option value="">All Toolboxes</option>' + boxes.map(b => `<option value="${b.box_id}">${b.name}</option>`).join('');
+}
+
+/**
+ * Builds the scoped query string for GET /api/tools/labels/export from whatever's selected
+ * in the Department/Toolbox pair above -- Toolbox takes precedence if both are set (it's
+ * already narrower than its department), matching the endpoint's "at most one filter" rule.
+ */
+function exportScopedLabels() {
+    const deptId = document.getElementById('label-export-dept').value;
+    const boxId = document.getElementById('label-export-box').value;
+    const params = new URLSearchParams();
+    if (boxId) params.set('box_id', boxId);
+    else if (deptId) params.set('dept_id', deptId);
+    window.location.href = `/api/tools/labels/export${params.toString() ? '?' + params.toString() : ''}`;
 }
 
 // Unified Editable Tree replacing the 3 old tables
@@ -1038,6 +1067,11 @@ function openEntityModal(type, id) {
                     ? `<img src="${entity.linear_barcode_image_url}" onclick="openImageModal('${entity.linear_barcode_image_url}')" style="width:70px;height:35px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
                     : ''}
             </div>
+            ${(entity.barcode_image_url || entity.linear_barcode_image_url) ? `
+                <div style="margin-bottom:15px;">
+                    <a href="/api/tools/labels/export?qr_code=${encodeURIComponent(entity.qr_code)}" style="color:var(--blue); font-size:12px; text-decoration:none;">${icon('download')} Download Both Labels (ZIP)</a>
+                </div>
+            ` : ''}
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
         if(entity.replacement_url) readHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
