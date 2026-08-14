@@ -1056,12 +1056,12 @@ function openEntityModal(type, id) {
                         <a href="/api/tools/labels/export?qr_code=${encodeURIComponent(entity.qr_code)}" style="color:var(--blue); font-size:11px; text-decoration:none;">${icon('download')} Download All (ZIP)</a>
                     ` : ''}
                 </div>
-                <table style="width:100%; border-collapse:collapse;">
+                <table style="width:100%; table-layout:fixed; border-collapse:collapse;">
                     <thead>
                         <tr style="font-size:10px; color:var(--muted); text-transform:uppercase;">
-                            <th style="text-align:left; font-weight:normal; padding-bottom:6px;"></th>
-                            <th style="text-align:center; font-weight:normal; padding-bottom:6px;">Data Matrix</th>
-                            <th style="text-align:center; font-weight:normal; padding-bottom:6px;">Code 128</th>
+                            <th style="width:18%; text-align:left; font-weight:normal; padding-bottom:6px;"></th>
+                            <th style="width:41%; text-align:center; font-weight:normal; padding-bottom:6px;">Data Matrix</th>
+                            <th style="width:41%; text-align:center; font-weight:normal; padding-bottom:6px;">Code 128</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1069,10 +1069,10 @@ function openEntityModal(type, id) {
                             const dmUrl = entity[size === 'medium' ? 'barcode_image_url' : `barcode_image_url_${size}`];
                             const linUrl = entity[size === 'medium' ? 'linear_barcode_image_url' : `linear_barcode_image_url_${size}`];
                             const dmCell = dmUrl
-                                ? `<img src="${dmUrl}" onclick="openImageModal('${dmUrl}')" style="width:40px;height:40px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
+                                ? `<img src="${dmUrl}" onclick="openImageModal('${dmUrl}')" style="width:36px;height:36px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
                                 : `<span style="color:var(--muted); font-size:11px;">--</span>`;
                             const linCell = linUrl
-                                ? `<img src="${linUrl}" onclick="openImageModal('${linUrl}')" style="width:60px;height:30px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
+                                ? `<img src="${linUrl}" onclick="openImageModal('${linUrl}')" style="width:100%;max-width:80px;height:26px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
                                 : `<span style="color:var(--muted); font-size:11px;">--</span>`;
                             return `<tr>
                                 <td style="font-size:11px; color:var(--muted); text-transform:capitalize; padding:6px 0;">${size}</td>
