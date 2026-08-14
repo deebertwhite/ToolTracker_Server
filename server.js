@@ -1494,6 +1494,37 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
     }
 });
 
+// Sets (or clears) where a tool sits on its drawer's photo, for the visual shadow-board map
+// (see migrations/009_tool_positions.sql). Deliberately separate from PUT /api/tools/:id --
+// dragging a marker on a photo is a distinct, frequent, low-stakes action that shouldn't
+// require going through the full tool edit form (and its calibration/status validation) --
+// and it doesn't touch anything else about the tool, so it doesn't need a transaction.
+// position_x/position_y are fractional (0.0-1.0) relative to the photo's own dimensions, not
+// pixels -- pass both as numbers to place, or both as null to unplace (e.g. "remove marker").
+// Requires tool_rep+, matching the same threshold as editing a tool's other fields.
+app.put('/api/tools/:id/position', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { position_x, position_y } = req.body;
+    const bothNumbers = typeof position_x === 'number' && typeof position_y === 'number';
+    const bothNull = position_x === null && position_y === null;
+    if (!bothNumbers && !bothNull) {
+        return res.status(400).json({ error: 'position_x and position_y must both be numbers (to place) or both null (to unplace).' });
+    }
+    if (bothNumbers && (position_x < 0 || position_x > 1 || position_y < 0 || position_y > 1)) {
+        return res.status(400).json({ error: 'position_x and position_y must be fractional values between 0 and 1.' });
+    }
+    try {
+        const result = await pool.query(
+            'UPDATE tools SET position_x = $1, position_y = $2 WHERE qr_code = $3 RETURNING tool_id',
+            [position_x, position_y, req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Tool Position Update Error:", err);
+        res.status(500).json({ error: 'Failed to update tool position.' });
+    }
+});
+
 // Full incident history for one tool -- every reported Missing/Broken/Worn cycle (see
 // tool_incidents / migrations/007), newest first, so an admin can see the full lifecycle:
 // when it was reported, where it was last known to be, and how/when/by whom it was

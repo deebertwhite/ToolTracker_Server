@@ -973,6 +973,21 @@ function openEntityModal(type, id) {
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         fieldsHtml = `<div class="form-group"><label class="form-label">Drawer Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>`;
 
+        // Shadow-board map: only meaningful once the drawer has a photo to place markers on
+        // (see triggerPhotoUpload('drawer', ...) below) -- #em-position-map-list is filled in
+        // asynchronously by renderPositionMap() once the modal is actually open, same pattern
+        // as loadCalibrationHistory()/loadIncidentHistory() for tools.
+        readHtml = entity.photo_url ? `
+            <div id="em-position-map-section" style="margin-top:15px;">
+                <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Tool Positions (Shadow Board Map)</div>
+                <div id="em-position-map-wrap" style="position:relative;display:inline-block;max-width:100%;border-radius:8px;overflow:hidden;border:1px solid var(--border);line-height:0;">
+                    <img id="em-position-map-img" src="${entity.photo_url}" style="display:block;max-width:100%;">
+                    <div id="em-position-map-markers" style="position:absolute;top:0;left:0;width:100%;height:100%;"></div>
+                </div>
+                <div id="em-position-map-controls" style="margin-top:10px;"></div>
+            </div>
+        ` : '';
+
         if (canEditInfra) {
             actionsHtml = `
                 <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Details</button>
@@ -1252,6 +1267,106 @@ function openEntityModal(type, id) {
     document.getElementById('entity-modal-overlay').style.display = 'flex';
 
     if (type === 'tool') { loadCalibrationHistory(entity.tool_id); loadIncidentHistory(entity.tool_id); }
+    if (type === 'drawer' && entity.photo_url) { renderPositionMap(entity); }
+}
+
+/**
+ * Renders the shadow-board map inside an open drawer modal (see the `readHtml` built for
+ * type === 'drawer' in openEntityModal) -- a colored marker for every tool in this drawer
+ * that already has a saved position (green/accent/red, same convention as the inventory
+ * tree's status coloring), plus, for anyone who can edit tools, a "click the photo to place"
+ * control listing whatever tools in this drawer don't have one yet. Re-called after every
+ * place/unplace so the map updates immediately without reopening the modal.
+ * @param {object} drawer - a drawer entity from globalDrawersCache (needs drawer_id)
+ */
+function renderPositionMap(drawer) {
+    const canEditTools = currentAdminWeight >= 2; // matches requireRole(2) on PUT /api/tools/:id/position
+    const markersEl = document.getElementById('em-position-map-markers');
+    const controlsEl = document.getElementById('em-position-map-controls');
+    if (!markersEl || !controlsEl) return; // modal was closed/switched before this ran
+
+    const drawerTools = globalToolsCache.filter(t => t.drawer_id === drawer.drawer_id);
+    const placed = drawerTools.filter(t => t.position_x !== null && t.position_y !== null);
+    const unplaced = drawerTools.filter(t => t.position_x === null || t.position_y === null);
+    const statusColor = (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)');
+
+    markersEl.innerHTML = placed.map(t => `
+        <div title="${t.name} (${t.status})" onclick="event.stopPropagation();${canEditTools ? ` unplaceToolPosition('${t.qr_code}')` : ''}"
+             style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
+                    width:16px; height:16px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
+                    box-shadow:0 0 4px rgba(0,0,0,0.6);${canEditTools ? ' cursor:pointer;' : ''}"></div>
+    `).join('');
+
+    const img = document.getElementById('em-position-map-img');
+
+    if (!canEditTools || unplaced.length === 0) {
+        img.onclick = null;
+        controlsEl.innerHTML = drawerTools.length === 0
+            ? `<div style="font-size:12px;color:var(--muted);">No tools assigned to this drawer yet.</div>`
+            : (canEditTools ? `<div style="font-size:12px;color:var(--muted);">Every tool in this drawer is placed. Click a marker to remove it.</div>` : '');
+        return;
+    }
+
+    controlsEl.innerHTML = `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <label class="form-label" style="margin:0;white-space:nowrap;">Click the photo to place:</label>
+            <select class="form-select" id="em-position-tool-select" style="width:auto;flex:1;min-width:160px;">
+                ${unplaced.map(t => `<option value="${t.qr_code}">${t.name} (${t.qr_code})</option>`).join('')}
+            </select>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px;">Click an existing marker to remove its position.</div>
+    `;
+
+    img.onclick = (event) => {
+        const select = document.getElementById('em-position-tool-select');
+        if (!select || !select.value) return;
+        const rect = event.target.getBoundingClientRect();
+        placeToolPosition(select.value, (event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
+    };
+}
+
+/**
+ * Saves a tool's shadow-board position (fractional 0-1 within its drawer's photo) via
+ * PUT /api/tools/:id/position, updates the local cache, and re-renders the map in place --
+ * see renderPositionMap().
+ */
+async function placeToolPosition(qrCode, x, y) {
+    try {
+        const res = await fetch(`/api/tools/${encodeURIComponent(qrCode)}/position`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ position_x: x, position_y: y }),
+        });
+        if (!res.ok) { const data = await res.json().catch(() => ({})); alert('❌ ' + (data.error || 'Failed to place tool.')); return; }
+        const tool = globalToolsCache.find(t => t.qr_code === qrCode);
+        if (tool) { tool.position_x = x; tool.position_y = y; }
+        const drawer = globalDrawersCache.find(d => d.drawer_id == document.getElementById('em-target-id').value);
+        if (drawer) renderPositionMap(drawer);
+    } catch (err) {
+        alert('❌ Network error while placing tool.');
+    }
+}
+
+/**
+ * Clears a tool's shadow-board position -- confirms first, since a click on a small marker
+ * is easy to fat-finger and there's no undo besides re-placing it -- then re-renders the map.
+ */
+async function unplaceToolPosition(qrCode) {
+    const tool = globalToolsCache.find(t => t.qr_code === qrCode);
+    if (!tool || !confirm(`Remove the shadow-board marker for "${tool.name}"?`)) return;
+    try {
+        const res = await fetch(`/api/tools/${encodeURIComponent(qrCode)}/position`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ position_x: null, position_y: null }),
+        });
+        if (!res.ok) { const data = await res.json().catch(() => ({})); alert('❌ ' + (data.error || 'Failed to remove marker.')); return; }
+        tool.position_x = null; tool.position_y = null;
+        const drawer = globalDrawersCache.find(d => d.drawer_id == document.getElementById('em-target-id').value);
+        if (drawer) renderPositionMap(drawer);
+    } catch (err) {
+        alert('❌ Network error while removing marker.');
+    }
 }
 
 /**

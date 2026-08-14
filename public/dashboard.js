@@ -10,6 +10,12 @@ let globalOutTools = [];
 let globalFlaggedTools = [];
 let globalCalTools = [];
 
+// Raw /api/storage rows, stashed here by fetchStorageTree() so the Shadow Board Map's
+// Department -> Toolbox -> Drawer selects can cascade without a second fetch.
+let globalStorageDepts = [];
+let globalStorageBoxes = [];
+let globalStorageDrawers = [];
+
 // ==========================================
 // 2. BOOT SEQUENCE
 // ==========================================
@@ -99,7 +105,11 @@ async function fetchStorageTree() {
     try {
         const res = await fetch('/api/storage');
         const data = await res.json();
-        
+
+        globalStorageDepts = data.departments || [];
+        globalStorageBoxes = data.toolboxes || [];
+        globalStorageDrawers = data.drawers || [];
+
         let html = '';
         data.departments.forEach(dept => {
             html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">${icon('building-2')} ${dept.name}</div>`;
@@ -116,6 +126,125 @@ async function fetchStorageTree() {
 }
 
 // ==========================================
+// 3.5 SHADOW BOARD MAP VIEW
+// ==========================================
+/**
+ * Switches to the Shadow Board Map view (department -> toolbox -> drawer picker + the
+ * selected drawer's photo/markers) and populates the Department select from the same
+ * globalStorageDepts data fetchStorageTree() already fetched for the sidebar -- no second
+ * request needed just to show this view.
+ */
+function showDrawerMapView() {
+    document.getElementById('view-global').style.display = 'none';
+    document.getElementById('view-location').style.display = 'none';
+    document.getElementById('view-drawer-map').style.display = 'block';
+
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+    document.getElementById('nav-drawer-map').classList.add('active');
+
+    const deptSelect = document.getElementById('map-select-dept');
+    deptSelect.innerHTML = `<option value="">Select...</option>` +
+        globalStorageDepts.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
+}
+
+/** Department changed -- repopulate the Toolbox select, scoped to that department, and reset Drawer. */
+function onDrawerMapDeptChange() {
+    const deptId = document.getElementById('map-select-dept').value;
+    const boxSelect = document.getElementById('map-select-box');
+    const drawerSelect = document.getElementById('map-select-drawer');
+
+    drawerSelect.innerHTML = `<option value="">Select toolbox first...</option>`;
+    drawerSelect.disabled = true;
+    hideDrawerMapDisplay();
+
+    if (!deptId) { boxSelect.innerHTML = `<option value="">Select department first...</option>`; boxSelect.disabled = true; return; }
+
+    const boxes = globalStorageBoxes.filter(b => b.dept_id == deptId);
+    boxSelect.innerHTML = `<option value="">Select...</option>` + boxes.map(b => `<option value="${b.box_id}">${b.name}</option>`).join('');
+    boxSelect.disabled = false;
+}
+
+/** Toolbox changed -- repopulate the Drawer select, scoped to that toolbox. */
+function onDrawerMapBoxChange() {
+    const boxId = document.getElementById('map-select-box').value;
+    const drawerSelect = document.getElementById('map-select-drawer');
+    hideDrawerMapDisplay();
+
+    if (!boxId) { drawerSelect.innerHTML = `<option value="">Select toolbox first...</option>`; drawerSelect.disabled = true; return; }
+
+    const drawers = globalStorageDrawers.filter(d => d.box_id == boxId);
+    drawerSelect.innerHTML = `<option value="">Select...</option>` + drawers.map(d => `<option value="${d.drawer_id}">${d.name}</option>`).join('');
+    drawerSelect.disabled = false;
+}
+
+/** Drawer changed -- render its map, or fall back to the empty-state card if none selected. */
+function onDrawerMapDrawerChange() {
+    const drawerId = document.getElementById('map-select-drawer').value;
+    if (!drawerId) { hideDrawerMapDisplay(); return; }
+    renderDrawerMap(drawerId);
+}
+
+function hideDrawerMapDisplay() {
+    document.getElementById('map-display-card').style.display = 'none';
+    document.getElementById('map-empty-card').style.display = 'block';
+    document.getElementById('map-empty-message').textContent = 'Select a department, toolbox, and drawer above.';
+}
+
+/**
+ * Renders the selected drawer's photo with a colored marker for every tool that has a saved
+ * position (green/accent/red -- same convention as everywhere else in this app), read-only
+ * (no click-to-place here; markers are set from the drawer's entity modal in the admin
+ * panel). Re-fetches /api/tools fresh rather than trusting globalTools' page-load snapshot,
+ * since this view is meant to be left open on a shared screen for a while.
+ */
+async function renderDrawerMap(drawerId) {
+    const drawer = globalStorageDrawers.find(d => d.drawer_id == drawerId);
+    const emptyCard = document.getElementById('map-empty-card');
+    const displayCard = document.getElementById('map-display-card');
+
+    if (!drawer || !drawer.photo_url) {
+        displayCard.style.display = 'none';
+        emptyCard.style.display = 'block';
+        document.getElementById('map-empty-message').textContent = drawer
+            ? 'This drawer has no photo yet -- add one from its entity card in the admin panel.'
+            : 'Drawer not found.';
+        return;
+    }
+
+    let tools;
+    try {
+        const res = await fetch('/api/tools');
+        const data = await res.json();
+        tools = (data.tools || []).filter(t => t.drawer_id == drawerId);
+    } catch (e) {
+        emptyCard.style.display = 'block';
+        displayCard.style.display = 'none';
+        document.getElementById('map-empty-message').textContent = 'Failed to load tool data.';
+        return;
+    }
+
+    emptyCard.style.display = 'none';
+    displayCard.style.display = 'block';
+    document.getElementById('map-drawer-title').textContent = drawer.name;
+    document.getElementById('map-drawer-img').src = drawer.photo_url;
+
+    const placed = tools.filter(t => t.position_x !== null && t.position_y !== null);
+    const unplacedCount = tools.length - placed.length;
+    const statusColor = (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)');
+
+    document.getElementById('map-drawer-markers').innerHTML = placed.map(t => `
+        <div title="${t.name} (${t.status})"
+             style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
+                    width:16px; height:16px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
+                    box-shadow:0 0 4px rgba(0,0,0,0.6);"></div>
+    `).join('');
+
+    document.getElementById('map-unplaced-note').textContent = unplacedCount > 0
+        ? `${unplacedCount} tool(s) in this drawer don't have a marked position yet.`
+        : (tools.length === 0 ? 'No tools assigned to this drawer.' : '');
+}
+
+// ==========================================
 // 4. GLOBAL DASHBOARD VIEW RENDERING
 // ==========================================
 /**
@@ -127,7 +256,8 @@ async function fetchStorageTree() {
 async function loadGlobalDashboard() {
     document.getElementById('view-global').style.display = 'block';
     document.getElementById('view-location').style.display = 'none';
-    
+    document.getElementById('view-drawer-map').style.display = 'none';
+
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navGlobal = document.getElementById('nav-global');
     if (navGlobal) navGlobal.classList.add('active');
@@ -493,6 +623,7 @@ async function loadActivityTrendChart() {
 function loadLocationView(type, filterValue, title, subtitle) {
     document.getElementById('view-global').style.display = 'none';
     document.getElementById('view-location').style.display = 'block';
+    document.getElementById('view-drawer-map').style.display = 'none';
     document.getElementById('loc-title').textContent = title;
     document.getElementById('loc-subtitle').textContent = type === 'dept' ? `Department Code: ${subtitle}` : subtitle;
 
