@@ -1056,7 +1056,11 @@ function openEntityModal(type, id) {
                         <a href="/api/tools/labels/export?qr_code=${encodeURIComponent(entity.qr_code)}" style="color:var(--blue); font-size:11px; text-decoration:none;">${icon('download')} Download All (ZIP)</a>
                     ` : ''}
                 </div>
-                <table style="width:100%; table-layout:fixed; border-collapse:collapse;">
+                <!-- min-width:0 overrides style.css's global table selector (min-width: 600px,
+                     meant for the wide, horizontally-scrollable data tables elsewhere in the
+                     app) -- without it this table forced itself wider than the ~400px modal,
+                     pushing the Code 128 column off screen despite table-layout:fixed. -->
+                <table style="width:100%; min-width:0; table-layout:fixed; border-collapse:collapse;">
                     <thead>
                         <tr style="font-size:10px; color:var(--muted); text-transform:uppercase;">
                             <th style="width:18%; text-align:left; font-weight:normal; padding-bottom:6px;"></th>
