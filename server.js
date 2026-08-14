@@ -28,7 +28,7 @@ const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
-const { generatePngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
+const { generatePngAtSize, generateLinearBarcodePng, addNameRow } = require('./scripts/lib/datamatrix');
 const { buildZip } = require('./scripts/lib/zip');
 
 const app = express();
@@ -597,7 +597,7 @@ function deletePhotoFile(photoUrl) {
 }
 
 // ==========================================
-// BARCODE LABEL GENERATION (DATA MATRIX)
+// BARCODE LABEL GENERATION (DATA MATRIX + LINEAR/CODE 128)
 // ==========================================
 const BARCODE_LABEL_DIR = path.join(UPLOAD_DIR, 'barcodes');
 if (!fs.existsSync(BARCODE_LABEL_DIR)) {
@@ -635,6 +635,26 @@ async function generateBarcodeLabel(qrCode, name) {
     const labeled = await addNameRow(png, name);
     fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}.png`), labeled);
     return `/uploads/barcodes/${safeName}.png`;
+}
+
+/**
+ * Generates a second, linear (1D) Code 128 label PNG for the same tool, saved alongside
+ * the Data Matrix one as public/uploads/barcodes/<qr_code>-1d.png, stored in
+ * tools.linear_barcode_image_url (migrations/008_linear_barcode_images.sql). Not a
+ * replacement for the Data Matrix label -- some barcode scanners in the field are 1D-only
+ * and physically cannot read a 2D symbol, so tools carry both. See generateLinearBarcodePng()
+ * in scripts/lib/datamatrix.js for why Code 128 specifically. Same overwrite-on-rename
+ * behavior as generateBarcodeLabel() above.
+ * @param {string} qrCode
+ * @param {string} [name] - rendered as a second row below the ID, same as the Data Matrix label
+ * @returns {Promise<string>} the saved image's /uploads/... URL
+ */
+async function generateLinearBarcodeLabel(qrCode, name) {
+    const safeName = qrCode.replace(/[^A-Za-z0-9_-]/g, '_');
+    const { png } = await generateLinearBarcodePng(qrCode, BARCODE_LABEL_BACKGROUND);
+    const labeled = await addNameRow(png, name);
+    fs.writeFileSync(path.join(BARCODE_LABEL_DIR, `${safeName}-1d.png`), labeled);
+    return `/uploads/barcodes/${safeName}-1d.png`;
 }
 
 // ==========================================
@@ -1311,14 +1331,15 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
             client.release();
         }
 
-        // Auto-generate this tool's Data Matrix label image now that qr_code is committed.
-        // Done outside the transaction (a filesystem write, not something to roll back) and
-        // best-effort -- a label-generation failure shouldn't block tool creation itself,
-        // since the tool record is already valid and useful without one (it can be filled in
-        // later via scripts/backfill-barcode-labels.js).
+        // Auto-generate this tool's Data Matrix + Code 128 label images now that qr_code is
+        // committed. Done outside the transaction (a filesystem write, not something to roll
+        // back) and best-effort -- a label-generation failure shouldn't block tool creation
+        // itself, since the tool record is already valid and useful without one (it can be
+        // filled in later via scripts/backfill-barcode-labels.js).
         try {
             const barcodeUrl = await generateBarcodeLabel(qr_code, name);
-            await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, newToolId]);
+            const linearBarcodeUrl = await generateLinearBarcodeLabel(qr_code, name);
+            await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE tool_id = $3', [barcodeUrl, linearBarcodeUrl, newToolId]);
         } catch (labelErr) {
             console.error('Barcode label generation failed for', qr_code, labelErr.message);
         }
@@ -1337,10 +1358,11 @@ app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req
         try {
             await client.query('BEGIN');
             await client.query('DELETE FROM audit_logs WHERE tool_id = $1', [tool_id]);
-            const result = await client.query('DELETE FROM tools WHERE tool_id = $1 RETURNING photo_url, barcode_image_url', [tool_id]);
+            const result = await client.query('DELETE FROM tools WHERE tool_id = $1 RETURNING photo_url, barcode_image_url, linear_barcode_image_url', [tool_id]);
             await client.query('COMMIT');
             deletePhotoFile(result.rows[0]?.photo_url);
             deletePhotoFile(result.rows[0]?.barcode_image_url);
+            deletePhotoFile(result.rows[0]?.linear_barcode_image_url);
             res.json({ success: true });
         } catch (err) {
             await client.query('ROLLBACK'); throw err;
@@ -1455,7 +1477,8 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         if (name !== previousName) {
             try {
                 const barcodeUrl = await generateBarcodeLabel(req.params.id, name);
-                await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, toolId]);
+                const linearBarcodeUrl = await generateLinearBarcodeLabel(req.params.id, name);
+                await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE tool_id = $3', [barcodeUrl, linearBarcodeUrl, toolId]);
             } catch (labelErr) {
                 console.error('Barcode label regeneration failed for', req.params.id, labelErr.message);
             }
@@ -1648,8 +1671,8 @@ app.get('/api/toolboxes/export', requireRole(2), async (req, res) => {
 app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT qr_code, barcode_image_url FROM tools
-             WHERE barcode_image_url IS NOT NULL AND status != 'Retired'
+            `SELECT qr_code, barcode_image_url, linear_barcode_image_url FROM tools
+             WHERE (barcode_image_url IS NOT NULL OR linear_barcode_image_url IS NOT NULL) AND status != 'Retired'
              ORDER BY qr_code ASC`
         );
 
@@ -1657,15 +1680,25 @@ app.get('/api/tools/labels/export', requireRole(2), async (req, res) => {
             return res.status(404).json({ error: 'No barcode labels to export yet.' });
         }
 
+        // Split into datamatrix/ and code128/ subfolders rather than one flat list -- these
+        // two formats exist for different scanners (2D-capable vs. 1D-only), so whoever's
+        // printing a batch for a specific scanner/label stock can grab just the one folder
+        // they need instead of picking through a mixed pile by filename suffix.
         const files = [];
         for (const tool of result.rows) {
-            const filePath = path.join(BARCODE_LABEL_DIR, path.basename(tool.barcode_image_url));
-            try {
-                files.push({ name: `${tool.qr_code}.png`, data: fs.readFileSync(filePath) });
-            } catch (readErr) {
-                // Best-effort -- a tool whose label file is missing on disk (e.g. manually
-                // deleted) shouldn't block everyone else's labels from exporting.
-                console.error('Skipping missing label file for', tool.qr_code, readErr.message);
+            if (tool.barcode_image_url) {
+                try {
+                    files.push({ name: `datamatrix/${tool.qr_code}.png`, data: fs.readFileSync(path.join(BARCODE_LABEL_DIR, path.basename(tool.barcode_image_url))) });
+                } catch (readErr) {
+                    console.error('Skipping missing Data Matrix label file for', tool.qr_code, readErr.message);
+                }
+            }
+            if (tool.linear_barcode_image_url) {
+                try {
+                    files.push({ name: `code128/${tool.qr_code}.png`, data: fs.readFileSync(path.join(BARCODE_LABEL_DIR, path.basename(tool.linear_barcode_image_url))) });
+                } catch (readErr) {
+                    console.error('Skipping missing Code 128 label file for', tool.qr_code, readErr.message);
+                }
             }
         }
 
@@ -1785,7 +1818,8 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 if (fields.name !== existing.name) {
                     try {
                         const barcodeUrl = await generateBarcodeLabel(qr_code, fields.name);
-                        await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE tool_id = $2', [barcodeUrl, existing.tool_id]);
+                        const linearBarcodeUrl = await generateLinearBarcodeLabel(qr_code, fields.name);
+                        await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE tool_id = $3', [barcodeUrl, linearBarcodeUrl, existing.tool_id]);
                     } catch (labelErr) {
                         console.error('Barcode label regeneration failed for', qr_code, labelErr.message);
                         updateMessage = 'Updated existing tool (barcode label regeneration failed -- can be regenerated later).';
@@ -1806,7 +1840,8 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 let message = 'Created new tool.';
                 try {
                     const barcodeUrl = await generateBarcodeLabel(qr_code, fields.name);
-                    await pool.query('UPDATE tools SET barcode_image_url = $1 WHERE qr_code = $2', [barcodeUrl, qr_code]);
+                    const linearBarcodeUrl = await generateLinearBarcodeLabel(qr_code, fields.name);
+                    await pool.query('UPDATE tools SET barcode_image_url = $1, linear_barcode_image_url = $2 WHERE qr_code = $3', [barcodeUrl, linearBarcodeUrl, qr_code]);
                 } catch (labelErr) {
                     console.error('Barcode label generation failed for', qr_code, labelErr.message);
                     message = 'Created new tool (barcode label generation failed -- can be filled in later).';

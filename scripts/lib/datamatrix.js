@@ -114,6 +114,38 @@ async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, pa
 }
 
 /**
+ * Renders a linear (1D) Code 128 barcode PNG for on-screen viewing -- alongside the Data
+ * Matrix label from generatePngAtSize(), not a replacement for it. Code 128 exists here
+ * specifically because plenty of cheap USB/laser barcode scanners are 1D-only and simply
+ * cannot read a 2D symbol like Data Matrix at all; having both on file means either kind of
+ * scanner (or a phone camera, which reads both) works. Chosen over Code 39 for the same
+ * alphanumeric+dash IDs this app uses (e.g. "AVI-000123") because it packs the same data
+ * into a narrower barcode.
+ *
+ * Not calibrated for precise physical sizing the way generatePngAtSize() is for
+ * engraving -- this is on-screen/print-at-home only, so `scale` is just tuned by eye to
+ * read clearly, and bwip-js's own default bar height is left alone rather than computing
+ * an exact mm target.
+ * @param {string} text
+ * @param {string} [backgroundColor] - hex, no '#' -- see generatePngAtSize() for why this
+ *   matters (bwip-js's own background is fully transparent, invisible on a dark UI).
+ * @returns {Promise<{ png: Buffer }>}
+ */
+async function generateLinearBarcodePng(text, backgroundColor) {
+    const opts = {
+        bcid: 'code128',
+        text,
+        scale: 3,
+        includetext: true,
+        textxalign: 'center',
+        textsize: 9,
+    };
+    if (backgroundColor !== undefined) opts.backgroundcolor = backgroundColor;
+    const png = await bwipjs.toBuffer(opts);
+    return { png };
+}
+
+/**
  * Generates an SVG whose Data Matrix CODE (not the overall canvas) measures targetMm
  * wide, by injecting width/height into bwip-js's raw viewBox-only SVG output.
  *
@@ -220,4 +252,4 @@ async function addNameRow(labelPng, name) {
         .toBuffer();
 }
 
-module.exports = { getModuleGridSize, generatePngAtSize, generateSvgAtSize, textOptions, addNameRow };
+module.exports = { getModuleGridSize, generatePngAtSize, generateLinearBarcodePng, generateSvgAtSize, textOptions, addNameRow };
