@@ -185,6 +185,18 @@ const authLimiter = rateLimit({
     message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
 });
 
+// Separate, more generous limiter for the token-gated calendar feed (see
+// GET /api/calendar/calibration.ics) -- authLimiter's 20/15min is sized for human login
+// attempts, not a URL that calendar apps and multiple subscribed devices poll on their own
+// schedule; this still bounds a token-guessing attempt without breaking normal subscriptions.
+const calendarFeedLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many requests. Please try again later.' },
+});
+
 // ==========================================
 // HELPER FUNCTIONS
 // ==========================================
@@ -550,6 +562,39 @@ const checkToolStatusTransition = (currentStatus, requestedStatus) => {
     return { allowed: false, code: 'INVALID_STATUS_TRANSITION' };
 };
 
+/**
+ * Checks whether `serialNumber` (normalized for case and surrounding whitespace, so "SN-1"
+ * and "sn-1 " collide) already belongs to a DIFFERENT tool, for a friendly rejection message
+ * before the write is attempted. Mirrors the database-level guard in
+ * migrations/011_serial_number_uniqueness.sql (a partial unique index) -- that index is what
+ * actually prevents a duplicate under concurrency or from a write path that skips this check
+ * (e.g. a future one); this call exists only to turn that into a clear message instead of a
+ * raw 23505 constraint violation.
+ * @param {import('pg').PoolClient|import('pg').Pool} client
+ * @param {string} serialNumber
+ * @param {number} [excludeToolId] - the tool being edited, if any, so leaving a tool's own
+ *   serial unchanged never collides with itself
+ * @returns {Promise<{tool_id: number, qr_code: string, name: string, status: string}|null>}
+ */
+async function findDuplicateSerial(client, serialNumber, excludeToolId) {
+    if (!serialNumber || !serialNumber.trim()) return null;
+    const result = await client.query(
+        `SELECT tool_id, qr_code, name, status FROM tools
+         WHERE LOWER(TRIM(serial_number)) = LOWER(TRIM($1)) AND ($2::int IS NULL OR tool_id != $2)
+         LIMIT 1`,
+        [serialNumber, excludeToolId || null]
+    );
+    return result.rows[0] || null;
+}
+
+/** Friendly message for findDuplicateSerial()'s result -- names the existing tool and, if
+ *  it's away for calibration, points at receiving it back instead of re-adding it. */
+function duplicateSerialErrorMessage(existing) {
+    const awayForCal = existing.status === 'Pending Transfer' || existing.status === 'In Calibration';
+    const hint = awayForCal ? ' It is currently out for calibration -- receive it back instead of adding a new one.' : '';
+    return `Serial number is already registered to "${existing.name}" (${existing.qr_code}).${hint}`;
+}
+
 // ==========================================
 // PHOTO UPLOAD SETUP (MULTER)
 // ==========================================
@@ -723,11 +768,12 @@ app.get('/api/status', async (req, res) => {
 app.get('/api/tools', async (req, res) => {
     try {
         const query = `
-            SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name 
-            FROM tools t 
-            LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id 
-            LEFT JOIN toolboxes b ON dr.box_id = b.box_id 
-            LEFT JOIN departments d ON b.dept_id = d.dept_id 
+            SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name,
+                   EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record
+            FROM tools t
+            LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+            LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+            LEFT JOIN departments d ON b.dept_id = d.dept_id
             ORDER BY t.name ASC;
         `;
         const result = await pool.query(query); 
@@ -1357,6 +1403,10 @@ app.delete('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, r
 app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
     const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
     try {
+        const duplicate = await findDuplicateSerial(pool, serial_number);
+        if (duplicate) {
+            return res.status(409).json({ error: duplicateSerialErrorMessage(duplicate), code: 'DUPLICATE_SERIAL' });
+        }
         const client = await pool.connect();
         let newToolId;
         try {
@@ -1489,6 +1539,12 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // where it lives once returned is a legitimate, unrelated action.
         const drawerRes = await client.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
         if (drawerRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Invalid drawer selected.' }); }
+
+        const duplicateSerial = await findDuplicateSerial(client, serial_number, toolId);
+        if (duplicateSerial) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: duplicateSerialErrorMessage(duplicateSerial), code: 'DUPLICATE_SERIAL' });
+        }
 
         await client.query(
             `UPDATE tools
@@ -1897,6 +1953,9 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 const transition = checkToolStatusTransition(existing.status, requestedStatus);
                 if (!transition.allowed) throw new Error(`Status change from "${existing.status}" to "${requestedStatus}" is not allowed (${transition.code}).`);
 
+                const duplicateSerial = await findDuplicateSerial(pool, fields.serial_number, existing.tool_id);
+                if (duplicateSerial) throw new Error(duplicateSerialErrorMessage(duplicateSerial));
+
                 // drawer_id is included here (not just on create) so a re-imported row that
                 // changed its Department/Toolbox/Drawer columns actually moves the tool --
                 // the same export -> bulk-edit -> re-import round trip this endpoint exists
@@ -1929,6 +1988,9 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 }
                 results.push({ row: rowNum, barcode: qr_code, result: 'updated', message: updateMessage });
             } else {
+                const duplicateSerial = await findDuplicateSerial(pool, fields.serial_number);
+                if (duplicateSerial) throw new Error(duplicateSerialErrorMessage(duplicateSerial));
+
                 await pool.query(
                     `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
@@ -2109,7 +2171,8 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
         for (let qr of qr_codes) {
             // Get tool info AND its owning (home) department
             const toolQuery = `
-                SELECT t.tool_id, t.name, t.status, t.is_calibrated, t.cal_due_date, b.dept_id AS tool_dept_id
+                SELECT t.tool_id, t.name, t.status, t.is_calibrated, t.cal_due_date, b.dept_id AS tool_dept_id,
+                       EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record
                 FROM tools t
                 LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
                 LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -2123,13 +2186,27 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
             const tool = toolRes.rows[0];
 
             if (action === 'CHECKOUT_TOOL') {
-                // A. CALIBRATION HARD-STOP
-                if (tool.is_calibrated && tool.cal_due_date) {
+                // A. CALIBRATION HARD-STOP -- a calibrated tool needs BOTH a valid (non-expired)
+                // due date AND at least one calibration_records row (real evidence it was
+                // actually calibrated, not just a manually-typed claim) to be issuable. Missing
+                // either is functionally "locked" even though nothing stores a literal "locked"
+                // flag -- same reasoning CalTool's dte.ts documents for its own two calibration
+                // regimes: an in-date-looking tool with no certificate on file is not actually
+                // trustworthy, so it must be as hard a stop as an expired one.
+                if (tool.is_calibrated) {
+                    if (!tool.cal_due_date) {
+                        await client.query('ROLLBACK');
+                        return res.status(403).json({ error: `Checkout Blocked: ${tool.name} has no calibration due date on file!`, code: 'CAL_NO_DUE_DATE' });
+                    }
                     const today = new Date();
                     const dueDate = new Date(tool.cal_due_date);
                     if (dueDate <= today) {
                         await client.query('ROLLBACK');
                         return res.status(403).json({ error: `Checkout Blocked: ${tool.name} calibration is expired!`, code: 'CAL_EXPIRED' });
+                    }
+                    if (!tool.has_cal_record) {
+                        await client.query('ROLLBACK');
+                        return res.status(403).json({ error: `Checkout Blocked: ${tool.name} has no calibration certificate on file!`, code: 'CAL_NO_CERTIFICATE' });
                     }
                 }
 
@@ -3041,6 +3118,91 @@ app.post('/api/hardware/sensor', async (req, res) => {
     } catch (err) {
         console.error("[Hardware] Sensor processing error:", err.message);
         res.status(500).json({ error: 'Failed to process sensor data.' });
+    }
+});
+
+// ==========================================
+// 8.6 CALENDAR FEED (iCalendar / .ics)
+// ==========================================
+// Escapes a text value per RFC 5545 (backslash, semicolon, comma, embedded newline). Line
+// folding for values over 75 octets is deliberately not implemented -- every field here is a
+// short tool name/location, not free-form prose, so it isn't expected to matter in practice.
+function icsEscapeText(str) {
+    return String(str).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+}
+
+// A calibration due date is a whole day, not a specific moment -- VALUE=DATE wants a bare
+// YYYYMMDD with no time/timezone component. `dateStr` may be a plain date or an ISO
+// timestamp; only the leading 10 characters (YYYY-MM-DD) are used either way.
+function formatIcsDate(dateStr) {
+    return dateStr.slice(0, 10).replace(/-/g, '');
+}
+
+// Surfaces the feed token to the admin panel so a super_admin can copy the subscribe URL --
+// gated one level above the everyday admin actions (requireRole(4)) since, unlike the feed
+// endpoint itself, this one DOES carry a real session, and the token is the feed's only
+// access control. Returns configured:false rather than an error when CALENDAR_FEED_TOKEN
+// isn't set, so the admin UI can show setup instructions instead of a raw failure.
+app.get('/api/settings/calendar-feed-token', requireRole(4), async (req, res) => {
+    const token = process.env.CALENDAR_FEED_TOKEN;
+    if (!token) return res.json({ configured: false });
+    res.json({ configured: true, token });
+});
+
+/**
+ * Publishes a read-only iCalendar feed of every calibrated tool's due date, gated by a
+ * single shared token (CALENDAR_FEED_TOKEN in .env) instead of a login session -- a calendar
+ * app auto-refreshing a subscribed URL has no way to do interactive auth, so the token IS
+ * the entire access control, same reasoning CalTool's own calibration feed documents ("pulls
+ * from CalTool -- no account, service account, or OAuth of any kind"). An unconfigured
+ * token always rejects; it never falls back to open access.
+ */
+app.get('/api/calendar/calibration.ics', calendarFeedLimiter, async (req, res) => {
+    const configuredToken = process.env.CALENDAR_FEED_TOKEN;
+    if (!configuredToken || req.query.token !== configuredToken) {
+        return res.status(403).send('Forbidden');
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT t.tool_id, t.qr_code, t.name, t.cal_due_date, d.name AS dept_name, b.name AS box_name
+             FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             LEFT JOIN departments d ON b.dept_id = d.dept_id
+             WHERE t.is_calibrated = true AND t.cal_due_date IS NOT NULL AND t.status != 'Retired'
+             ORDER BY t.cal_due_date ASC`
+        );
+
+        const dtstamp = `${formatIcsDate(new Date().toISOString())}T000000Z`;
+        const lines = [
+            'BEGIN:VCALENDAR',
+            'VERSION:2.0',
+            'PRODID:-//ToolTracker//Calibration Due Dates//EN',
+            'CALSCALE:GREGORIAN',
+            'X-WR-CALNAME:ToolTracker Calibration Due Dates',
+        ];
+
+        for (const tool of result.rows) {
+            const location = [tool.dept_name, tool.box_name].filter(Boolean).join(' / ');
+            lines.push(
+                'BEGIN:VEVENT',
+                `UID:cal-${tool.tool_id}@tooltracker`,
+                `DTSTAMP:${dtstamp}`,
+                `DTSTART;VALUE=DATE:${formatIcsDate(tool.cal_due_date)}`,
+                `SUMMARY:${icsEscapeText(`Calibration Due: ${tool.name} (${tool.qr_code})`)}`,
+                ...(location ? [`LOCATION:${icsEscapeText(location)}`] : []),
+                'END:VEVENT',
+            );
+        }
+        lines.push('END:VCALENDAR');
+
+        res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+        res.setHeader('Content-Disposition', 'inline; filename="tooltracker-calibration.ics"');
+        res.send(lines.join('\r\n'));
+    } catch (err) {
+        console.error('Calendar Feed Error:', err);
+        res.status(500).send('Failed to generate calendar feed.');
     }
 });
 

@@ -725,9 +725,9 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuou
  *     toast and keep the modal open for retry.
  *   - SIGNOFF_SAME_PERSON: the sign-off PIN resolved to the same user
  *     as the technician; toast and keep the modal open for retry.
- *   - CAL_EXPIRED / TOOL_IN_TRANSFER: hard stops — toast the server's
- *     message, close the modal, and return to the scan panel (no
- *     retry can fix either).
+ *   - CAL_EXPIRED / CAL_NO_DUE_DATE / CAL_NO_CERTIFICATE / TOOL_IN_TRANSFER:
+ *     hard stops — toast the server's message, close the modal, and
+ *     return to the scan panel (no retry can fix any of these).
  *   - AUDIT_REQUIRED: the tool's home department hasn't been audited
  *     today; close the sign-off modal and show #audit-gate-modal with
  *     one "Audit <name> Now" button per pending toolbox.
@@ -790,7 +790,7 @@ async function submitTransaction(managerPin = null) {
             else if (data.code === 'SIGNOFF_SAME_PERSON') {
                 return showToast(`${icon('circle-x', 'icon-danger')} Sign-off must be from a different person.`);
             }
-            else if (data.code === 'CAL_EXPIRED') {
+            else if (data.code === 'CAL_EXPIRED' || data.code === 'CAL_NO_DUE_DATE' || data.code === 'CAL_NO_CERTIFICATE') {
                 document.getElementById('override-modal').style.display = 'none';
                 return showToast(icon('octagon', 'icon-danger') + ' ' + data.error);
             }

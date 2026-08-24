@@ -157,6 +157,7 @@ function bootstrapAdminUI(user) {
     }
     if (currentAdminWeight < 4) {
         safeSetDisplay('card-manage-depts', 'none');
+        safeSetDisplay('card-calendar-feed', 'none');
     }
     if (currentAdminWeight < 3) {
         safeSetDisplay('card-manage-boxes', 'none');
@@ -613,9 +614,20 @@ async function renderEditableInfraTree() {
                                 const serialDisplay = tool.serial_number
                                     ? `<span style="font-size: 11px; color: var(--text);">S/N: <span style="font-family: monospace;">${tool.serial_number}</span></span>`
                                     : `<span style="font-size: 11px; color: var(--muted); font-style: italic;">No serial set</span>`;
-                                const calDueDisplay = tool.is_calibrated
-                                    ? `<span style="font-size: 11px; color: ${tool.cal_due_date ? 'var(--text)' : 'var(--muted)'};">Cal Due: ${tool.cal_due_date ? tool.cal_due_date.split('T')[0] : 'Unknown'}</span>`
-                                    : `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`;
+                                // A calibrated tool is only actually trustworthy with BOTH a due
+                                // date and a real calibration_records row on file -- matches the
+                                // checkout hard-stop's own rule (see PUT /api/transactions), so
+                                // what blocks a checkout is visible here before anyone scans it.
+                                const calIsExpired = tool.cal_due_date && new Date(tool.cal_due_date) <= new Date(new Date().toDateString());
+                                const calDueDisplay = !tool.is_calibrated
+                                    ? `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`
+                                    : !tool.cal_due_date
+                                        ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No due date</span>`
+                                        : !tool.has_cal_record
+                                            ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No certificate</span>`
+                                            : calIsExpired
+                                                ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Cal expired</span>`
+                                                : `<span style="font-size: 11px; color: var(--text);">Cal Due: ${tool.cal_due_date.split('T')[0]}</span>`;
 
                                 // Whole row opens the entity modal -- there's nothing to expand/collapse
                                 // at this level (tools are leaves), so no separate toggle icon is needed.
@@ -1673,6 +1685,59 @@ function showCredentialsModal({ title, fullName, username, badgeId, pin }) {
     `).join('');
 
     document.getElementById('cred-modal-overlay').style.display = 'flex';
+}
+
+/**
+ * Fills #calendar-feed-body (super_admin only card in the Reports workspace) from
+ * GET /api/settings/calendar-feed-token. Shows setup instructions if CALENDAR_FEED_TOKEN
+ * isn't configured server-side yet, or the actual subscribe URL (built client-side from
+ * location.origin + the token, since the server only knows the token itself) if it is.
+ */
+async function loadCalendarFeedInfo() {
+    const body = document.getElementById('calendar-feed-body');
+    if (!body) return;
+    try {
+        const res = await fetch('/api/settings/calendar-feed-token');
+        if (!res.ok) { body.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+        const data = await res.json();
+        if (!data.configured) {
+            body.innerHTML = `
+                <div style="font-size:12px; color:var(--muted);">
+                    Not set up yet. On the server, set <code>CALENDAR_FEED_TOKEN</code> in <code>.env</code> to a long random value, then restart:
+                    <pre style="background:var(--surface2); padding:8px; border-radius:6px; margin-top:6px; overflow-x:auto;">node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"</pre>
+                </div>`;
+            return;
+        }
+        const url = `${location.origin}/api/calendar/calibration.ics?token=${encodeURIComponent(data.token)}`;
+        body.innerHTML = `
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <input class="form-input" id="calendar-feed-url" value="${url}" readonly style="flex:1; min-width:220px; font-family:monospace; font-size:12px;">
+                <button class="btn-icon" id="calendar-feed-copy-btn" onclick="copyCalendarFeedUrl()" title="Copy link">${icon('copy')}</button>
+                <a class="btn-icon" href="${url}" download="tooltracker-calibration.ics" title="Download snapshot">${icon('download')}</a>
+            </div>
+            <div style="font-size:11px; color:var(--muted); margin-top:8px;">Anyone with this link can view calibration due dates -- treat it like a password. Subscribe from your calendar app via "From URL" for auto-refresh, or use the download button for a one-time import.</div>`;
+    } catch (e) {
+        body.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Copies the calendar feed URL built by loadCalendarFeedInfo() to the clipboard, with a manual-select fallback since the Clipboard API can silently fail outside a secure context. */
+function copyCalendarFeedUrl() {
+    const input = document.getElementById('calendar-feed-url');
+    if (!input) return;
+    const finish = (ok) => {
+        const btn = document.getElementById('calendar-feed-copy-btn');
+        if (!btn) return;
+        const original = btn.innerHTML;
+        btn.innerHTML = ok ? icon('circle-check', 'icon-success') : icon('circle-x', 'icon-danger');
+        setTimeout(() => { btn.innerHTML = original; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(input.value).then(() => finish(true), () => { input.select(); finish(false); });
+    } else {
+        input.select();
+        finish(false);
+    }
 }
 
 /** Copies all fields currently shown in the credentials modal to the clipboard as plain text, with a manual-select fallback since the Clipboard API can silently fail outside a secure context (e.g. plain http:// on the LAN). */
