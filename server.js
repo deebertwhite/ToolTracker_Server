@@ -3165,7 +3165,7 @@ app.get('/api/calendar/calibration.ics', calendarFeedLimiter, async (req, res) =
 
     try {
         const result = await pool.query(
-            `SELECT t.tool_id, t.qr_code, t.name, t.cal_due_date, d.name AS dept_name, b.name AS box_name
+            `SELECT t.tool_id, t.qr_code, t.name, t.cal_due_date::text AS cal_due_date, d.name AS dept_name, b.name AS box_name
              FROM tools t
              LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
              LEFT JOIN toolboxes b ON dr.box_id = b.box_id
