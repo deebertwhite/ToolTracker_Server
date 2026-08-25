@@ -239,6 +239,8 @@ function setupActionScreen() {
         document.getElementById('panel-scanner').style.display = 'block';
         document.getElementById('action-title').innerHTML = pendingMode === 'OUT' ? `${icon('upload')} Scan Tools for Checkout` : `${icon('download')} Scan Tools for Check-in`;
         document.getElementById('btn-submit-action').textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
+        document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'block' : 'none';
+        document.getElementById('kiosk-work-order').value = '';
         focusScanInput('kiosk-scan-input');
     }
 }
@@ -765,7 +767,8 @@ async function submitTransaction(managerPin = null) {
                 pin: activeUser.pin,
                 action: pendingMode === 'OUT' ? 'CHECKOUT_TOOL' : 'CHECKIN_TOOL',
                 qr_codes: batchQueue,
-                manager_pin: managerPin
+                manager_pin: managerPin,
+                work_order: pendingMode === 'OUT' ? document.getElementById('kiosk-work-order').value : undefined
             })
         });
 

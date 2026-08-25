@@ -1687,6 +1687,133 @@ function showCredentialsModal({ title, fullName, username, badgeId, pin }) {
     document.getElementById('cred-modal-overlay').style.display = 'flex';
 }
 
+/** HTML-attribute-safe escape -- work_order is free text typed by anyone at the kiosk (no
+ *  admin approval step), unlike most other strings rendered in this file, so it's the one
+ *  place in the Work Orders card that needs real escaping rather than trusting the source. */
+function escapeHtmlAttr(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
+}
+
+/**
+ * Fills #work-orders-list (Reports workspace) from GET /api/work-orders -- one row per
+ * distinct work_order ever typed in at checkout (see migrations/012_work_orders.sql), newest
+ * activity first. Click delegation on the container (rather than per-row onclick handlers)
+ * specifically because work_order is untrusted free text -- embedding it straight into an
+ * inline onclick="..." string would be a real injection risk; data-wo (HTML-attribute-
+ * escaped) plus a single delegated listener avoids that entirely.
+ */
+async function loadWorkOrders() {
+    const container = document.getElementById('work-orders-list');
+    if (!container) return;
+    try {
+        const res = await fetch('/api/work-orders');
+        const data = await res.json();
+        if (!res.ok || !data.success) { container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        if (data.work_orders.length === 0) {
+            container.innerHTML = `<div style="font-size:12px; color:var(--muted); font-style:italic;">No work orders recorded yet.</div>`;
+            return;
+        }
+
+        container.innerHTML = data.work_orders.map(wo => {
+            const isClosed = !!wo.closed_at;
+            const statusBadge = isClosed
+                ? `<span style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--muted);">CLOSED</span>`
+                : wo.out_count > 0
+                    ? `<span style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--accent);">${wo.out_count} OUT</span>`
+                    : `<span style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--green);">READY TO CLOSE</span>`;
+            const woAttr = escapeHtmlAttr(wo.work_order);
+            return `
+                <div style="border-bottom:1px solid var(--border); padding:10px 0;">
+                    <div class="wo-row" data-wo="${woAttr}" data-action="toggle" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;">
+                        <div>
+                            <div style="font-weight:bold; font-size:13px;">${woAttr}</div>
+                            <div style="font-size:11px; color:var(--muted);">${wo.tool_count} tool(s) -- last activity ${new Date(wo.last_activity).toLocaleDateString()}</div>
+                        </div>
+                        ${statusBadge}
+                    </div>
+                    <div class="wo-detail" data-wo="${woAttr}" style="display:none; margin-top:10px;"></div>
+                </div>`;
+        }).join('');
+
+        if (!container.dataset.delegated) {
+            container.dataset.delegated = 'true';
+            container.addEventListener('click', onWorkOrdersListClick);
+        }
+    } catch (e) {
+        container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Single delegated click handler for #work-orders-list -- routes by data-action (toggle / close / reopen) on the clicked element. */
+function onWorkOrdersListClick(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    const workOrder = el.dataset.wo;
+    if (el.dataset.action === 'toggle') toggleWorkOrderDetail(workOrder);
+    else if (el.dataset.action === 'close') closeWorkOrder(workOrder);
+    else if (el.dataset.action === 'reopen') reopenWorkOrder(workOrder);
+}
+
+/** Expands/collapses one work order's tool list, lazy-loading it from GET /api/work-orders/:wo/tools the first time. */
+async function toggleWorkOrderDetail(workOrder) {
+    const detail = document.querySelector(`.wo-detail[data-wo="${CSS.escape(workOrder)}"]`);
+    if (!detail) return;
+    if (detail.style.display === 'block') { detail.style.display = 'none'; return; }
+
+    detail.style.display = 'block';
+    detail.innerHTML = 'Loading…';
+    try {
+        const res = await fetch(`/api/work-orders/${encodeURIComponent(workOrder)}/tools`);
+        const data = await res.json();
+        if (!res.ok || !data.success) { detail.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        const rows = data.tools.map(t => `
+            <tr>
+                <td style="font-family:monospace; font-size:11px;">${t.qr_code}</td>
+                <td style="font-size:12px;">${t.tool_name}</td>
+                <td style="font-size:11px; color:var(--muted);">${t.checked_out_by || '--'}</td>
+                <td style="font-size:11px; color:var(--muted);">${t.checked_in_at ? new Date(t.checked_in_at).toLocaleString() : '<span style="color:var(--accent);">Still out</span>'}</td>
+            </tr>`).join('');
+
+        const woAttr = escapeHtmlAttr(workOrder);
+        const actionBtn = data.closed_at
+            ? `<button class="btn btn-secondary" style="width:auto; margin-top:10px;" data-action="reopen" data-wo="${woAttr}">${icon('circle-check', 'icon-success')} Reopen</button>`
+            : `<button class="btn btn-secondary" style="width:auto; margin-top:10px;" data-action="close" data-wo="${woAttr}">${icon('circle-check', 'icon-success')} Close Out</button>`;
+
+        detail.innerHTML = `
+            <div class="table-responsive-wrapper">
+                <table style="width:100%; font-size:12px;">
+                    <thead><tr><th>Barcode</th><th>Tool</th><th>Checked Out By</th><th>Returned</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            ${actionBtn}`;
+    } catch (e) {
+        detail.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Closes a work order via POST /api/work-orders/:wo/close, then refreshes the list. Server-side rejects if any tool is still out (409 TOOLS_STILL_OUT). */
+async function closeWorkOrder(workOrder) {
+    const res = await fetch(`/api/work-orders/${encodeURIComponent(workOrder)}/close`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({})
+    });
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Failed to close work order.'));
+    loadWorkOrders();
+}
+
+/** Reopens a closed work order via POST /api/work-orders/:wo/reopen, then refreshes the list. */
+async function reopenWorkOrder(workOrder) {
+    const res = await fetch(`/api/work-orders/${encodeURIComponent(workOrder)}/reopen`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({})
+    });
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Failed to reopen work order.'));
+    loadWorkOrders();
+}
+
 /**
  * Fills #calendar-feed-body (super_admin only card in the Reports workspace) from
  * GET /api/settings/calendar-feed-token. Shows setup instructions if CALENDAR_FEED_TOKEN

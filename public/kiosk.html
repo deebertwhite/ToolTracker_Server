@@ -144,6 +144,14 @@
             <div class="card" id="panel-scanner" style="width: 100%; max-width: 600px;">
                 <div class="section-title" id="action-title"><span class="icon" data-icon="upload"></span> Scanning Tools...</div>
 
+                <!-- Checkout only (hidden for check-in by setupActionScreen()) -- entirely
+                     optional, nothing downstream requires it. Check-in inherits whatever value
+                     was given here automatically from each tool's own last checkout, so there's
+                     no matching field on the check-in side to keep in sync. -->
+                <div class="form-group" id="kiosk-work-order-group">
+                    <input class="form-input" id="kiosk-work-order" placeholder="Work Order (optional)">
+                </div>
+
                 <div class="scan-box" id="scan-zone" onclick="focusScanInput('kiosk-scan-input')">
                     <div style="font-size: 40px; margin-bottom: 10px;"><span class="icon" data-icon="camera"></span></div>
                     <div style="font-weight: 600;" id="scan-prompt">Ready to Scan Tool</div>

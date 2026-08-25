@@ -69,7 +69,7 @@
                 <div class="hub-icon"><span class="icon" data-icon="package"></span></div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
             <!-- Card 4: Reports (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
-            <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports'); loadCalendarFeedInfo();">
+            <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports'); loadCalendarFeedInfo(); loadWorkOrders();">
                 <div class="hub-icon"><span class="icon" data-icon="bar-chart"></span></div><div class="hub-title">Telemetry & Reports</div><div class="hub-desc">Custom queries and data export.</div>
             </div>
         </div>
@@ -324,6 +324,15 @@
                             <tbody id="report-tbody"><tr><td style="text-align: center; color: var(--muted);">Waiting for query...</td></tr></tbody>
                         </table>
                     </div>
+                </div>
+
+                <!-- Grouped from audit_logs.work_order (see migrations/012_work_orders.sql) --
+                     nothing requires it, so this card is empty until someone actually types a
+                     work order in at checkout. Visible to tool_rep+ same as the rest of Reports. -->
+                <div class="card no-print" id="card-work-orders">
+                    <h3 style="margin-bottom: 8px;">Work Orders</h3>
+                    <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Grouped automatically from the Work Order typed in at checkout -- entirely optional, so this is empty until someone uses it. Click a row to see its tools.</p>
+                    <div id="work-orders-list">Loading…</div>
                 </div>
 
                 <!-- super_admin only (server-gated via requireRole(4) on GET /api/settings/calendar-feed-token) -- hidden for everyone else by bootstrapAdminUI's weight<4 block, same as #card-manage-depts. -->

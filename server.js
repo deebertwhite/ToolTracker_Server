@@ -2112,7 +2112,8 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo
 // restriction, any coworker can confirm) and, for checkouts, a same-day AUDIT of the tool's home
 // department (see getAuditGatePendingToolboxes).
 app.post('/api/transactions', authLimiter, async (req, res) => {
-    const { badge_id, pin, action, qr_codes, manager_pin } = req.body;
+    const { badge_id, pin, action, qr_codes, manager_pin, work_order } = req.body;
+    const trimmedWorkOrder = (work_order || '').trim() || null;
     const client = await pool.connect();
 
     try {
@@ -2232,11 +2233,20 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
 
                 // Execute Checkout
                 await client.query("UPDATE tools SET status = 'Out' WHERE tool_id = $1", [tool.tool_id]);
-                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)", [user.user_id, 'CHECKOUT_TOOL', tool.tool_id, logNotes]);
+                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes, work_order) VALUES ($1, $2, $3, $4, $5)", [user.user_id, 'CHECKOUT_TOOL', tool.tool_id, logNotes, trimmedWorkOrder]);
 
             } else if (action === 'CHECKIN_TOOL') {
+                // Inherit the work order from this tool's own last checkout rather than asking
+                // the operator to retype/remember it at check-in -- a return is naturally tied
+                // to whichever job it was taken out for, and that value is already on record.
+                const lastCheckoutRes = await client.query(
+                    "SELECT work_order FROM audit_logs WHERE tool_id = $1 AND action = 'CHECKOUT_TOOL' ORDER BY timestamp DESC LIMIT 1",
+                    [tool.tool_id]
+                );
+                const inheritedWorkOrder = lastCheckoutRes.rows[0]?.work_order || null;
+
                 await client.query("UPDATE tools SET status = 'In', status_reason = NULL WHERE tool_id = $1", [tool.tool_id]);
-                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)", [user.user_id, 'CHECKIN_TOOL', tool.tool_id, logNotes]);
+                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes, work_order) VALUES ($1, $2, $3, $4, $5)", [user.user_id, 'CHECKIN_TOOL', tool.tool_id, logNotes, inheritedWorkOrder]);
             }
         }
 
@@ -2354,6 +2364,124 @@ app.get('/api/audits/today-status', async (req, res) => {
     } catch (err) {
         console.error("Audit Today-Status Error:", err);
         res.status(500).json({ error: 'Failed to fetch audit status.' });
+    }
+});
+
+// ==========================================
+// 7.4 WORK ORDERS (optional, dormant until used -- see migrations/012_work_orders.sql)
+// ==========================================
+// A work order isn't its own entity -- it's a free-text label carried on
+// audit_logs.work_order at checkout (and inherited automatically at check-in from the
+// tool's own last checkout, see POST /api/transactions). These endpoints just group/query
+// that column; nothing here is required for the app's existing checkout/check-in flow to
+// keep working exactly as it always has for anyone who never types a work order in.
+
+// Lists every distinct work order that's ever been used, newest activity first, with a
+// live count of how many of its tools are still out (via each tool's OWN latest checkout --
+// a tool re-issued later under a different work order no longer counts against this one)
+// and its open/closed state. No role check -- same visibility level as the dashboard.
+app.get('/api/work-orders', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            WITH latest_checkout AS (
+                SELECT DISTINCT ON (tool_id) tool_id, work_order
+                FROM audit_logs
+                WHERE action = 'CHECKOUT_TOOL'
+                ORDER BY tool_id, timestamp DESC
+            )
+            SELECT
+                al.work_order,
+                COUNT(DISTINCT al.tool_id) AS tool_count,
+                COUNT(DISTINCT CASE WHEN t.status = 'Out' AND lc.work_order = al.work_order THEN al.tool_id END) AS out_count,
+                MAX(al.timestamp) AS last_activity,
+                woc.closed_at, woc.note AS close_note, u.full_name AS closed_by_name
+            FROM audit_logs al
+            JOIN tools t ON al.tool_id = t.tool_id
+            LEFT JOIN latest_checkout lc ON lc.tool_id = t.tool_id
+            LEFT JOIN work_order_closures woc ON woc.work_order = al.work_order
+            LEFT JOIN users u ON woc.closed_by_user_id = u.user_id
+            WHERE al.action = 'CHECKOUT_TOOL' AND al.work_order IS NOT NULL
+            GROUP BY al.work_order, woc.closed_at, woc.note, u.full_name
+            ORDER BY MAX(al.timestamp) DESC
+        `);
+        res.json({ success: true, work_orders: result.rows });
+    } catch (err) {
+        console.error('Work Orders List Error:', err);
+        res.status(500).json({ error: 'Failed to fetch work orders.' });
+    }
+});
+
+// Every tool ever checked out under one work order, most recent activity first, with who
+// checked it out/in and when, and its current status.
+app.get('/api/work-orders/:work_order/tools', async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT DISTINCT ON (al.tool_id)
+                t.tool_id, t.qr_code, t.name AS tool_name, t.status AS current_status,
+                al.timestamp AS checked_out_at, outUser.full_name AS checked_out_by,
+                inLog.timestamp AS checked_in_at, inUser.full_name AS checked_in_by
+             FROM audit_logs al
+             JOIN tools t ON al.tool_id = t.tool_id
+             LEFT JOIN users outUser ON al.user_id = outUser.user_id
+             LEFT JOIN LATERAL (
+                 SELECT timestamp, user_id FROM audit_logs
+                 WHERE tool_id = al.tool_id AND action = 'CHECKIN_TOOL' AND work_order = al.work_order AND timestamp >= al.timestamp
+                 ORDER BY timestamp ASC LIMIT 1
+             ) inLog ON true
+             LEFT JOIN users inUser ON inLog.user_id = inUser.user_id
+             WHERE al.action = 'CHECKOUT_TOOL' AND al.work_order = $1
+             ORDER BY al.tool_id, al.timestamp DESC`,
+            [req.params.work_order]
+        );
+        const closureRes = await pool.query('SELECT closed_at, note FROM work_order_closures WHERE work_order = $1', [req.params.work_order]);
+        res.json({ success: true, tools: result.rows, closed_at: closureRes.rows[0]?.closed_at || null });
+    } catch (err) {
+        console.error('Work Order Tools Error:', err);
+        res.status(500).json({ error: 'Failed to fetch work order tools.' });
+    }
+});
+
+// Closes a work order -- requires every tool checked out under it (by its OWN latest
+// checkout) to currently be back. Requires tool_rep+ (getRoleWeight >= 2), matching the
+// threshold for other day-to-day inventory actions.
+app.post('/api/work-orders/:work_order/close', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { note } = req.body;
+    try {
+        const openRes = await pool.query(
+            `WITH latest_checkout AS (
+                SELECT DISTINCT ON (tool_id) tool_id, work_order
+                FROM audit_logs WHERE action = 'CHECKOUT_TOOL'
+                ORDER BY tool_id, timestamp DESC
+             )
+             SELECT t.qr_code, t.name FROM latest_checkout lc
+             JOIN tools t ON t.tool_id = lc.tool_id
+             WHERE lc.work_order = $1 AND t.status = 'Out'`,
+            [req.params.work_order]
+        );
+        if (openRes.rows.length > 0) {
+            return res.status(409).json({ error: `Cannot close -- ${openRes.rows.length} tool(s) still out (e.g. ${openRes.rows[0].name}).`, code: 'TOOLS_STILL_OUT' });
+        }
+        await pool.query(
+            `INSERT INTO work_order_closures (work_order, note, closed_by_user_id) VALUES ($1, $2, $3)
+             ON CONFLICT (work_order) DO UPDATE SET note = $2, closed_by_user_id = $3, closed_at = CURRENT_TIMESTAMP`,
+            [req.params.work_order, note || null, req.authUser.user_id]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Work Order Close Error:', err);
+        res.status(500).json({ error: 'Failed to close work order.' });
+    }
+});
+
+// Reopens a closed work order (deleting the closure row is what "closed" means -- see
+// migrations/012_work_orders.sql). Same threshold as closing.
+app.post('/api/work-orders/:work_order/reopen', requireFetchHeader, requireRole(2), async (req, res) => {
+    try {
+        await pool.query('DELETE FROM work_order_closures WHERE work_order = $1', [req.params.work_order]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Work Order Reopen Error:', err);
+        res.status(500).json({ error: 'Failed to reopen work order.' });
     }
 });
 
