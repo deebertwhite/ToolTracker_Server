@@ -676,15 +676,26 @@ async function openOrExtendTraceInvestigation(client, { toolId, reason, windowSt
  * drift into two slightly different copies either.
  */
 async function triggerFailedCalibration(client, { toolId, calDate, provider, certificateNumber, calId, userId }) {
+    // Ordered by recorded_at (a real timestamp), not cal_date (a bare DATE with no
+    // sub-day precision) -- a Pass and a Fail logged for the same tool on the same calendar
+    // day (e.g. an initial failed attempt, adjusted, and re-calibrated same-day) would
+    // otherwise be unorderable by cal_date alone, since neither is strictly "less than" the
+    // other. recorded_at (when each record was actually entered) is always distinct.
     const prevPassRes = await client.query(
-        `SELECT cal_date FROM calibration_records WHERE tool_id = $1 AND result = 'Pass' AND cal_date < $2 ORDER BY cal_date DESC LIMIT 1`,
-        [toolId, calDate]
+        `SELECT cal_date FROM calibration_records
+         WHERE tool_id = $1 AND result = 'Pass'
+           AND recorded_at < (SELECT recorded_at FROM calibration_records WHERE cal_id = $2)
+         ORDER BY recorded_at DESC LIMIT 1`,
+        [toolId, calId]
     );
     return openOrExtendTraceInvestigation(client, {
         toolId,
         reason: `Calibration failed ${calDate} (${provider}, cert ${certificateNumber})`,
         windowStart: prevPassRes.rows[0]?.cal_date || null,
-        windowEnd: calDate,
+        // End-of-day, not the bare cal_date (which would default to midnight) -- audit_logs
+        // timestamps have real time-of-day precision, so a bare-midnight upper bound would
+        // exclude every checkout that happened LATER that same day, i.e. nearly all of them.
+        windowEnd: `${calDate}T23:59:59`,
         triggeringCalId: calId,
         openedByUserId: userId
     });
