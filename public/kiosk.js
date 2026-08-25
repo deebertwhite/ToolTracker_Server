@@ -727,9 +727,9 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuou
  *     toast and keep the modal open for retry.
  *   - SIGNOFF_SAME_PERSON: the sign-off PIN resolved to the same user
  *     as the technician; toast and keep the modal open for retry.
- *   - CAL_EXPIRED / CAL_NO_DUE_DATE / CAL_NO_CERTIFICATE / TOOL_IN_TRANSFER:
- *     hard stops — toast the server's message, close the modal, and
- *     return to the scan panel (no retry can fix any of these).
+ *   - CAL_EXPIRED / CAL_NO_DUE_DATE / CAL_NO_CERTIFICATE / CAL_INVESTIGATION_OPEN /
+ *     TOOL_IN_TRANSFER: hard stops — toast the server's message, close
+ *     the modal, and return to the scan panel (no retry can fix any of these).
  *   - AUDIT_REQUIRED: the tool's home department hasn't been audited
  *     today; close the sign-off modal and show #audit-gate-modal with
  *     one "Audit <name> Now" button per pending toolbox.
@@ -793,7 +793,7 @@ async function submitTransaction(managerPin = null) {
             else if (data.code === 'SIGNOFF_SAME_PERSON') {
                 return showToast(`${icon('circle-x', 'icon-danger')} Sign-off must be from a different person.`);
             }
-            else if (data.code === 'CAL_EXPIRED' || data.code === 'CAL_NO_DUE_DATE' || data.code === 'CAL_NO_CERTIFICATE') {
+            else if (data.code === 'CAL_EXPIRED' || data.code === 'CAL_NO_DUE_DATE' || data.code === 'CAL_NO_CERTIFICATE' || data.code === 'CAL_INVESTIGATION_OPEN') {
                 document.getElementById('override-modal').style.display = 'none';
                 return showToast(icon('octagon', 'icon-danger') + ' ' + data.error);
             }
@@ -1072,6 +1072,7 @@ function openCalCompleteModal(transferId) {
     document.getElementById('cal-cert-number').value = '';
     document.getElementById('cal-standard').value = '';
     document.getElementById('cal-notes').value = '';
+    document.getElementById('cal-result').value = 'Pass';
     document.getElementById('cal-complete-modal').style.display = 'flex';
 }
 
@@ -1090,6 +1091,7 @@ async function submitCalibrationComplete() {
     const certificateNumber = document.getElementById('cal-cert-number').value.trim();
     const standardUsed = document.getElementById('cal-standard').value.trim();
     const notes = document.getElementById('cal-notes').value.trim();
+    const result = document.getElementById('cal-result').value;
 
     if (!lastCalDate || !calDueDate) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration date and due date are both required.`);
     if (!provider) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration provider/lab is required.`);
@@ -1107,13 +1109,16 @@ async function submitCalibrationComplete() {
                 provider,
                 certificate_number: certificateNumber,
                 standard_used: standardUsed || null,
-                notes: notes || null
+                notes: notes || null,
+                result
             })
         });
         const data = await res.json();
         document.getElementById('cal-complete-modal').style.display = 'none';
         if (!res.ok) {
             showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to complete calibration.'));
+        } else if (result === 'Fail') {
+            showToast(`${icon('triangle-alert', 'icon-warning')} Calibration FAILED — tool is blocked from checkout and a trace-back investigation was opened.`);
         } else {
             showToast(`${icon('circle-check', 'icon-success')} Calibration logged — tool is on its way back.`);
         }

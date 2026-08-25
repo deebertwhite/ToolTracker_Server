@@ -356,6 +356,14 @@
             <div class="form-group"><label class="form-label">Certificate / Reference Number</label><input class="form-input" id="cal-cert-number" placeholder="e.g. CERT-2026-04231"></div>
             <div class="form-group"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-standard" placeholder="e.g. NIST-traceable"></div>
             <div class="form-group"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-notes"></div>
+            <div class="form-group">
+                <label class="form-label">Result</label>
+                <select class="form-input" id="cal-result">
+                    <option value="Pass">Pass</option>
+                    <option value="Fail">Fail -- out of tolerance</option>
+                </select>
+                <div style="font-size: 12px; color: var(--muted); margin-top: 4px;">A Fail blocks this tool from checkout immediately and opens a trace-back investigation for every task it did since its last passing calibration.</div>
+            </div>
 
             <div style="display: flex; gap: 10px; margin-top: 10px;">
                 <button class="btn btn-secondary" onclick="document.getElementById('cal-complete-modal').style.display='none'">Cancel</button>

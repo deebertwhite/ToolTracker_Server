@@ -135,7 +135,7 @@ function toggleTreeVisibility(containerId, headerElement) {
  * UI the current role isn't entitled to:
  *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
- *     #card-manage-users, and #card-inventory-import (bulk CSV import).
+ *     #card-manage-users, #card-inventory-import (bulk CSV import), and #card-trace-investigations.
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Populates the Provision New User form's role dropdown with options capped at the viewer's
  * own weight (inclusive) -- matches POST /api/users, which now allows creating a peer, e.g. a
@@ -164,6 +164,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-manage-drawers', 'none');
         safeSetDisplay('card-manage-users', 'none');
         safeSetDisplay('card-inventory-import', 'none');
+        safeSetDisplay('card-trace-investigations', 'none');
     }
 
     // Options capped at the viewer's own weight (inclusive) -- matches the server's
@@ -619,7 +620,9 @@ async function renderEditableInfraTree() {
                                 // checkout hard-stop's own rule (see PUT /api/transactions), so
                                 // what blocks a checkout is visible here before anyone scans it.
                                 const calIsExpired = tool.cal_due_date && new Date(tool.cal_due_date) <= new Date(new Date().toDateString());
-                                const calDueDisplay = !tool.is_calibrated
+                                const calDueDisplay = tool.has_open_investigation
+                                    ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Investigation open</span>`
+                                    : !tool.is_calibrated
                                     ? `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`
                                     : !tool.cal_due_date
                                         ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No due date</span>`
@@ -1127,6 +1130,14 @@ function openEntityModal(type, id) {
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Certificate / Reference #</label><input class="form-input" id="em-cal-cert" placeholder="e.g. CERT-2026-04231"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-standard" placeholder="e.g. NIST-traceable"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-notes"></div>
+                    <div class="form-group" style="margin-bottom:10px;">
+                        <label class="form-label">Result</label>
+                        <select class="form-select" id="em-cal-result">
+                            <option value="Pass">Pass</option>
+                            <option value="Fail">Fail -- out of tolerance</option>
+                        </select>
+                        <div style="font-size:11px; color:var(--muted); margin-top:4px;">A Fail blocks this tool from checkout immediately and opens a trace-back investigation for every task it did since its last passing calibration.</div>
+                    </div>
                     <div style="display:flex; gap:8px;">
                         <button type="button" class="btn btn-secondary" style="width:auto;" onclick="toggleCalLogForm(false)">Cancel</button>
                         <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitCalLogForm('${entity.tool_id}', '${entity.qr_code}')">Save Record</button>
@@ -1159,6 +1170,20 @@ function openEntityModal(type, id) {
                         <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitIncidentResolve('${entity.tool_id}', '${entity.qr_code}')">Submit Resolution</button>
                     </div>
                 </div>
+            </div>
+        `;
+        // #em-trace-investigations-list is populated asynchronously by
+        // loadTraceInvestigations() below -- a compact summary only (which investigations
+        // exist for this tool and their review progress); actually recording review outcomes
+        // and closing/overriding happens from the shop-wide Trace-Back Investigations card in
+        // Reports (see loadTraceInvestigationsList()/openTraceInvestigationDetail()), same
+        // split as Work Orders. Shown for every tool, not just calibrated ones -- a failed
+        // calibration auto-opens one, but the manual "+ Open Investigation" path is just as
+        // useful for a non-calibrated tool suspected of a defect (e.g. a customer complaint).
+        readHtml += `
+            <div id="em-trace-investigations-container" style="margin-top:15px;">
+                <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Trace-Back Investigations</div>
+                <div id="em-trace-investigations-list" style="font-size:12px;color:var(--muted);margin-top:4px;">Loading...</div>
             </div>
         `;
 
@@ -1327,7 +1352,7 @@ function openEntityModal(type, id) {
     toggleModalEditMode(false);
     document.getElementById('entity-modal-overlay').style.display = 'flex';
 
-    if (type === 'tool') { loadCalibrationHistory(entity.tool_id); loadIncidentHistory(entity.tool_id); }
+    if (type === 'tool') { loadCalibrationHistory(entity.tool_id); loadIncidentHistory(entity.tool_id); loadTraceInvestigations(entity.tool_id); }
     if (type === 'drawer' && entity.photo_url) { renderPositionMap(entity); }
 }
 
@@ -1453,6 +1478,7 @@ async function loadCalibrationHistory(toolId) {
             <div style="padding:8px 0; border-bottom:1px solid var(--border);">
                 <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text);">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
                 <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
+                ${r.result === 'Fail' ? `<div style="font-size:11px; color:var(--red); font-weight:bold; margin-top:2px;">${icon('circle-x', 'icon-danger')} FAILED -- out of tolerance</div>` : ''}
                 ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
                 ${r.notes ? `<div style="font-size:11px;">${r.notes}</div>` : ''}
                 <div style="font-size:10px; margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
@@ -1473,6 +1499,7 @@ function toggleCalLogForm(show) {
         document.getElementById('em-cal-cert').value = '';
         document.getElementById('em-cal-standard').value = '';
         document.getElementById('em-cal-notes').value = '';
+        document.getElementById('em-cal-result').value = 'Pass';
     }
 }
 
@@ -1491,6 +1518,7 @@ async function submitCalLogForm(toolId, qrCode) {
     const certificateNumber = document.getElementById('em-cal-cert').value.trim();
     const standardUsed = document.getElementById('em-cal-standard').value.trim();
     const notes = document.getElementById('em-cal-notes').value.trim();
+    const result = document.getElementById('em-cal-result').value;
 
     if (!calDate || !dueDate) return alert('⚠️ Calibration date and due date are both required.');
     if (!provider || !certificateNumber) return alert('⚠️ Calibration provider and certificate/reference number are both required.');
@@ -1499,7 +1527,7 @@ async function submitCalLogForm(toolId, qrCode) {
         const res = await fetch(`/api/tools/${toolId}/calibration-history`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
-            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, notes: notes || null })
+            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, notes: notes || null, result })
         });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to log calibration record.')); }
         await renderEditableInfraTree();
@@ -1812,6 +1840,263 @@ async function reopenWorkOrder(workOrder) {
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Failed to reopen work order.'));
     loadWorkOrders();
+}
+
+/**
+ * Fills #em-trace-investigations-list (tool modal, every tool) from
+ * GET /api/tools/:id/trace-investigations -- a compact read-only summary (reason, window,
+ * status, review progress) plus a link to work each one from the shop-wide Trace-Back
+ * Investigations card in Reports, and a "+ Open Investigation" button for opening one
+ * manually (e.g. a customer complaint) rather than only via a failed calibration.
+ */
+async function loadTraceInvestigations(toolId) {
+    const listEl = document.getElementById('em-trace-investigations-list');
+    if (!listEl) return;
+    try {
+        const res = await fetch(`/api/tools/${toolId}/trace-investigations`);
+        const data = await res.json();
+        if (!res.ok) { listEl.innerHTML = `<span style="color:var(--red);">Failed to load.</span>`; return; }
+
+        const rows = data.investigations.map(inv => `
+                <div style="padding:6px 0; border-bottom:1px solid var(--border); font-size:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                        <span>${escapeHtmlAttr(inv.reason)}</span>${renderTraceStatusBadge(inv)}
+                    </div>
+                    <div style="font-size:10px; color:var(--muted); margin-top:2px;">Opened ${new Date(inv.created_at).toLocaleDateString()} by ${inv.opened_by_name || 'Unknown'} -- see Reports &gt; Trace-Back Investigations to work it.</div>
+                </div>`).join('');
+
+        listEl.innerHTML = `
+            ${rows || `<div style="font-style:italic;">No investigations for this tool.</div>`}
+            <button type="button" class="btn-icon" style="width:auto; padding:4px 10px; font-size:11px; margin-top:8px;" onclick="toggleTraceOpenForm(true)">${icon('plus')} Open Investigation</button>
+            <div id="em-trace-open-form" style="display:none; margin-top:10px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Reason</label><input class="form-input" id="em-trace-reason" placeholder="e.g. Customer complaint about torque accuracy"></div>
+                <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom:10px;">
+                    <div class="form-group" style="margin:0;"><label class="form-label">Window Start <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input type="date" class="form-input" id="em-trace-start"></div>
+                    <div class="form-group" style="margin:0;"><label class="form-label">Window End</label><input type="date" class="form-input" id="em-trace-end" value="${new Date().toISOString().slice(0, 10)}"></div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button type="button" class="btn btn-secondary" style="width:auto;" onclick="toggleTraceOpenForm(false)">Cancel</button>
+                    <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitTraceOpenForm('${toolId}')">Open</button>
+                </div>
+            </div>`;
+    } catch (e) {
+        listEl.innerHTML = `<span style="color:var(--red);">Failed to load.</span>`;
+    }
+}
+
+/** Shows/hides the "+ Open Investigation" inline form in the tool modal. */
+function toggleTraceOpenForm(show) {
+    const form = document.getElementById('em-trace-open-form');
+    if (form) form.style.display = show ? 'block' : 'none';
+}
+
+/** Submits the manual "Open Investigation" form to POST /api/tools/:id/trace-investigations, then reloads the tool's investigation list and the shop-wide Reports card. */
+async function submitTraceOpenForm(toolId) {
+    const reason = document.getElementById('em-trace-reason').value.trim();
+    const windowStart = document.getElementById('em-trace-start').value;
+    const windowEnd = document.getElementById('em-trace-end').value;
+    if (!reason) return alert('⚠️ A reason is required.');
+
+    const res = await fetch(`/api/tools/${toolId}/trace-investigations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+        body: JSON.stringify({ reason, window_start: windowStart || null, window_end: windowEnd ? `${windowEnd}T23:59:59` : null })
+    });
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Failed to open investigation.'));
+    loadTraceInvestigations(toolId);
+    loadTraceInvestigationsList();
+}
+
+/**
+ * Renders the small OPEN/CLOSED pill shared by both the tool modal's compact summary
+ * (loadTraceInvestigations) and the Reports card's list/detail views -- one source of truth
+ * for the markup so all three stay visually consistent. `elId`, if given, is stamped onto the
+ * span so a later refresh-in-place (see renderTraceInvestigationDetail) can find and replace
+ * just this badge without re-rendering the whole list.
+ */
+function renderTraceStatusBadge(inv, elId) {
+    const idAttr = elId ? ` id="${elId}"` : '';
+    return inv.status === 'OPEN'
+        ? `<span${idAttr} style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--accent);">OPEN -- ${inv.reviewed_count}/${inv.review_count} reviewed</span>`
+        : `<span${idAttr} style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--muted);">CLOSED${inv.overridden ? ' (OVERRIDE)' : ''}</span>`;
+}
+
+/**
+ * Fills #trace-investigations-list (Reports workspace) from GET /api/trace-investigations --
+ * one row per investigation, newest first, across every tool. Same delegated-click pattern as
+ * Work Orders. `reason` is escaped (unlike opened_by_name/closed_by_name, which come from
+ * users.full_name) because a manually-opened investigation's reason is free text typed into
+ * this form, same trust tier as work_order.
+ */
+async function loadTraceInvestigationsList() {
+    const container = document.getElementById('trace-investigations-list');
+    if (!container) return;
+    try {
+        const res = await fetch('/api/trace-investigations');
+        const data = await res.json();
+        if (!res.ok || !data.success) { container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        if (data.investigations.length === 0) {
+            container.innerHTML = `<div style="font-size:12px; color:var(--muted); font-style:italic;">No investigations opened yet.</div>`;
+            return;
+        }
+
+        container.innerHTML = data.investigations.map(inv => `
+                <div style="border-bottom:1px solid var(--border); padding:10px 0;">
+                    <div class="ti-row" data-id="${inv.investigation_id}" data-action="toggle" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer; gap:8px;">
+                        <div>
+                            <div style="font-weight:bold; font-size:13px;">${inv.tool_name} <span style="color:var(--muted); font-family:monospace; font-weight:normal;">(${inv.qr_code})</span></div>
+                            <div style="font-size:11px; color:var(--muted);">${escapeHtmlAttr(inv.reason)}</div>
+                        </div>
+                        ${renderTraceStatusBadge(inv, `ti-badge-${inv.investigation_id}`)}
+                    </div>
+                    <div class="ti-detail" data-id="${inv.investigation_id}" style="display:none; margin-top:10px;"></div>
+                </div>`).join('');
+
+        if (!container.dataset.delegated) {
+            container.dataset.delegated = 'true';
+            container.addEventListener('click', onTraceInvestigationsListClick);
+        }
+    } catch (e) {
+        container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Single delegated click handler for #trace-investigations-list -- routes by data-action on the clicked element. */
+function onTraceInvestigationsListClick(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    const id = el.dataset.id;
+    if (el.dataset.action === 'toggle') toggleTraceInvestigationDetail(id);
+    else if (el.dataset.action === 'save-review') saveTraceReview(id, el.dataset.reviewId);
+    else if (el.dataset.action === 'close') closeTraceInvestigation(id);
+    else if (el.dataset.action === 'override') overrideTraceInvestigation(id);
+    else if (el.dataset.action === 'reopen') reopenTraceInvestigation(id);
+}
+
+/** Expands/collapses one investigation's full detail, rendering it via renderTraceInvestigationDetail() the first time it's shown. */
+async function toggleTraceInvestigationDetail(id) {
+    const detail = document.querySelector(`.ti-detail[data-id="${id}"]`);
+    if (!detail) return;
+    if (detail.style.display === 'block') { detail.style.display = 'none'; return; }
+    detail.style.display = 'block';
+    await renderTraceInvestigationDetail(id);
+}
+
+/**
+ * Fetches and renders one investigation's full detail (every review row + close/override
+ * controls) from GET /api/trace-investigations/:id into its already-visible .ti-detail
+ * element, and refreshes that row's status-pill badge in place from the same response.
+ * Used both to populate the panel on first expand (toggleTraceInvestigationDetail) and to
+ * refresh it after a save/close/override/reopen action -- re-fetching just this one
+ * investigation instead of the whole shop-wide list keeps the panel open and in place rather
+ * than collapsing everything mid-review.
+ */
+async function renderTraceInvestigationDetail(id) {
+    const detail = document.querySelector(`.ti-detail[data-id="${id}"]`);
+    if (!detail) return;
+    detail.innerHTML = 'Loading…';
+    try {
+        const res = await fetch(`/api/trace-investigations/${id}`);
+        const data = await res.json();
+        if (!res.ok || !data.success) { detail.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        const inv = data.investigation;
+        const badgeEl = document.getElementById(`ti-badge-${id}`);
+        if (badgeEl) badgeEl.outerHTML = renderTraceStatusBadge(
+            { status: inv.status, overridden: inv.overridden, reviewed_count: data.reviews.filter(r => r.outcome !== 'PENDING').length, review_count: data.reviews.length },
+            `ti-badge-${id}`
+        );
+        const outcomeOptions = (current) => ['PENDING', 'IN_TOLERANCE', 'OUT_OF_TOLERANCE', 'NOT_APPLICABLE']
+            .map(o => `<option value="${o}" ${o === current ? 'selected' : ''}>${o.replace(/_/g, ' ')}</option>`).join('');
+
+        const reviewRows = data.reviews.map(r => `
+            <tr data-review-id="${r.review_id}">
+                <td style="font-size:11px; color:var(--muted);">${new Date(r.used_at).toLocaleDateString()}</td>
+                <td style="font-size:11px;">${r.work_order ? escapeHtmlAttr(r.work_order) : '--'}</td>
+                <td style="font-size:11px; color:var(--muted);">${r.custodian_name || 'Unknown'}</td>
+                <td><select class="form-select" style="font-size:11px; padding:4px;" data-field="outcome">${outcomeOptions(r.outcome)}</select></td>
+                <td><input class="form-input" style="font-size:11px; padding:4px;" data-field="notes" value="${r.notes ? escapeHtmlAttr(r.notes) : ''}" placeholder="Notes"></td>
+                <td><button type="button" class="btn-icon" style="width:auto; padding:4px 8px; font-size:11px;" data-action="save-review" data-id="${inv.investigation_id}" data-review-id="${r.review_id}">Save</button></td>
+            </tr>`).join('');
+
+        const closedBlock = inv.status === 'CLOSED'
+            ? `<div style="margin-top:10px; font-size:12px;">
+                    <strong>Conclusion:</strong> ${inv.conclusion || ''}<br>
+                    <span style="color:var(--muted);">Closed ${new Date(inv.closed_at).toLocaleDateString()} by ${inv.closed_by_name || 'Unknown'}${inv.overridden ? ` -- OVERRIDE: ${inv.override_reason || ''}` : ''}</span>
+                    <div style="margin-top:8px;"><button type="button" class="btn btn-secondary" style="width:auto;" data-action="reopen" data-id="${inv.investigation_id}">Reopen</button></div>
+               </div>`
+            : `<div style="margin-top:12px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
+                    <div class="form-group" style="margin-bottom:8px;"><label class="form-label">Conclusion</label><input class="form-input" id="ti-conclusion-${inv.investigation_id}" placeholder="e.g. All tasks re-checked, none out of tolerance"></div>
+                    <div class="form-group" style="margin-bottom:8px;"><label class="form-label">Override Reason <span style="color:var(--muted);text-transform:none;">(only needed to force-close with reviews still pending)</span></label><input class="form-input" id="ti-override-reason-${inv.investigation_id}" placeholder="e.g. Low-risk tasks, supervisor waived remaining review"></div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-primary" style="width:auto;" data-action="close" data-id="${inv.investigation_id}">Close Investigation</button>
+                        <button type="button" class="btn btn-secondary" style="width:auto;" data-action="override" data-id="${inv.investigation_id}">Override &amp; Force-Close</button>
+                    </div>
+               </div>`;
+
+        detail.innerHTML = `
+            <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">Suspect window: ${inv.window_start ? new Date(inv.window_start).toLocaleDateString() : 'tool creation'} &rarr; ${new Date(inv.window_end).toLocaleDateString()}</div>
+            <div class="table-responsive-wrapper">
+                <table style="width:100%; font-size:11px;">
+                    <thead><tr><th>Used</th><th>Work Order</th><th>Custodian</th><th>Outcome</th><th>Notes</th><th></th></tr></thead>
+                    <tbody>${reviewRows || '<tr><td colspan="6" style="color:var(--muted); font-style:italic;">No checkouts in this window.</td></tr>'}</tbody>
+                </table>
+            </div>
+            ${closedBlock}`;
+    } catch (e) {
+        detail.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/**
+ * Shared by every write action below (save review / close / override / reopen): POSTs, alerts
+ * the server's error on failure, and on success re-renders just this one investigation's
+ * detail panel in place (see renderTraceInvestigationDetail) rather than reloading and
+ * re-rendering the entire shop-wide list -- which would also collapse every panel the
+ * supervisor had open, including the one they were mid-review on.
+ */
+async function postTraceAction(id, url, body, fallbackMsg) {
+    const res = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+        body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || fallbackMsg));
+    renderTraceInvestigationDetail(id);
+}
+
+/** Saves one review row's outcome/notes, reading the outcome/notes inputs from the same table row. */
+async function saveTraceReview(id, reviewId) {
+    const row = document.querySelector(`tr[data-review-id="${reviewId}"]`);
+    if (!row) return;
+    const outcome = row.querySelector('[data-field="outcome"]').value;
+    const notes = row.querySelector('[data-field="notes"]').value.trim();
+    if (outcome === 'PENDING') return alert('⚠️ Select an outcome before saving.');
+    postTraceAction(id, `/api/trace-investigations/${id}/reviews/${reviewId}`, { outcome, notes: notes || null }, 'Failed to save review.');
+}
+
+/** Closes an investigation -- server rejects (409) if any review is still PENDING. */
+async function closeTraceInvestigation(id) {
+    const conclusion = document.getElementById(`ti-conclusion-${id}`).value.trim();
+    if (!conclusion) return alert('⚠️ A closing conclusion is required.');
+    postTraceAction(id, `/api/trace-investigations/${id}/close`, { conclusion }, 'Failed to close investigation.');
+}
+
+/** Force-closes an investigation regardless of pending reviews. */
+async function overrideTraceInvestigation(id) {
+    const conclusion = document.getElementById(`ti-conclusion-${id}`).value.trim();
+    const overrideReason = document.getElementById(`ti-override-reason-${id}`).value.trim();
+    if (!conclusion) return alert('⚠️ A closing conclusion is required.');
+    if (!overrideReason) return alert('⚠️ A reason for overriding pending reviews is required.');
+    if (!confirm('Force-close this investigation with reviews still pending?')) return;
+    postTraceAction(id, `/api/trace-investigations/${id}/override`, { conclusion, override_reason: overrideReason }, 'Failed to override investigation.');
+}
+
+/** Reopens a closed investigation. */
+async function reopenTraceInvestigation(id) {
+    postTraceAction(id, `/api/trace-investigations/${id}/reopen`, {}, 'Failed to reopen investigation.');
 }
 
 /**

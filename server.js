@@ -595,6 +595,101 @@ function duplicateSerialErrorMessage(existing) {
     return `Serial number is already registered to "${existing.name}" (${existing.qr_code}).${hint}`;
 }
 
+/**
+ * Opens a sub-tolerance trace-back investigation for a tool (or extends the one already
+ * open, if any -- at most one OPEN investigation per tool at a time, see
+ * migrations/013_trace_investigations.sql), then auto-populates it with a review row for
+ * every checkout of that tool inside the suspect window that doesn't already have one.
+ *
+ * Called from within the same transaction as the calibration record that triggered it (both
+ * calibration-recording endpoints call this on a Fail result), so a failed calibration and
+ * its investigation either both commit or both roll back together. Also usable for a
+ * manually-opened investigation, which is why the merge branch below folds a second trigger
+ * into the same investigation instead of erroring or forking a duplicate.
+ */
+async function openOrExtendTraceInvestigation(client, { toolId, reason, windowStart, windowEnd, triggeringCalId, openedByUserId }) {
+    const existing = await client.query(
+        `SELECT investigation_id, window_start, window_end FROM trace_investigations WHERE tool_id = $1 AND status = 'OPEN'`,
+        [toolId]
+    );
+
+    let investigationId, finalWindowStart, finalWindowEnd;
+    if (existing.rows.length > 0) {
+        const row = existing.rows[0];
+        investigationId = row.investigation_id;
+        // Merged to the widest envelope across every trigger this investigation has ever
+        // seen, NOT just this call's own window -- and the review-seeding query below uses
+        // that same merged envelope, so a second trigger with a disjoint range (e.g. a manual
+        // open folded into an existing auto-opened investigation) can't leave a silent gap
+        // between the two windows that never gets seeded.
+        finalWindowStart = (!row.window_start || (windowStart && new Date(windowStart) < new Date(row.window_start))) ? windowStart : row.window_start;
+        finalWindowEnd = new Date(windowEnd) > new Date(row.window_end) ? windowEnd : row.window_end;
+        await client.query(
+            `UPDATE trace_investigations SET window_start = $1, window_end = $2, triggering_cal_id = COALESCE($3, triggering_cal_id)
+             WHERE investigation_id = $4`,
+            [finalWindowStart, finalWindowEnd, triggeringCalId || null, investigationId]
+        );
+    } else {
+        finalWindowStart = windowStart || null;
+        finalWindowEnd = windowEnd;
+        const insertRes = await client.query(
+            `INSERT INTO trace_investigations (tool_id, triggering_cal_id, reason, window_start, window_end, opened_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING investigation_id`,
+            [toolId, triggeringCalId || null, reason, finalWindowStart, finalWindowEnd, openedByUserId]
+        );
+        investigationId = insertRes.rows[0].investigation_id;
+    }
+
+    // Each review is seeded from one checkout in the (merged) window, with its return time
+    // (the next check-in after it, if any) captured alongside so the reviewer can see the
+    // full loan at a glance without cross-referencing audit_logs separately. One INSERT...
+    // SELECT rather than a query-then-loop-inserting-one-row-at-a-time -- a long suspect
+    // window can mean dozens of checkouts, and this all runs inside the same transaction as
+    // the calibration record that triggered it.
+    await client.query(
+        `INSERT INTO trace_reviews (investigation_id, audit_log_id, work_order, custodian_name, used_at, returned_at)
+         SELECT $4, al.log_id, al.work_order, u.full_name, al.timestamp, inLog.timestamp
+         FROM audit_logs al
+         LEFT JOIN users u ON al.user_id = u.user_id
+         LEFT JOIN LATERAL (
+             SELECT timestamp FROM audit_logs
+             WHERE tool_id = al.tool_id AND action = 'CHECKIN_TOOL' AND timestamp >= al.timestamp
+             ORDER BY timestamp ASC LIMIT 1
+         ) inLog ON true
+         WHERE al.tool_id = $1 AND al.action = 'CHECKOUT_TOOL'
+           AND al.timestamp <= $2
+           AND ($3::timestamp IS NULL OR al.timestamp >= $3)
+           AND NOT EXISTS (SELECT 1 FROM trace_reviews tr WHERE tr.investigation_id = $4 AND tr.audit_log_id = al.log_id)`,
+        [toolId, finalWindowEnd, finalWindowStart, investigationId]
+    );
+
+    return investigationId;
+}
+
+/**
+ * Shared by both calibration-recording endpoints for the "this attempt failed" path: finds
+ * the last PASSING calibration before this one (the start of the suspect window -- null if
+ * there isn't one, meaning suspect since the tool's own creation) and opens/extends the
+ * tool's trace-back investigation through it. Kept as one function specifically because both
+ * call sites need to stay in lockstep -- they already share the same investigation schema and
+ * merge behavior via openOrExtendTraceInvestigation, so the trigger logic around it shouldn't
+ * drift into two slightly different copies either.
+ */
+async function triggerFailedCalibration(client, { toolId, calDate, provider, certificateNumber, calId, userId }) {
+    const prevPassRes = await client.query(
+        `SELECT cal_date FROM calibration_records WHERE tool_id = $1 AND result = 'Pass' AND cal_date < $2 ORDER BY cal_date DESC LIMIT 1`,
+        [toolId, calDate]
+    );
+    return openOrExtendTraceInvestigation(client, {
+        toolId,
+        reason: `Calibration failed ${calDate} (${provider}, cert ${certificateNumber})`,
+        windowStart: prevPassRes.rows[0]?.cal_date || null,
+        windowEnd: calDate,
+        triggeringCalId: calId,
+        openedByUserId: userId
+    });
+}
+
 // ==========================================
 // PHOTO UPLOAD SETUP (MULTER)
 // ==========================================
@@ -769,7 +864,8 @@ app.get('/api/tools', async (req, res) => {
     try {
         const query = `
             SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name,
-                   EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record
+                   EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
+                   EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation
             FROM tools t
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -792,7 +888,7 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
     try {
         const result = await pool.query(
             `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number,
-                    cr.standard_used, cr.notes, cr.recorded_at, u.full_name AS recorded_by_name
+                    cr.standard_used, cr.notes, cr.recorded_at, cr.result, u.full_name AS recorded_by_name
              FROM calibration_records cr
              LEFT JOIN users u ON cr.recorded_by_user_id = u.user_id
              WHERE cr.tool_id = $1
@@ -815,9 +911,10 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
 // just whatever was submitted -- so backfilling an OLD record after a newer one already
 // exists doesn't clobber the tool's current due date with stale data.
 app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { cal_date, due_date, provider, certificate_number, standard_used, notes } = req.body;
+    const { cal_date, due_date, provider, certificate_number, standard_used, notes, result } = req.body;
     if (!cal_date || !due_date) return res.status(400).json({ error: 'Calibration date and due date are both required.' });
     if (!provider || !certificate_number) return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.' });
+    const calResult = result === 'Fail' ? 'Fail' : 'Pass';
 
     const client = await pool.connect();
     try {
@@ -827,10 +924,10 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
         if (toolRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
         const currentLastCal = toolRes.rows[0].last_cal_date;
 
-        await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, notes || null, req.authUser.user_id]
+        const calRes = await client.query(
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING cal_id`,
+            [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, notes || null, req.authUser.user_id, calResult]
         );
 
         // Only advance the tool's snapshot fields if this record is now the most recent
@@ -841,9 +938,14 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
         // all) -- backfilling an older historical record for that tool must not regress a
         // legacy date that's already there just because it happens to be untracked.
         if (!currentLastCal || new Date(cal_date) >= new Date(currentLastCal)) {
+            // A failed calibration doesn't bring the tool into compliance -- back-date its due
+            // date to the failure itself so the existing checkout hard-stop (CAL_EXPIRED)
+            // blocks it immediately as a secondary signal (the primary one is the trace-back
+            // investigation opened below, checked directly via CAL_INVESTIGATION_OPEN).
+            const effectiveDueDate = calResult === 'Fail' ? cal_date : due_date;
             await client.query(
                 'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
-                [cal_date, due_date, req.params.id]
+                [cal_date, effectiveDueDate, req.params.id]
             );
         } else {
             await client.query('UPDATE tools SET is_calibrated = true WHERE tool_id = $1', [req.params.id]);
@@ -851,8 +953,15 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
 
         await client.query(
             "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
-            [req.authUser.user_id, req.params.id, `Calibration logged directly by admin: ${provider} (cert ${certificate_number})`]
+            [req.authUser.user_id, req.params.id, `Calibration logged directly by admin: ${provider} (cert ${certificate_number})${calResult === 'Fail' ? ' -- FAILED' : ''}`]
         );
+
+        if (calResult === 'Fail') {
+            await triggerFailedCalibration(client, {
+                toolId: req.params.id, calDate: cal_date, provider, certificateNumber: certificate_number,
+                calId: calRes.rows[0].cal_id, userId: req.authUser.user_id
+            });
+        }
 
         await client.query('COMMIT');
         res.json({ success: true });
@@ -2173,7 +2282,8 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
             // Get tool info AND its owning (home) department
             const toolQuery = `
                 SELECT t.tool_id, t.name, t.status, t.is_calibrated, t.cal_due_date, b.dept_id AS tool_dept_id,
-                       EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record
+                       EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
+                       EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation
                 FROM tools t
                 LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
                 LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -2187,6 +2297,20 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
             const tool = toolRes.rows[0];
 
             if (action === 'CHECKOUT_TOOL') {
+                // A0. TRACE-BACK INVESTIGATION HOLD -- checked directly against
+                // trace_investigations.status rather than inferred from cal_due_date, and
+                // applies to every tool (not just calibrated ones), since a manually-opened
+                // investigation can exist for a non-calibrated tool too. Deliberately NOT
+                // folded into the is_calibrated block below: a failed calibration also
+                // back-dates cal_due_date so the CAL_EXPIRED check catches it too, but that
+                // date is writable through PUT /api/tools/:id and CSV import by anyone with
+                // tool-edit access -- checking the investigation's own OPEN status directly
+                // means neither of those paths can silently clear the hold.
+                if (tool.has_open_investigation) {
+                    await client.query('ROLLBACK');
+                    return res.status(403).json({ error: `Checkout Blocked: ${tool.name} has an open trace-back investigation!`, code: 'CAL_INVESTIGATION_OPEN' });
+                }
+
                 // A. CALIBRATION HARD-STOP -- a calibrated tool needs BOTH a valid (non-expired)
                 // due date AND at least one calibration_records row (real evidence it was
                 // actually calibrated, not just a manually-typed claim) to be issuable. Missing
@@ -2762,7 +2886,8 @@ app.post('/api/transfers/:transfer_id/qa-accept', authLimiter, async (req, res) 
 // enough for FAA-grade calibration traceability.
 app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes } = req.body;
+    const { badge_id, pin, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes, result } = req.body;
+    const calResult = result === 'Fail' ? 'Fail' : 'Pass';
     const client = await pool.connect();
 
     try {
@@ -2806,25 +2931,39 @@ app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, re
             return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.', code: 'CAL_TRACEABILITY_REQUIRED' });
         }
 
+        // A failed calibration still completes the hand-off (the tool returns to its home
+        // department -- there's no separate "hold at QA" state), but its due date is
+        // back-dated to the calibration date itself as a secondary block signal (the primary
+        // one is the trace-back investigation opened below, checked directly via
+        // CAL_INVESTIGATION_OPEN, which can't be silently cleared by a later edit the way a
+        // due date can).
+        const effectiveDueDate = calResult === 'Fail' ? last_cal_date : cal_due_date;
         const toolRes = await client.query(
             `UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true, status = 'Pending Transfer'
              WHERE tool_id = $3 RETURNING tool_id, last_cal_date, cal_due_date`,
-            [last_cal_date, cal_due_date, transfer.tool_id]
+            [last_cal_date, effectiveDueDate, transfer.tool_id]
         );
         const transferUpdRes = await client.query(
             `UPDATE tool_transfers SET status = 'AWAITING_HOME_ACCEPT', cal_completed_by_user_id = $1, cal_completed_at = NOW(), updated_at = NOW()
              WHERE transfer_id = $2 RETURNING transfer_id, tool_id, home_dept_id, qa_dept_id, status, initiated_at`,
             [user.user_id, transfer_id]
         );
-        await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [transfer.tool_id, last_cal_date, cal_due_date, provider, certificate_number, standard_used || null, notes || null, user.user_id]
+        const calRes = await client.query(
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING cal_id`,
+            [transfer.tool_id, last_cal_date, cal_due_date, provider, certificate_number, standard_used || null, notes || null, user.user_id, calResult]
         );
         await client.query(
             "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
-            [user.user_id, transfer.tool_id, `Calibration completed by ${provider} (cert ${certificate_number}); awaiting home department acceptance`]
+            [user.user_id, transfer.tool_id, `Calibration completed by ${provider} (cert ${certificate_number}); awaiting home department acceptance${calResult === 'Fail' ? ' -- FAILED' : ''}`]
         );
+
+        if (calResult === 'Fail') {
+            await triggerFailedCalibration(client, {
+                toolId: transfer.tool_id, calDate: last_cal_date, provider, certificateNumber: certificate_number,
+                calId: calRes.rows[0].cal_id, userId: user.user_id
+            });
+        }
 
         await client.query('COMMIT');
         res.json({ success: true, transfer: transferUpdRes.rows[0], tool: toolRes.rows[0] });
@@ -2949,6 +3088,229 @@ app.post('/api/transfers/:transfer_id/cancel', authLimiter, async (req, res) => 
         res.status(500).json({ error: err.message });
     } finally {
         client.release();
+    }
+});
+
+// ==========================================
+// 7.6 TRACE-BACK INVESTIGATIONS (see migrations/013_trace_investigations.sql)
+// ==========================================
+// A tool that fails calibration means every task it performed since it was LAST known-good
+// is suspect -- these endpoints track that suspect window as an "investigation" with one
+// "review" row per checkout inside it, so a supervisor can work through and document what
+// each task needs (re-check, nothing, doesn't matter). Investigations auto-open (see
+// openOrExtendTraceInvestigation()) the moment a Fail result is logged via either
+// calibration-recording endpoint; they can also be opened manually here for a tool that's
+// suspect for some other reason (e.g. a customer complaint) without an actual failed
+// calibration behind it.
+
+// Shop-wide list, newest first, with review-progress counts. No role check -- same
+// visibility level as the dashboard and Work Orders list.
+app.get('/api/trace-investigations', async (req, res) => {
+    const { status } = req.query;
+    try {
+        const result = await pool.query(
+            `SELECT ti.investigation_id, ti.tool_id, t.qr_code, t.name AS tool_name,
+                    ti.reason, ti.window_start, ti.window_end, ti.status, ti.overridden, ti.conclusion,
+                    ti.created_at, ti.closed_at,
+                    opener.full_name AS opened_by_name, closer.full_name AS closed_by_name,
+                    COUNT(tr.review_id) AS review_count,
+                    COUNT(tr.review_id) FILTER (WHERE tr.outcome != 'PENDING') AS reviewed_count,
+                    COUNT(tr.review_id) FILTER (WHERE tr.outcome = 'OUT_OF_TOLERANCE') AS out_of_tolerance_count
+             FROM trace_investigations ti
+             JOIN tools t ON t.tool_id = ti.tool_id
+             LEFT JOIN users opener ON ti.opened_by_user_id = opener.user_id
+             LEFT JOIN users closer ON ti.closed_by_user_id = closer.user_id
+             LEFT JOIN trace_reviews tr ON tr.investigation_id = ti.investigation_id
+             WHERE ($1::text IS NULL OR ti.status = $1)
+             GROUP BY ti.investigation_id, t.qr_code, t.name, opener.full_name, closer.full_name
+             ORDER BY ti.created_at DESC`,
+            [status || null]
+        );
+        res.json({ success: true, investigations: result.rows });
+    } catch (err) {
+        console.error('Trace Investigations List Error:', err);
+        res.status(500).json({ error: 'Failed to fetch trace investigations.' });
+    }
+});
+
+// Investigations for one tool (for the tool detail modal). No role check, matching
+// Calibration History/Incident History on the same modal.
+app.get('/api/tools/:id/trace-investigations', async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT ti.investigation_id, ti.reason, ti.window_start, ti.window_end, ti.status,
+                    ti.overridden, ti.conclusion, ti.created_at, ti.closed_at,
+                    opener.full_name AS opened_by_name, closer.full_name AS closed_by_name,
+                    COUNT(tr.review_id) AS review_count,
+                    COUNT(tr.review_id) FILTER (WHERE tr.outcome != 'PENDING') AS reviewed_count
+             FROM trace_investigations ti
+             LEFT JOIN users opener ON ti.opened_by_user_id = opener.user_id
+             LEFT JOIN users closer ON ti.closed_by_user_id = closer.user_id
+             LEFT JOIN trace_reviews tr ON tr.investigation_id = ti.investigation_id
+             WHERE ti.tool_id = $1
+             GROUP BY ti.investigation_id, opener.full_name, closer.full_name
+             ORDER BY ti.created_at DESC`,
+            [req.params.id]
+        );
+        res.json({ success: true, investigations: result.rows });
+    } catch (err) {
+        console.error('Tool Trace Investigations Error:', err);
+        res.status(500).json({ error: 'Failed to fetch trace investigations.' });
+    }
+});
+
+// Full detail for one investigation, including every review row, oldest task first.
+app.get('/api/trace-investigations/:id', async (req, res) => {
+    try {
+        const [invRes, reviewsRes] = await Promise.all([
+            pool.query(
+                `SELECT ti.*, t.qr_code, t.name AS tool_name,
+                        opener.full_name AS opened_by_name, closer.full_name AS closed_by_name
+                 FROM trace_investigations ti
+                 JOIN tools t ON t.tool_id = ti.tool_id
+                 LEFT JOIN users opener ON ti.opened_by_user_id = opener.user_id
+                 LEFT JOIN users closer ON ti.closed_by_user_id = closer.user_id
+                 WHERE ti.investigation_id = $1`,
+                [req.params.id]
+            ),
+            pool.query(
+                `SELECT tr.*, checkedWith.qr_code AS checked_with_qr_code, checkedWith.name AS checked_with_name,
+                        reviewer.full_name AS reviewed_by_name
+                 FROM trace_reviews tr
+                 LEFT JOIN tools checkedWith ON tr.checked_with_tool_id = checkedWith.tool_id
+                 LEFT JOIN users reviewer ON tr.reviewed_by_user_id = reviewer.user_id
+                 WHERE tr.investigation_id = $1
+                 ORDER BY tr.used_at ASC`,
+                [req.params.id]
+            )
+        ]);
+        if (invRes.rows.length === 0) return res.status(404).json({ error: 'Investigation not found.' });
+        res.json({ success: true, investigation: invRes.rows[0], reviews: reviewsRes.rows });
+    } catch (err) {
+        console.error('Trace Investigation Detail Error:', err);
+        res.status(500).json({ error: 'Failed to fetch trace investigation.' });
+    }
+});
+
+// Manually opens an investigation for a tool that's suspect for some reason other than a
+// failed calibration (e.g. a customer complaint about a specific task). requireRole(3)
+// (dept_admin+) -- opening one is a judgment call, not a routine day-to-day action.
+app.post('/api/tools/:id/trace-investigations', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { reason, window_start, window_end } = req.body;
+    if (!reason || !reason.trim()) return res.status(400).json({ error: 'A reason is required to open an investigation.' });
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const toolRes = await client.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
+        if (toolRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
+
+        const investigationId = await openOrExtendTraceInvestigation(client, {
+            toolId: req.params.id,
+            reason: reason.trim(),
+            windowStart: window_start || null,
+            windowEnd: window_end || new Date().toISOString(),
+            triggeringCalId: null,
+            openedByUserId: req.authUser.user_id
+        });
+
+        await client.query('COMMIT');
+        res.json({ success: true, investigation_id: investigationId });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Open Trace Investigation Error:', err);
+        res.status(500).json({ error: 'Failed to open investigation.' });
+    } finally {
+        client.release();
+    }
+});
+
+// Records the outcome of one review row (one checked-out task inside the suspect window).
+// requireRole(3), matching who may open/close an investigation.
+app.post('/api/trace-investigations/:id/reviews/:review_id', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { outcome, notes, checked_with_tool_id } = req.body;
+    if (!['IN_TOLERANCE', 'OUT_OF_TOLERANCE', 'NOT_APPLICABLE'].includes(outcome)) {
+        return res.status(400).json({ error: 'outcome must be one of: IN_TOLERANCE, OUT_OF_TOLERANCE, NOT_APPLICABLE.' });
+    }
+    try {
+        const result = await pool.query(
+            `UPDATE trace_reviews SET outcome = $1, notes = $2, checked_with_tool_id = $3,
+                    reviewed_by_user_id = $4, reviewed_at = CURRENT_TIMESTAMP
+             WHERE review_id = $5 AND investigation_id = $6
+             RETURNING review_id`,
+            [outcome, notes || null, checked_with_tool_id || null, req.authUser.user_id, req.params.review_id, req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Review not found on this investigation.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Trace Review Update Error:', err);
+        res.status(500).json({ error: 'Failed to update review.' });
+    }
+});
+
+// Closes an investigation -- requires every review to have a recorded outcome first (use
+// /override to force-close with reviews still pending). requireRole(3).
+app.post('/api/trace-investigations/:id/close', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { conclusion } = req.body;
+    if (!conclusion || !conclusion.trim()) return res.status(400).json({ error: 'A closing conclusion is required.' });
+    try {
+        const pendingRes = await pool.query(
+            `SELECT COUNT(*) AS pending_count FROM trace_reviews WHERE investigation_id = $1 AND outcome = 'PENDING'`,
+            [req.params.id]
+        );
+        if (Number(pendingRes.rows[0].pending_count) > 0) {
+            return res.status(409).json({
+                error: `Cannot close -- ${pendingRes.rows[0].pending_count} review(s) still pending. Use override to force-close.`,
+                code: 'REVIEWS_STILL_PENDING'
+            });
+        }
+        const result = await pool.query(
+            `UPDATE trace_investigations SET status = 'CLOSED', conclusion = $1, closed_by_user_id = $2, closed_at = CURRENT_TIMESTAMP
+             WHERE investigation_id = $3 AND status = 'OPEN' RETURNING investigation_id`,
+            [conclusion.trim(), req.authUser.user_id, req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Investigation not found or already closed.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Trace Investigation Close Error:', err);
+        res.status(500).json({ error: 'Failed to close investigation.' });
+    }
+});
+
+// Force-closes an investigation regardless of pending reviews, with a mandatory reason --
+// a permanent record of who waived what and why. requireRole(3).
+app.post('/api/trace-investigations/:id/override', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { conclusion, override_reason } = req.body;
+    if (!conclusion || !conclusion.trim()) return res.status(400).json({ error: 'A closing conclusion is required.' });
+    if (!override_reason || !override_reason.trim()) return res.status(400).json({ error: 'A reason for overriding pending reviews is required.' });
+    try {
+        const result = await pool.query(
+            `UPDATE trace_investigations SET status = 'CLOSED', conclusion = $1, closed_by_user_id = $2, closed_at = CURRENT_TIMESTAMP,
+                    overridden = true, override_reason = $3
+             WHERE investigation_id = $4 AND status = 'OPEN' RETURNING investigation_id`,
+            [conclusion.trim(), req.authUser.user_id, override_reason.trim(), req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Investigation not found or already closed.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Trace Investigation Override Error:', err);
+        res.status(500).json({ error: 'Failed to override investigation.' });
+    }
+});
+
+// Reopens a closed investigation (e.g. closed in error). requireRole(3).
+app.post('/api/trace-investigations/:id/reopen', requireFetchHeader, requireRole(3), async (req, res) => {
+    try {
+        const result = await pool.query(
+            `UPDATE trace_investigations SET status = 'OPEN', closed_by_user_id = NULL, closed_at = NULL
+             WHERE investigation_id = $1 AND status = 'CLOSED' RETURNING investigation_id`,
+            [req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Investigation not found or not closed.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Trace Investigation Reopen Error:', err);
+        res.status(500).json({ error: 'Failed to reopen investigation.' });
     }
 });
 
