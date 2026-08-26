@@ -12,6 +12,7 @@ let globalBoxesCache = [];
 let globalDrawersCache = [];
 let globalToolsCache = [];
 let globalUsersCache = [];
+let globalToolGroupsCache = [];
 
 // ==========================================
 // 2. UTILITIES & VIEW TOGGLES
@@ -135,7 +136,8 @@ function toggleTreeVisibility(containerId, headerElement) {
  * UI the current role isn't entitled to:
  *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
- *     #card-manage-users, #card-inventory-import (bulk CSV import), and #card-trace-investigations.
+ *     #card-manage-users, #card-inventory-import (bulk CSV import), #card-trace-investigations,
+ *     and #card-tool-groups.
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Populates the Provision New User form's role dropdown with options capped at the viewer's
  * own weight (inclusive) -- matches POST /api/users, which now allows creating a peer, e.g. a
@@ -165,6 +167,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-manage-users', 'none');
         safeSetDisplay('card-inventory-import', 'none');
         safeSetDisplay('card-trace-investigations', 'none');
+        safeSetDisplay('card-tool-groups', 'none');
     }
 
     // Options capped at the viewer's own weight (inclusive) -- matches the server's
@@ -176,6 +179,14 @@ function bootstrapAdminUI(user) {
     if (currentAdminWeight >= 3) { loadUsers(); }
     syncStorageHierarchyDropdowns();
     if (currentAdminWeight >= 2) { fetchNextToolId(); }
+
+    // Primed once here (not re-fetched on every renderEditableInfraTree() call, which would
+    // otherwise re-run this aggregated roll-up query on every dept/box/drawer/tool
+    // create/edit/delete) so the tool edit form's Group dropdown has data as soon as it's
+    // needed. Groups change rarely, and loadToolGroups() (Reports card) keeps this cache fresh
+    // whenever they're actually managed -- this bootstrap fetch just covers the case where a
+    // tool is edited before Reports has ever been visited this session.
+    fetch('/api/tool-groups').then(r => r.json()).then(data => { if (data.success) globalToolGroupsCache = data.groups; }).catch(() => {});
 }
 
 /** Authenticates against POST /api/login with the badge/username + PIN entered on the #auth-wall. On success the server establishes a session cookie and bootstrapAdminUI() takes over from there. */
@@ -523,7 +534,11 @@ function exportScopedLabels() {
  * Recursively renders the full department -> toolbox -> drawer -> tool hierarchy into
  * #editable-infra-tree-container. Fetches GET /api/storage and GET /api/tools in parallel,
  * caches the results in globalDeptsCache/globalBoxesCache/globalDrawersCache/globalToolsCache
- * (consumed later by openEntityModal), then builds nested HTML level by level:
+ * (consumed later by openEntityModal). globalToolGroupsCache -- consumed by the tool edit
+ * form's Group dropdown -- is deliberately NOT re-fetched here on every tree render (this
+ * function runs after every dept/box/drawer/tool create/edit/delete); it's primed once at
+ * login (bootstrapAdminUI) and kept fresh by loadToolGroups() whenever groups are actually
+ * managed in Reports. Builds nested HTML level by level:
  *   - one collapsible card per department, filtering storage.toolboxes by dept_id;
  *   - one collapsible .tree-node per toolbox within that department, filtering
  *     storage.drawers by box_id (and tools by cross-referencing each tool's drawer_id back
@@ -1063,6 +1078,7 @@ function openEntityModal(type, id) {
             <div style="display: flex; gap: 30px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Status</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${entity.status}</div></div>
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration</div><div style="font-size:14px;margin-top:4px;font-weight:bold;">${calText}</div></div>
+                <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Group</div><div style="font-size:14px;margin-top:4px;font-weight:bold;">${entity.group_name || '--'}</div></div>
             </div>
             <div style="margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -1248,6 +1264,12 @@ function openEntityModal(type, id) {
             ? '<option value="">-- Select Drawer --</option>' + drawersInBox.map(d => `<option value="${d.drawer_id}" ${d.drawer_id == entity.drawer_id ? 'selected' : ''}>${d.name}</option>`).join('')
             : '<option value="">No drawers in this toolbox</option>';
 
+        // Every group is offered regardless of department (not filtered to the tool's current
+        // location) -- simpler than a live-filtered cascade, and mis-grouping across
+        // departments is a minor data-hygiene issue rather than a security concern here.
+        const groupOptions = '<option value="">-- No Group --</option>' +
+            globalToolGroupsCache.map(g => `<option value="${g.group_id}" ${g.group_id == entity.group_id ? 'selected' : ''}>${g.name}${g.department_name ? ` (${g.department_name})` : ''}</option>`).join('');
+
         fieldsHtml = `
             <div class="form-group"><label class="form-label">Asset Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
             <div class="form-group"><label class="form-label">Description</label><textarea class="form-input" id="em-input-desc" rows="2">${entity.description || ''}</textarea></div>
@@ -1263,6 +1285,7 @@ function openEntityModal(type, id) {
                 <div class="form-group"><label class="form-label">Serial Number</label><input class="form-input" id="em-input-serial" value="${entity.serial_number || ''}" placeholder="Optional"></div>
                 <div class="form-group"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="em-input-partnum" value="${entity.part_number || ''}" placeholder="Optional"></div>
             </div>
+            <div class="form-group"><label class="form-label">Group <span style="color:var(--muted);text-transform:none;">(optional -- part of a tracked kit/assembly)</span></label><select class="form-select" id="em-input-group">${groupOptions}</select></div>
             <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
                 <div class="form-group"><label class="form-label">Replacement URL</label><input class="form-input" id="em-input-url" value="${entity.replacement_url || ''}"></div>
                 ${statusFieldHtml}
@@ -1649,6 +1672,7 @@ async function saveEntityUpdates() {
             payload.is_calibrated = document.getElementById('em-input-is-cal').checked;
             payload.last_cal_date = document.getElementById('em-input-last-cal').value || null;
             payload.cal_due_date = document.getElementById('em-input-cal-due').value || null;
+            payload.group_id = document.getElementById('em-input-group').value || null;
             if (!payload.drawer_id) return alert('⚠️ Select a Department, Toolbox, and Drawer for this asset.');
         }
     }
@@ -2097,6 +2121,209 @@ async function overrideTraceInvestigation(id) {
 /** Reopens a closed investigation. */
 async function reopenTraceInvestigation(id) {
     postTraceAction(id, `/api/trace-investigations/${id}/reopen`, {}, 'Failed to reopen investigation.');
+}
+
+/** Shows/hides the "+ New Group" inline form (#new-group-form), populating its department select from globalDeptsCache and clearing its fields each time it's opened. */
+function toggleNewGroupForm(show) {
+    const form = document.getElementById('new-group-form');
+    if (!form) return;
+    form.style.display = show ? 'block' : 'none';
+    if (show) {
+        document.getElementById('new-group-name').value = '';
+        document.getElementById('new-group-description').value = '';
+        const deptEl = document.getElementById('new-group-dept');
+        deptEl.innerHTML = '<option value="">-- No Department --</option>' + globalDeptsCache.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
+    }
+}
+
+/** Submits the "+ New Group" form to POST /api/tool-groups, then refreshes the list and closes the form. */
+async function submitNewGroup() {
+    await saveToolGroup({
+        url: '/api/tool-groups', method: 'POST',
+        name: document.getElementById('new-group-name').value.trim(),
+        dept_id: document.getElementById('new-group-dept').value || null,
+        description: document.getElementById('new-group-description').value.trim(),
+        fallbackMsg: 'Failed to create tool group.',
+        onSuccess: () => toggleNewGroupForm(false)
+    });
+}
+
+/** Shared by submitNewGroup (POST) and saveGroupEdit (PUT): validates the name, POSTs/PUTs, alerts the server's error on failure, and on success refreshes the shop-wide list (plus whatever else the caller needs done via onSuccess). */
+async function saveToolGroup({ url, method, name, dept_id, description, fallbackMsg, onSuccess }) {
+    if (!name) return alert('⚠️ A group name is required.');
+    const res = await fetch(url, {
+        method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+        body: JSON.stringify({ name, dept_id, description: description || null })
+    });
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || fallbackMsg));
+    if (onSuccess) onSuccess();
+    loadToolGroups();
+}
+
+/**
+ * Fills #tool-groups-list (Reports workspace) from GET /api/tool-groups -- one row per group
+ * with roll-up member-status counts, alphabetical by name. Same delegated-click pattern as
+ * Work Orders/Trace Investigations; `reason`-equivalent free text here (name/description) is
+ * dept_admin+-typed (same trust tier as calibration notes elsewhere in this file), so unlike
+ * Work Orders' work_order it isn't escaped -- consistent with how other admin-typed free text
+ * is rendered throughout this file.
+ */
+async function loadToolGroups() {
+    const container = document.getElementById('tool-groups-list');
+    if (!container) return;
+    try {
+        const res = await fetch('/api/tool-groups');
+        const data = await res.json();
+        if (!res.ok || !data.success) { container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        globalToolGroupsCache = data.groups;
+
+        if (data.groups.length === 0) {
+            container.innerHTML = `<div style="font-size:12px; color:var(--muted); font-style:italic;">No tool groups yet.</div>`;
+            return;
+        }
+
+        container.innerHTML = data.groups.map(g => `
+                <div style="border-bottom:1px solid var(--border); padding:10px 0;">
+                    <div class="tg-row" data-id="${g.group_id}" data-action="toggle" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer; gap:8px;">
+                        <div>
+                            <div style="font-weight:bold; font-size:13px;">${g.name}${g.department_name ? ` <span style="color:var(--muted); font-weight:normal;">(${g.department_name})</span>` : ''}</div>
+                            <div style="font-size:11px; color:var(--muted);">${g.member_count} tool(s) -- ${g.in_count} in, ${g.out_count} out${Number(g.flagged_count) > 0 ? `, ${g.flagged_count} flagged` : ''}</div>
+                        </div>
+                        ${Number(g.blocked_count) > 0
+                            ? `<span style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--red);">${icon('circle-x', 'icon-danger')} ${g.blocked_count} BLOCKED</span>`
+                            : `<span style="font-size:10px; font-weight:bold; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,0.05); color:var(--muted);">${g.member_count == 0 ? 'EMPTY' : 'OK'}</span>`}
+                    </div>
+                    <div class="tg-detail" data-id="${g.group_id}" style="display:none; margin-top:10px;"></div>
+                </div>`).join('');
+
+        if (!container.dataset.delegated) {
+            container.dataset.delegated = 'true';
+            container.addEventListener('click', onToolGroupsListClick);
+        }
+    } catch (e) {
+        container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Single delegated click handler for #tool-groups-list -- routes by data-action on the clicked element. */
+function onToolGroupsListClick(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    const id = el.dataset.id;
+    if (el.dataset.action === 'toggle') toggleToolGroupDetail(id);
+    else if (el.dataset.action === 'edit') toggleGroupEditForm(id, true);
+    else if (el.dataset.action === 'cancel-edit') toggleGroupEditForm(id, false);
+    else if (el.dataset.action === 'save-edit') saveGroupEdit(id);
+    else if (el.dataset.action === 'delete') deleteToolGroup(id);
+}
+
+/** Expands/collapses one group's member list, lazy-loading it from GET /api/tool-groups/:id the first time. */
+async function toggleToolGroupDetail(id) {
+    const detail = document.querySelector(`.tg-detail[data-id="${id}"]`);
+    if (!detail) return;
+    if (detail.style.display === 'block') { detail.style.display = 'none'; return; }
+    detail.style.display = 'block';
+    await renderToolGroupDetail(id);
+}
+
+/**
+ * Names why a group member is blocked from checkout (server already decided is_blocked --
+ * this only picks the label). Open-investigation is checked FIRST because it applies to
+ * every tool regardless of calibration, whereas a non-calibrated tool always has a null
+ * cal_due_date -- checking cal_due_date first would misreport "No due date" for a
+ * non-calibrated tool that's actually blocked by an open investigation.
+ */
+function blockedReason(m) {
+    if (m.has_open_investigation) return 'Investigation open';
+    if (!m.cal_due_date) return 'No due date';
+    if (!m.has_cal_record) return 'No certificate';
+    return 'Cal expired';
+}
+
+/** Fetches and renders one group's member list + edit/delete controls into its .tg-detail element. Also used to refresh after a save. */
+async function renderToolGroupDetail(id) {
+    const detail = document.querySelector(`.tg-detail[data-id="${id}"]`);
+    if (!detail) return;
+    detail.innerHTML = 'Loading…';
+    try {
+        const res = await fetch(`/api/tool-groups/${id}`);
+        const data = await res.json();
+        if (!res.ok || !data.success) { detail.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        const g = data.group;
+        const memberRows = data.members.map(m => {
+            const statusColor = m.status === 'In' ? 'var(--green)' : (m.status === 'Out' ? 'var(--accent)' : 'var(--red)');
+            const calNote = m.is_blocked
+                ? `<span style="color:var(--red);">${icon('circle-x', 'icon-danger')} ${blockedReason(m)}</span>`
+                : (m.is_calibrated ? `<span style="color:var(--green);">In cal</span>` : '--');
+            return `
+            <tr>
+                <td style="font-family:monospace; font-size:11px;">${m.qr_code}</td>
+                <td style="font-size:12px;">${m.name}</td>
+                <td style="font-size:11px; font-weight:bold; color:${statusColor};">${m.status}</td>
+                <td style="font-size:11px;">${calNote}</td>
+            </tr>`;
+        }).join('');
+
+        detail.innerHTML = `
+            ${g.description ? `<div style="font-size:12px; color:var(--muted); margin-bottom:8px;">${g.description}</div>` : ''}
+            <div class="table-responsive-wrapper">
+                <table style="width:100%; font-size:11px;">
+                    <thead><tr><th>Barcode</th><th>Tool</th><th>Status</th><th>Calibration</th></tr></thead>
+                    <tbody>${memberRows || '<tr><td colspan="4" style="color:var(--muted); font-style:italic;">No tools assigned to this group yet -- assign one from its own Edit form.</td></tr>'}</tbody>
+                </table>
+            </div>
+            <div id="tg-edit-form-${id}" style="display:none; margin-top:12px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Group Name</label><input class="form-input" id="tg-edit-name-${id}" value="${g.name}"></div>
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Department</label>
+                    <select class="form-select" id="tg-edit-dept-${id}">
+                        <option value="">-- No Department --</option>
+                        ${globalDeptsCache.map(d => `<option value="${d.dept_id}" ${d.dept_id == g.dept_id ? 'selected' : ''}>${d.name}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Description</label><input class="form-input" id="tg-edit-description-${id}" value="${g.description || ''}"></div>
+                <div style="display:flex; gap:8px;">
+                    <button type="button" class="btn btn-secondary" style="width:auto;" data-action="cancel-edit" data-id="${id}">Cancel</button>
+                    <button type="button" class="btn btn-primary" style="width:auto;" data-action="save-edit" data-id="${id}">Save</button>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button type="button" class="btn btn-secondary" style="width:auto;" data-action="edit" data-id="${id}">${icon('pencil')} Edit</button>
+                <button type="button" class="btn btn-secondary" style="width:auto; color:var(--red); border-color:var(--red);" data-action="delete" data-id="${id}">${icon('x')} Delete</button>
+            </div>`;
+    } catch (e) {
+        detail.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Shows/hides one group's inline edit form within its already-rendered detail panel. */
+function toggleGroupEditForm(id, show) {
+    const form = document.getElementById(`tg-edit-form-${id}`);
+    if (form) form.style.display = show ? 'block' : 'none';
+}
+
+/** Saves a group's name/department/description via PUT /api/tool-groups/:id, then refreshes the shop-wide list (its row's name/department may have changed). */
+async function saveGroupEdit(id) {
+    await saveToolGroup({
+        url: `/api/tool-groups/${id}`, method: 'PUT',
+        name: document.getElementById(`tg-edit-name-${id}`).value.trim(),
+        dept_id: document.getElementById(`tg-edit-dept-${id}`).value || null,
+        description: document.getElementById(`tg-edit-description-${id}`).value.trim(),
+        fallbackMsg: 'Failed to update tool group.'
+    });
+}
+
+/** Deletes a group via DELETE /api/tool-groups/:id (its members are simply ungrouped, not deleted -- see migrations/014_tool_groups.sql), then refreshes the list. */
+async function deleteToolGroup(id) {
+    if (!confirm('Delete this group? Its member tools will simply be ungrouped, not deleted.')) return;
+    const res = await fetch(`/api/tool-groups/${id}`, {
+        method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' }
+    });
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Failed to delete tool group.'));
+    loadToolGroups();
 }
 
 /**

@@ -876,8 +876,10 @@ app.get('/api/tools', async (req, res) => {
         const query = `
             SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name,
                    EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
-                   EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation
+                   EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation,
+                   tg.name AS group_name
             FROM tools t
+            LEFT JOIN tool_groups tg ON t.group_id = tg.group_id
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
             LEFT JOIN departments d ON b.dept_id = d.dept_id
@@ -1621,7 +1623,7 @@ app.put('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res)
 
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
 app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number, drawer_id } = req.body;
+    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number, drawer_id, group_id } = req.body;
 
     // If they checked the box but didn't provide a due date, throw an error
     if (is_calibrated && !cal_due_date) {
@@ -1670,11 +1672,11 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
             `UPDATE tools
              SET name = $1, description = $2, replacement_url = $3, status = $4,
                  is_calibrated = $5, last_cal_date = $6, cal_due_date = $7,
-                 serial_number = $8, part_number = $9, drawer_id = $10
-             WHERE tool_id = $11`,
+                 serial_number = $8, part_number = $9, drawer_id = $10, group_id = $11
+             WHERE tool_id = $12`,
             [name, description || null, replacement_url || null, status,
              is_calibrated || false, last_cal_date || null, cal_due_date || null,
-             serial_number || null, part_number || null, drawer_id, toolId]
+             serial_number || null, part_number || null, drawer_id, group_id || null, toolId]
         );
 
         // If this save just moved the tool OUT of a flagged state (Missing/Broken/Worn),
@@ -3322,6 +3324,144 @@ app.post('/api/trace-investigations/:id/reopen', requireFetchHeader, requireRole
     } catch (err) {
         console.error('Trace Investigation Reopen Error:', err);
         res.status(500).json({ error: 'Failed to reopen investigation.' });
+    }
+});
+
+// ==========================================
+// 7.7 TOOL GROUPS (assemblies/kits)
+// ==========================================
+// A tool group is a lightweight logical tag over existing tools (see
+// migrations/014_tool_groups.sql) -- a named set a shop tracks and uses together (e.g. a
+// torque wrench kit), so a supervisor can see the whole kit's status at a glance instead of
+// checking each tool individually. Purely additive: which tools belong to a group is set via
+// the existing PUT /api/tools/:id (group_id is just one more field on the normal edit form),
+// and tools are still scanned in/out individually exactly as before -- nothing here changes
+// the checkout flow.
+
+// Reused by both the list and detail endpoints below: a member counts as "blocked" under
+// exactly the same conditions that would block it from checkout (see the A0/A hard-stops in
+// POST /api/transactions) -- an open trace-back investigation (which applies to EVERY tool,
+// not just calibrated ones -- a manually-opened investigation can exist on a non-calibrated
+// tool too, see POST /api/tools/:id/trace-investigations), or, for calibrated tools only, no
+// due date / expired / no certificate on file. Kept as one SQL fragment referencing precomputed
+// booleans (rather than repeating the EXISTS subqueries inline) so the two endpoints can't
+// silently drift into checking slightly different things, and so the open-investigation clause
+// can't accidentally end up nested inside the calibrated-only clause again the way an earlier
+// version of this did -- that version reported a non-calibrated tool under investigation as
+// "OK" even though checkout would actually reject it.
+const GROUP_MEMBER_BLOCKED_SQL = `(
+    calc.has_open_investigation
+    OR (t.is_calibrated AND (t.cal_due_date IS NULL OR t.cal_due_date <= NOW() OR NOT calc.has_cal_record))
+)`;
+// The lateral subquery itself is identical either way; only the join keyword differs (a LEFT
+// JOIN is needed wherever the tools side can itself be a LEFT JOIN producing NULL rows for an
+// empty group -- an inner CROSS JOIN LATERAL would silently drop those rows out of the count).
+const GROUP_MEMBER_CALC_LATERAL_BODY_SQL = `(
+    SELECT EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
+           EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation
+) calc`;
+const GROUP_MEMBER_CALC_LEFT_LATERAL_SQL = `LEFT JOIN LATERAL ${GROUP_MEMBER_CALC_LATERAL_BODY_SQL} ON true`;
+const GROUP_MEMBER_CALC_INNER_LATERAL_SQL = `CROSS JOIN LATERAL ${GROUP_MEMBER_CALC_LATERAL_BODY_SQL}`;
+
+// Lists every group with roll-up member-status counts, newest-named first. No role check --
+// same visibility level as the dashboard and Work Orders/Trace Investigations lists.
+app.get('/api/tool-groups', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT g.group_id, g.name, g.description, g.dept_id, d.name AS department_name, g.created_at,
+                   COUNT(t.tool_id) AS member_count,
+                   COUNT(t.tool_id) FILTER (WHERE t.status = 'In') AS in_count,
+                   COUNT(t.tool_id) FILTER (WHERE t.status = 'Out') AS out_count,
+                   COUNT(t.tool_id) FILTER (WHERE t.status NOT IN ('In', 'Out')) AS flagged_count,
+                   COUNT(t.tool_id) FILTER (WHERE ${GROUP_MEMBER_BLOCKED_SQL}) AS blocked_count
+            FROM tool_groups g
+            LEFT JOIN tools t ON t.group_id = g.group_id
+            LEFT JOIN departments d ON g.dept_id = d.dept_id
+            ${GROUP_MEMBER_CALC_LEFT_LATERAL_SQL}
+            GROUP BY g.group_id, d.name
+            ORDER BY g.name ASC
+        `);
+        res.json({ success: true, groups: result.rows });
+    } catch (err) {
+        console.error('Tool Groups List Error:', err);
+        res.status(500).json({ error: 'Failed to fetch tool groups.' });
+    }
+});
+
+// One group's full member list, each flagged with why it is/isn't blocked (not just a bare
+// count) so the UI can point at the specific tool instead of just a number. Both queries run
+// concurrently -- membersRes doesn't depend on groupRes, they're only keyed by the same id.
+app.get('/api/tool-groups/:id', async (req, res) => {
+    try {
+        const [groupRes, membersRes] = await Promise.all([
+            pool.query(
+                `SELECT g.group_id, g.name, g.description, g.dept_id, d.name AS department_name, g.created_at
+                 FROM tool_groups g LEFT JOIN departments d ON g.dept_id = d.dept_id
+                 WHERE g.group_id = $1`,
+                [req.params.id]
+            ),
+            pool.query(
+                `SELECT t.tool_id, t.qr_code, t.name, t.status, t.is_calibrated, t.cal_due_date,
+                        calc.has_cal_record, calc.has_open_investigation,
+                        ${GROUP_MEMBER_BLOCKED_SQL} AS is_blocked
+                 FROM tools t
+                 ${GROUP_MEMBER_CALC_INNER_LATERAL_SQL}
+                 WHERE t.group_id = $1 ORDER BY t.name ASC`,
+                [req.params.id]
+            )
+        ]);
+        if (groupRes.rows.length === 0) return res.status(404).json({ error: 'Tool group not found.' });
+        res.json({ success: true, group: groupRes.rows[0], members: membersRes.rows });
+    } catch (err) {
+        console.error('Tool Group Detail Error:', err);
+        res.status(500).json({ error: 'Failed to fetch tool group.' });
+    }
+});
+
+// Create/edit/delete all require dept_admin+ (requireRole(3)), matching the threshold for
+// other structural management (toolboxes, drawers).
+app.post('/api/tool-groups', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { name, dept_id, description } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'A group name is required.' });
+    try {
+        const result = await pool.query(
+            'INSERT INTO tool_groups (name, dept_id, description) VALUES ($1, $2, $3) RETURNING group_id',
+            [name.trim(), dept_id || null, description || null]
+        );
+        res.json({ success: true, group_id: result.rows[0].group_id });
+    } catch (err) {
+        console.error('Tool Group Create Error:', err);
+        res.status(500).json({ error: 'Failed to create tool group.' });
+    }
+});
+
+app.put('/api/tool-groups/:id', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { name, dept_id, description } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'A group name is required.' });
+    try {
+        const result = await pool.query(
+            'UPDATE tool_groups SET name = $1, dept_id = $2, description = $3 WHERE group_id = $4 RETURNING group_id',
+            [name.trim(), dept_id || null, description || null, req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tool group not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Tool Group Update Error:', err);
+        res.status(500).json({ error: 'Failed to update tool group.' });
+    }
+});
+
+// Deleting a group just ungroups its members (ON DELETE SET NULL on tools.group_id) -- they
+// keep existing as normal individually-tracked tools, same reasoning as migrations/014's
+// comment: a group is a logical tag, not a physical container, so there's nothing to block.
+app.delete('/api/tool-groups/:id', requireFetchHeader, requireRole(3), async (req, res) => {
+    try {
+        const result = await pool.query('DELETE FROM tool_groups WHERE group_id = $1 RETURNING group_id', [req.params.id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tool group not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Tool Group Delete Error:', err);
+        res.status(500).json({ error: 'Failed to delete tool group.' });
     }
 });
 

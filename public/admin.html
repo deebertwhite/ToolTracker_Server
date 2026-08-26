@@ -69,7 +69,7 @@
                 <div class="hub-icon"><span class="icon" data-icon="package"></span></div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
             <!-- Card 4: Reports (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
-            <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports'); loadCalendarFeedInfo(); loadWorkOrders(); loadTraceInvestigationsList();">
+            <div class="hub-card" id="hub-reports" onclick="openWorkspace('ws-reports'); loadCalendarFeedInfo(); loadWorkOrders(); loadTraceInvestigationsList(); loadToolGroups();">
                 <div class="hub-icon"><span class="icon" data-icon="bar-chart"></span></div><div class="hub-title">Telemetry & Reports</div><div class="hub-desc">Custom queries and data export.</div>
             </div>
         </div>
@@ -344,6 +344,29 @@
                     <h3 style="margin-bottom: 8px;">Trace-Back Investigations</h3>
                     <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">When a calibrated tool fails calibration, every task it did since its last passing calibration is suspect. Click a row to review each task and close out the investigation.</p>
                     <div id="trace-investigations-list">Loading…</div>
+                </div>
+
+                <!-- Purely a tracking/reporting layer over existing tools (see
+                     migrations/014_tool_groups.sql) -- which tools belong to a group is set
+                     from the tool's own edit form, not here. dept_admin+ only for
+                     create/edit/delete (requireRole(3) server-side, matching other structural
+                     management), hidden for everyone else by bootstrapAdminUI's weight<3 block. -->
+                <div class="card no-print" id="card-tool-groups">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
+                        <h3 style="margin:0;">Tool Groups</h3>
+                        <button type="button" class="btn-icon" style="width:auto; padding:4px 10px; font-size:11px;" onclick="toggleNewGroupForm(true)">+ New Group</button>
+                    </div>
+                    <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Kits/assemblies of tools tracked and used together -- see at a glance how many pieces are present, out, or flagged, and whether any calibrated member has a compliance issue. Assign a tool to a group from the tool's own Edit form.</p>
+                    <div id="new-group-form" style="display:none; margin-bottom:16px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Group Name</label><input class="form-input" id="new-group-name" placeholder="e.g. Torque Wrench Kit #3"></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Department <span style="color:var(--muted);text-transform:none;">(optional)</span></label><select class="form-select" id="new-group-dept"><option value="">-- No Department --</option></select></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Description <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="new-group-description"></div>
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn btn-secondary" style="width:auto;" onclick="toggleNewGroupForm(false)">Cancel</button>
+                            <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitNewGroup()">Create</button>
+                        </div>
+                    </div>
+                    <div id="tool-groups-list">Loading…</div>
                 </div>
 
                 <!-- super_admin only (server-gated via requireRole(4) on GET /api/settings/calendar-feed-token) -- hidden for everyone else by bootstrapAdminUI's weight<4 block, same as #card-manage-depts. -->
