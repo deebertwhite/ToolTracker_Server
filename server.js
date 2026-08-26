@@ -901,7 +901,7 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
     try {
         const result = await pool.query(
             `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number,
-                    cr.standard_used, cr.notes, cr.recorded_at, cr.result, u.full_name AS recorded_by_name
+                    cr.standard_used, cr.notes, cr.recorded_at, cr.result, cr.photo_url, u.full_name AS recorded_by_name
              FROM calibration_records cr
              LEFT JOIN users u ON cr.recorded_by_user_id = u.user_id
              WHERE cr.tool_id = $1
@@ -1382,6 +1382,15 @@ app.get('/api/storage', async (req, res) => {
 // Create a new department. Requires super_admin (getRoleWeight >= 4).
 app.post('/api/departments', requireFetchHeader, requireRole(4), async (req, res) => {
     const { name, prefix_code } = req.body;
+    // A toolbox barcode is always "<prefix>BOX-<number>" (see fetchNextBoxId server-side),
+    // and the kiosk detects a toolbox scan client-side by checking for "BOX-" in the scanned
+    // string (see handleToolScan() in kiosk.js -- deliberately a cheap string check, not a
+    // server round-trip, so scanning stays instant). A department prefix ending in "BOX" would
+    // make an ordinary TOOL code (e.g. "XBOX-000001") collide with that same shape, so reject
+    // it here rather than let an ambiguous prefix get baked into every barcode under it.
+    if (/BOX$/i.test((prefix_code || '').trim())) {
+        return res.status(400).json({ error: 'Prefix code cannot end in "BOX" -- it would be indistinguishable from a toolbox barcode when scanned at the kiosk.' });
+    }
     try {
         const result = await pool.query('INSERT INTO departments (name, prefix_code) VALUES ($1, $2) RETURNING *', [name, prefix_code.toUpperCase()]);
         res.json({ success: true, department: result.rows[0] });
@@ -2145,8 +2154,9 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
 // ==========================================
 // 6. PHOTO UPLOAD ENDPOINT
 // ==========================================
-// Upload a photo and attach it to a user/tool/toolbox/drawer record. Requires tool_rep+ (getRoleWeight >= 2)
-// for tool photos, and dept_admin+ (getRoleWeight >= 3) for user/toolbox/drawer photos.
+// Upload a photo and attach it to a user/tool/toolbox/drawer/calibration record. Requires
+// tool_rep+ (getRoleWeight >= 2) for tool and calibration photos, and dept_admin+
+// (getRoleWeight >= 3) for user/toolbox/drawer photos.
 app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo'), async (req, res) => {
     const { entity_type, entity_id } = req.body;
 
@@ -2175,6 +2185,10 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo
         else if (entity_type === 'tool') { table = 'tools'; idColumn = 'qr_code'; }
         else if (entity_type === 'toolbox') { table = 'toolboxes'; idColumn = 'box_id'; }
         else if (entity_type === 'drawer') { table = 'drawers'; idColumn = 'drawer_id'; }
+        // A photo of the physical calibration certificate -- see migrations/015. Same
+        // requireRole(2) threshold as a tool photo (not the weight>=3 check above), matching
+        // who's already allowed to log a calibration record in the first place.
+        else if (entity_type === 'calibration') { table = 'calibration_records'; idColumn = 'cal_id'; }
         else throw new Error('Invalid entity type.');
 
         // Compress/resize before this ever becomes a permanent photo_url -- phone camera
@@ -2290,8 +2304,57 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
         const auditGateCache = {};
         const logNotes = `Signed off by: ${signoff.full_name} (${signoff.badge_id})`;
 
+        // 3.5 TOOLBOX SINGLE-SCAN CHECKOUT -- a toolbox has its own qr_code (unlike a drawer,
+        // which doesn't), so scanning IT instead of an individual tool is a legitimate way to
+        // check out everything currently sitting `In` inside it in one action -- the kiosk
+        // scan handler adds whatever was scanned to the batch verbatim without knowing whether
+        // it's a tool or a toolbox, so this is where that distinction actually gets resolved.
+        // Checkout only: check-in can't sensibly work this way (the tools physically coming
+        // back could be from different people at different times, not "the whole box at once"),
+        // so a toolbox code reaching CHECKIN_TOOL is rejected outright rather than silently
+        // ignored -- the kiosk itself already blocks this client-side, this is defense in depth.
+        // Every expanded tool then flows through the EXACT SAME per-tool loop below as if it
+        // had been scanned individually, so calibration/investigation/transfer/audit hard-stops
+        // all still apply per-tool -- one bad tool in the box still rolls back the whole batch,
+        // same all-or-nothing semantics as any other multi-tool scan.
+        let effectiveQrCodes = qr_codes;
+        // Cheap in-memory pre-check first -- the vast majority of transactions are ordinary
+        // tool scans with no toolbox code at all, and this skips an always-empty DB round
+        // trip for every one of them (toolbox codes are always "<prefix>BOX-<number>", see
+        // isToolboxCode() in kiosk.js; the query below is the real, authoritative check).
+        const scannedBoxesRes = qr_codes.some(code => code.includes('BOX-'))
+            ? await client.query('SELECT box_id, qr_code FROM toolboxes WHERE qr_code = ANY($1::text[])', [qr_codes])
+            : { rows: [] };
+        if (scannedBoxesRes.rows.length > 0) {
+            if (action !== 'CHECKOUT_TOOL') {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: `${scannedBoxesRes.rows[0].qr_code} is a toolbox barcode, not a tool -- toolbox codes can only be scanned for checkout.`, code: 'TOOLBOX_CODE_INVALID_FOR_CHECKIN' });
+            }
+            const boxCodes = new Set(scannedBoxesRes.rows.map(r => r.qr_code));
+            const boxIds = scannedBoxesRes.rows.map(r => r.box_id);
+            const membersRes = await client.query(
+                `SELECT t.qr_code FROM tools t JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                 WHERE dr.box_id = ANY($1::int[]) AND t.status = 'In'`,
+                [boxIds]
+            );
+            const expanded = [];
+            const seen = new Set();
+            for (const code of qr_codes) {
+                if (boxCodes.has(code)) continue; // replaced by its members below, not kept itself
+                if (!seen.has(code)) { seen.add(code); expanded.push(code); }
+            }
+            for (const m of membersRes.rows) {
+                if (!seen.has(m.qr_code)) { seen.add(m.qr_code); expanded.push(m.qr_code); }
+            }
+            if (expanded.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: 'No tools available to check out -- the scanned toolbox may be empty, or every tool in it is already out or flagged.', code: 'NO_TOOLS_TO_CHECKOUT' });
+            }
+            effectiveQrCodes = expanded;
+        }
+
         // 4. Process each tool
-        for (let qr of qr_codes) {
+        for (let qr of effectiveQrCodes) {
             // Get tool info AND its owning (home) department
             const toolQuery = `
                 SELECT t.tool_id, t.name, t.status, t.is_calibrated, t.cal_due_date, b.dept_id AS tool_dept_id,
@@ -2388,7 +2451,10 @@ app.post('/api/transactions', authLimiter, async (req, res) => {
         }
 
         await client.query('COMMIT');
-        res.json({ success: true });
+        // tool_count lets the kiosk report exactly how many tools were processed -- notably
+        // different from qr_codes.length whenever a toolbox barcode was scanned (one scanned
+        // code can expand to several actual tools, see step 3.5 above).
+        res.json({ success: true, tool_count: effectiveQrCodes.length });
     } catch (err) {
         await client.query('ROLLBACK');
         console.error("Transaction Error:", err);

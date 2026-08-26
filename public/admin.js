@@ -247,17 +247,23 @@ async function updateMyAccount() {
 // ==========================================
 // 4. PHOTO UPLOADS
 // ==========================================
-/** Records which entity (type + id) a photo upload is destined for, then opens the hidden #global-photo-upload file picker shared by every "Photo" button. */
-function triggerPhotoUpload(type, id) {
-    uploadTarget = { type, id };
+/**
+ * Records which entity (type + id) a photo upload is destined for, then opens the hidden
+ * #global-photo-upload file picker shared by every "Photo" button. `toolId` is only used for
+ * type 'calibration' (a calibration_records row has no tree/list of its own to refresh --
+ * see handlePhotoUpload) and is ignored for every other type.
+ */
+function triggerPhotoUpload(type, id, toolId) {
+    uploadTarget = { type, id, toolId };
     document.getElementById('global-photo-upload').click();
 }
 
 /**
  * Change handler for #global-photo-upload. Packs the selected file plus the pending
  * uploadTarget (type/id set by triggerPhotoUpload) into FormData and POSTs to /api/upload.
- * Refreshes the personnel lists on a 'user' target, or the infrastructure tree for any
- * other entity type, then resets the file input.
+ * Refreshes the personnel lists on a 'user' target, this tool's calibration history on a
+ * 'calibration' target, or the infrastructure tree for any other entity type, then resets the
+ * file input.
  */
 async function handlePhotoUpload(event) {
     const file = event.target.files[0];
@@ -273,10 +279,11 @@ async function handlePhotoUpload(event) {
         const data = await res.json();
         if (res.ok) {
             alert('✅ Photo uploaded successfully!');
-            if (uploadTarget.type === 'user') { loadUsers(); loadRosterDirectory(); } 
+            if (uploadTarget.type === 'user') { loadUsers(); loadRosterDirectory(); }
+            else if (uploadTarget.type === 'calibration') { loadCalibrationHistory(uploadTarget.toolId); }
             else { renderEditableInfraTree(); }
         } else { alert('❌ ' + (data.error || 'Upload failed.')); }
-    } catch (err) { alert('❌ Network error during upload.'); } 
+    } catch (err) { alert('❌ Network error during upload.'); }
     finally { event.target.value = ''; }
 }
 
@@ -1483,9 +1490,14 @@ async function unplaceToolPosition(qrCode) {
  * openEntityModal for every tool) from GET /api/tools/:id/calibration-history -- every
  * completed calibration cycle, newest first, not just the tool's current due date. Called
  * with the tool's real numeric tool_id (not qr_code, unlike most of this file's tool
- * lookups) since that's what the endpoint expects. Leaves the header/"+ Log Calibration"
- * button/form alone -- only the list itself is replaced, so re-calling this after
- * submitCalLogForm() doesn't need to re-render the whole container.
+ * lookups) since that's what the endpoint expects (and is threaded through to
+ * triggerPhotoUpload('calibration', cal_id, toolId) below, since a calibration_records row
+ * has no tree/list of its own to refresh after a photo upload). Leaves the header/"+ Log
+ * Calibration" button/form alone -- only the list itself is replaced, so re-calling this
+ * after submitCalLogForm() doesn't need to re-render the whole container. Each record shows
+ * either its certificate photo thumbnail (click to open full-size) or a camera icon to attach
+ * one, so a paper certificate can be scanned/photographed and kept alongside the typed
+ * provider/cert-number fields rather than only the reference number.
  */
 async function loadCalibrationHistory(toolId) {
     const listEl = document.getElementById('em-cal-history-list');
@@ -1498,13 +1510,18 @@ async function loadCalibrationHistory(toolId) {
             return;
         }
         listEl.innerHTML = data.records.map(r => `
-            <div style="padding:8px 0; border-bottom:1px solid var(--border);">
-                <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text);">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
-                <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
-                ${r.result === 'Fail' ? `<div style="font-size:11px; color:var(--red); font-weight:bold; margin-top:2px;">${icon('circle-x', 'icon-danger')} FAILED -- out of tolerance</div>` : ''}
-                ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
-                ${r.notes ? `<div style="font-size:11px;">${r.notes}</div>` : ''}
-                <div style="font-size:10px; margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
+            <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; gap:10px; align-items:flex-start;">
+                ${r.photo_url
+                    ? `<img src="${r.photo_url}" onclick="openImageModal('${r.photo_url}')" style="width:36px;height:36px;object-fit:cover;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
+                    : `<button type="button" class="btn-icon" style="width:36px;height:36px;padding:0;flex-shrink:0;" title="Attach a photo of the certificate" onclick="triggerPhotoUpload('calibration', ${r.cal_id}, '${toolId}')">${icon('camera')}</button>`}
+                <div style="flex:1;">
+                    <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text);">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
+                    <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
+                    ${r.result === 'Fail' ? `<div style="font-size:11px; color:var(--red); font-weight:bold; margin-top:2px;">${icon('circle-x', 'icon-danger')} FAILED -- out of tolerance</div>` : ''}
+                    ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
+                    ${r.notes ? `<div style="font-size:11px;">${r.notes}</div>` : ''}
+                    <div style="font-size:10px; margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
+                </div>
             </div>
         `).join('');
     } catch (e) {
