@@ -137,6 +137,7 @@ async function fetchStorageTree() {
 function showDrawerMapView() {
     document.getElementById('view-global').style.display = 'none';
     document.getElementById('view-location').style.display = 'none';
+    document.getElementById('view-cal-cockpit').style.display = 'none';
     document.getElementById('view-drawer-map').style.display = 'block';
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
@@ -245,6 +246,141 @@ async function renderDrawerMap(drawerId) {
 }
 
 // ==========================================
+// 3.6 CALIBRATION COCKPIT VIEW
+// ==========================================
+// An isolated, read-only lens over the same calibrated-tool data already used elsewhere on
+// this page (globalTools, from GET /api/tools) -- modeled on a colleague's separate
+// calibration-tracking prototype's own "Overview" page: a stat-tile drilldown grid plus a
+// solid-color day/lock status pill per tool, adapted to this app's existing dark theme rather
+// than importing that prototype's own light "steel" palette. Nothing about how calibrated
+// tools are actually tracked or checked out changes anywhere else in the app; this view only
+// reads what's already there.
+let cockpitFilter = null; // null (default: everything needing attention) | 'due-soon' | 'locked'
+
+/** Switches to the Calibration Cockpit view, re-fetching /api/tools fresh (same reasoning as renderDrawerMap -- this view is meant to be left open on a shared screen for a while) before rendering. */
+async function loadCalCockpit() {
+    document.getElementById('view-global').style.display = 'none';
+    document.getElementById('view-location').style.display = 'none';
+    document.getElementById('view-drawer-map').style.display = 'none';
+    document.getElementById('view-cal-cockpit').style.display = 'block';
+
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+    const nav = document.getElementById('nav-cal-cockpit');
+    if (nav) nav.classList.add('active');
+
+    try {
+        const res = await fetch('/api/tools');
+        const data = await res.json();
+        if (data.success) globalTools = data.tools || [];
+    } catch (e) { /* render from whatever globalTools already has (e.g. boot's own fetch) */ }
+    renderCockpitView();
+}
+
+/**
+ * Computes a tool's status band -- the exact same thresholds the reference prototype's own
+ * regime logic uses (>60 days green, 30-60 yellow, 0-29 red, missing due date/certificate or
+ * overdue = locked), extended with this app's own has_open_investigation signal (a concept
+ * the reference prototype doesn't have) folded into "locked": an investigation-blocked tool
+ * genuinely can't be checked out right now (see the CAL_INVESTIGATION_OPEN hard-stop in
+ * POST /api/transactions), so it belongs in the same band as any other lock reason rather
+ * than being invisible here. Returns null for a non-calibrated tool (no band applies).
+ *
+ * Day count is calendar-day arithmetic anchored at LOCAL midnight today (matching the
+ * existing calIsExpired convention in admin.js -- new Date(new Date().toDateString())),
+ * not a raw millisecond diff against the current instant -- GET /api/tools now returns
+ * cal_due_date as a plain 'YYYY-MM-DD' string (see server.js, cast to ::text) rather than the
+ * ambiguous server-timezone-dependent Date serialization it used to, but even with a clean
+ * date string, comparing against "right now" would still make the label tick down mid-day
+ * and, worse, occasionally misclassify a tool by one day for hours around each boundary.
+ */
+function cockpitDteBand(tool) {
+    if (!tool.is_calibrated) return null;
+    const lockedReason = tool.has_open_investigation ? 'Investigation open'
+        : !tool.cal_due_date ? 'No due date'
+        : !tool.has_cal_record ? 'No certificate'
+        : null;
+    if (lockedReason) return { band: 'locked', label: 'LOCKED', reason: lockedReason };
+
+    const todayMidnight = new Date(new Date().toDateString());
+    const days = Math.round((new Date(tool.cal_due_date) - todayMidnight) / 86400000);
+    if (days < 0) return { band: 'locked', label: 'LOCKED', reason: 'Cal expired' };
+    if (days <= 29) return { band: 'red', label: `${days}d`, reason: null };
+    if (days <= 60) return { band: 'yellow', label: `${days}d`, reason: null };
+    return { band: 'green', label: `${days}d`, reason: null };
+}
+
+/** Renders one DTE status pill -- solid background, white text, small lock icon when locked. The `title` attribute carries the specific lock reason, same as a native tooltip. */
+function cockpitDteBadge(bandInfo) {
+    if (!bandInfo) return `<span style="color:var(--muted);">--</span>`;
+    const colors = { green: 'var(--green)', yellow: 'var(--orange)', red: 'var(--red)', locked: '#4b5563' };
+    const lockIcon = bandInfo.band === 'locked' ? `<span style="display:inline-flex; width:11px; height:11px;">${icon('lock')}</span>` : '';
+    return `<span title="${bandInfo.reason || ''}" style="display:inline-flex; align-items:center; gap:4px; background:${colors[bandInfo.band]}; color:#fff; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700;">${lockIcon}${bandInfo.label}</span>`;
+}
+
+/** Toggles the attention table's filter -- clicking the already-active tile clears it back to the default (everything needing attention). Pure client-side re-render, no fetch. */
+function setCockpitFilter(filter) {
+    cockpitFilter = (cockpitFilter === filter) ? null : filter;
+    renderCockpitView();
+}
+
+/** Fills the Calibration Cockpit's stat tiles and attention table from the already-fetched globalTools -- pure client-side render, called on view entry and again by every tile click / "show all" checkbox toggle, never re-fetching on its own. */
+function renderCockpitView() {
+    const calTools = globalTools.filter(t => t.is_calibrated);
+    const banded = calTools.map(t => ({ tool: t, band: cockpitDteBand(t) }));
+    const dueSoon = banded.filter(b => b.band.band === 'yellow' || b.band.band === 'red');
+    const locked = banded.filter(b => b.band.band === 'locked');
+
+    document.getElementById('cockpit-kpi-all').textContent = calTools.length;
+    document.getElementById('cockpit-kpi-in').textContent = calTools.filter(t => t.status === 'In').length;
+    document.getElementById('cockpit-kpi-out').textContent = calTools.filter(t => t.status === 'Out').length;
+    document.getElementById('cockpit-kpi-transfer').textContent = calTools.filter(t => t.status === 'Pending Transfer' || t.status === 'In Calibration').length;
+    document.getElementById('cockpit-kpi-due-soon').textContent = dueSoon.length;
+    document.getElementById('cockpit-kpi-locked').textContent = locked.length;
+
+    // Highlight whichever tile matches the active filter -- the closest equivalent here to the
+    // reference prototype's tile hover/active treatment.
+    document.getElementById('cockpit-tile-due-soon').style.boxShadow = cockpitFilter === 'due-soon' ? '0 0 0 2px var(--orange)' : 'none';
+    document.getElementById('cockpit-tile-locked').style.boxShadow = cockpitFilter === 'locked' ? '0 0 0 2px var(--red)' : 'none';
+    document.getElementById('cockpit-filter-clear').style.display = cockpitFilter ? 'inline' : 'none';
+
+    const showAll = document.getElementById('cockpit-show-all').checked;
+    let rows, title;
+    if (showAll) { rows = banded; title = 'All Calibrated Tools'; }
+    else if (cockpitFilter === 'due-soon') { rows = dueSoon; title = 'Due Soon'; }
+    else if (cockpitFilter === 'locked') { rows = locked; title = 'Locked'; }
+    else { rows = banded.filter(b => b.band.band !== 'green'); title = 'Needs Attention'; }
+    document.getElementById('cockpit-table-title').textContent = title;
+
+    // Urgency-first: locked, then red, then yellow, then green -- then soonest due date first.
+    const order = { locked: 0, red: 1, yellow: 2, green: 3 };
+    rows = rows.slice().sort((a, b) => {
+        const bandDiff = order[a.band.band] - order[b.band.band];
+        if (bandDiff !== 0) return bandDiff;
+        const aTime = a.tool.cal_due_date ? new Date(a.tool.cal_due_date).getTime() : -Infinity;
+        const bTime = b.tool.cal_due_date ? new Date(b.tool.cal_due_date).getTime() : -Infinity;
+        return aTime - bTime;
+    });
+
+    const body = document.getElementById('cockpit-attention-body');
+    if (rows.length === 0) {
+        body.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--muted);">Nothing here -- every calibrated tool is in good standing.</td></tr>`;
+        return;
+    }
+    body.innerHTML = rows.map(({ tool, band }) => {
+        const deptLabel = tool.department_name || '--';
+        const boxLabel = tool.toolbox_name || '--';
+        const locationLine = tool.drawer_name ? `${deptLabel} / ${boxLabel} / ${tool.drawer_name}` : `${deptLabel} / ${boxLabel}`;
+        return `<tr style="cursor:pointer;" onclick="openToolDetailModal('${tool.qr_code}')">
+            <td style="font-family: monospace;">${tool.qr_code}</td>
+            <td><strong>${tool.name}</strong></td>
+            <td>${cockpitDteBadge(band)}</td>
+            <td>${tool.status}</td>
+            <td>${locationLine}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ==========================================
 // 4. GLOBAL DASHBOARD VIEW RENDERING
 // ==========================================
 /**
@@ -257,6 +393,7 @@ async function loadGlobalDashboard() {
     document.getElementById('view-global').style.display = 'block';
     document.getElementById('view-location').style.display = 'none';
     document.getElementById('view-drawer-map').style.display = 'none';
+    document.getElementById('view-cal-cockpit').style.display = 'none';
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navGlobal = document.getElementById('nav-global');
@@ -624,6 +761,7 @@ function loadLocationView(type, filterValue, title, subtitle) {
     document.getElementById('view-global').style.display = 'none';
     document.getElementById('view-location').style.display = 'block';
     document.getElementById('view-drawer-map').style.display = 'none';
+    document.getElementById('view-cal-cockpit').style.display = 'none';
     document.getElementById('loc-title').textContent = title;
     document.getElementById('loc-subtitle').textContent = type === 'dept' ? `Department Code: ${subtitle}` : subtitle;
 

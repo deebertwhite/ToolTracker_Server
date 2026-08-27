@@ -28,6 +28,7 @@
 
         <div class="nav-item active" id="nav-global" onclick="loadGlobalDashboard()"><span class="icon" data-icon="globe"></span> Global Overview</div>
         <div class="nav-item" id="nav-drawer-map" onclick="showDrawerMapView()"><span class="icon" data-icon="image"></span> Shadow Board Map</div>
+        <div class="nav-item" id="nav-cal-cockpit" onclick="loadCalCockpit()"><span class="icon" data-icon="lock"></span> Calibration Cockpit</div>
 
         <div style="padding: 20px 20px 10px 20px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;">Storage Directory</div>
         <div id="tree-container">
@@ -232,6 +233,63 @@
             <div class="card" id="map-empty-card">
                 <div style="text-align:center; color:var(--muted); padding:20px 0;" id="map-empty-message">Select a department, toolbox, and drawer above.</div>
             </div>
+        </div>
+
+        <!-- Calibration Cockpit: an isolated, read-only view of calibrated tools only,
+             modeled on a colleague's separate calibration-tracking prototype ("CalTool") --
+             a stat-tile drilldown grid plus a solid-color day/lock status pill per tool,
+             adapted to this app's existing dark theme rather than importing that prototype's
+             own light palette. Doesn't change how calibrated tools are actually tracked or
+             checked out anywhere else in the app -- this is a second lens over the exact same
+             GET /api/tools data the Global Overview view already uses. See
+             renderCockpitView()/cockpitDteBand() in dashboard.js. -->
+        <div id="view-cal-cockpit" style="display: none;">
+            <div style="margin-bottom: 20px;">
+                <h2 style="margin-bottom: 5px;"><span class="icon" data-icon="lock"></span> Calibration Cockpit</h2>
+                <div style="color: var(--muted);">Every calibrated tool's status at a glance. Click a tile to filter the list below.</div>
+            </div>
+
+            <div class="grid-container" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 30px;">
+                <div class="card" style="border-top: 3px solid var(--border); margin: 0;">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">All Calibrated</div>
+                    <div style="font-size: 36px; font-weight: 700;" id="cockpit-kpi-all">--</div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--green); margin: 0;">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">In</div>
+                    <div style="font-size: 36px; font-weight: 700; color: var(--green);" id="cockpit-kpi-in">--</div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--accent); margin: 0;">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">Out</div>
+                    <div style="font-size: 36px; font-weight: 700; color: var(--accent);" id="cockpit-kpi-out">--</div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--blue); margin: 0;">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">At QA / In Transfer</div>
+                    <div style="font-size: 36px; font-weight: 700; color: var(--blue);" id="cockpit-kpi-transfer">--</div>
+                </div>
+                <div class="card" id="cockpit-tile-due-soon" style="border-top: 3px solid var(--orange); margin: 0; cursor: pointer; transition: box-shadow 0.15s;" onclick="setCockpitFilter('due-soon')">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">Due Soon</div>
+                    <div style="font-size: 36px; font-weight: 700; color: var(--orange);" id="cockpit-kpi-due-soon">--</div>
+                </div>
+                <div class="card" id="cockpit-tile-locked" style="border-top: 3px solid var(--red); margin: 0; cursor: pointer; transition: box-shadow 0.15s;" onclick="setCockpitFilter('locked')">
+                    <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;"><span class="icon" data-icon="lock"></span> Locked</div>
+                    <div style="font-size: 36px; font-weight: 700; color: var(--red);" id="cockpit-kpi-locked">--</div>
+                </div>
+            </div>
+
+            <h3 style="margin-bottom: 12px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                <span><span class="icon" data-icon="hourglass"></span> <span id="cockpit-table-title">Needs Attention</span></span>
+                <span id="cockpit-filter-clear" style="display:none; font-size:12px; font-weight:normal; color:var(--accent); cursor:pointer;" onclick="setCockpitFilter(null)">Clear filter &times;</span>
+            </h3>
+            <div class="table-responsive-wrapper" style="margin-bottom: 20px;">
+                <table>
+                    <thead><tr><th>Barcode ID</th><th>Tool</th><th>DTE</th><th>Status</th><th>Assigned Location</th></tr></thead>
+                    <tbody id="cockpit-attention-body"><tr><td colspan="5" style="text-align: center;">Loading...</td></tr></tbody>
+                </table>
+            </div>
+
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); cursor:pointer; margin-bottom: 40px;">
+                <input type="checkbox" id="cockpit-show-all" onchange="renderCockpitView()"> Show every calibrated tool, not just tools needing attention
+            </label>
         </div>
 
     </div>

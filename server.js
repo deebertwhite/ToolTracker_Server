@@ -877,7 +877,8 @@ app.get('/api/tools', async (req, res) => {
             SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name,
                    EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
                    EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation,
-                   tg.name AS group_name
+                   tg.name AS group_name,
+                   t.cal_due_date::text AS cal_due_date, t.last_cal_date::text AS last_cal_date
             FROM tools t
             LEFT JOIN tool_groups tg ON t.group_id = tg.group_id
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
