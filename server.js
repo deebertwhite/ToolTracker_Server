@@ -177,6 +177,14 @@ app.use(session({
 // catches raw volume regardless of which badge is being targeted. In-memory store is fine
 // here (unlike sessions) -- losing counters on a restart just means a few more free
 // attempts, not a loss of durable state.
+//
+// TEMPORARILY DISABLED (2026-09-11, per James -- a busy shift on one shared kiosk IP was
+// hitting 20 actions/15min for entirely legitimate use, which was the real problem, not an
+// attack): not applied to any route below right now. Left fully defined, and the real
+// per-badge brute-force defense (checkLockout/recordFailedPinAttempt, DB-backed, see below)
+// is untouched -- re-add `authLimiter` as middleware on the routes below (search
+// "DISABLED: authLimiter" for every spot) to turn this back on, ideally with a higher `max`
+// suited to a shared walk-up device rather than reverting to 20.
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 20,
@@ -1022,7 +1030,7 @@ app.get('/api/tools/next-id', async (req, res) => {
 // 2. AUTHENTICATION
 // ==========================================
 // Standard login: verify badge_id/username + PIN and that the account is active.
-app.post('/api/login', authLimiter, async (req, res) => {
+app.post('/api/login', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { login_id, pin } = req.body;
     try {
         const query = `
@@ -1081,7 +1089,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 // Kiosk login: identify a user by badge_id/username + PIN for quick kiosk access.
-app.post('/api/kiosk-auth', authLimiter, async (req, res) => {
+app.post('/api/kiosk-auth', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { login_id, pin } = req.body;
     try {
         // granted_dept_ids rides along here (same pattern as requireRole in the admin session
@@ -2248,7 +2256,7 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo
 // badge+pin, PLUS a buddy-check sign-off PIN belonging to any other active person -- no role
 // restriction, any coworker can confirm) and, for checkouts, a same-day AUDIT of the tool's home
 // department (see getAuditGatePendingToolboxes).
-app.post('/api/transactions', authLimiter, async (req, res) => {
+app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { badge_id, pin, action, qr_codes, manager_pin, work_order } = req.body;
     const trimmedWorkOrder = (work_order || '').trim() || null;
     const client = await pool.connect();
@@ -2702,7 +2710,7 @@ app.post('/api/work-orders/:work_order/reopen', requireFetchHeader, requireRole(
 // "check it in clean, then separately flag it" step that could ever correctly represent a
 // tool that broke or went missing in someone's hands. Not legal while 'Pending Transfer',
 // 'In Calibration', or 'Retired'.
-app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
+app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { badge_id, pin, qr_code, issue_type, notes } = req.body;
 
     if (!['Broken', 'Missing', 'Worn'].includes(issue_type)) {
@@ -2777,7 +2785,7 @@ app.post('/api/kiosk/report-issue', authLimiter, async (req, res) => {
 
 // Initiate a QA transfer for a tool. Home department is resolved server-side from the tool's
 // drawer_id -> drawers.box_id -> toolboxes.dept_id; never trusts a client-supplied home dept.
-app.post('/api/transfers/initiate', authLimiter, async (req, res) => {
+app.post('/api/transfers/initiate', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { badge_id, pin, qr_code, qa_dept_id, notes } = req.body;
     const client = await pool.connect();
 
@@ -2901,7 +2909,7 @@ app.get('/api/transfers', async (req, res) => {
 });
 
 // QA side accepts an incoming transfer and begins calibration.
-app.post('/api/transfers/:transfer_id/qa-accept', authLimiter, async (req, res) => {
+app.post('/api/transfers/:transfer_id/qa-accept', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin } = req.body;
     const client = await pool.connect();
@@ -2964,7 +2972,7 @@ app.post('/api/transfers/:transfer_id/qa-accept', authLimiter, async (req, res) 
 // completed calibration leaves a permanent, traceable calibration_records row -- see
 // migrations/006_calibration_history.sql for why a snapshot on the tools row alone isn't
 // enough for FAA-grade calibration traceability.
-app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, res) => {
+app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes, result } = req.body;
     const calResult = result === 'Fail' ? 'Fail' : 'Pass';
@@ -3057,7 +3065,7 @@ app.post('/api/transfers/:transfer_id/complete-cal', authLimiter, async (req, re
 });
 
 // Home department accepts the returned, calibrated tool back.
-app.post('/api/transfers/:transfer_id/home-accept', authLimiter, async (req, res) => {
+app.post('/api/transfers/:transfer_id/home-accept', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin } = req.body;
     const client = await pool.connect();
@@ -3117,7 +3125,7 @@ app.post('/api/transfers/:transfer_id/home-accept', authLimiter, async (req, res
 });
 
 // Cancel a transfer. Only legal while still AWAITING_QA_ACCEPT (before QA has taken possession).
-app.post('/api/transfers/:transfer_id/cancel', authLimiter, async (req, res) => {
+app.post('/api/transfers/:transfer_id/cancel', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
     const { badge_id, pin, reason } = req.body;
     const client = await pool.connect();
