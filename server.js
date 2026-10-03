@@ -1646,6 +1646,44 @@ app.put('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res)
     } catch (err) { res.status(500).json({ error: 'Failed to update drawer.' }); }
 });
 
+// Moves several tools to a different drawer in one action -- the Master Storage & Asset
+// Tree's Batch Move mode (admin.js) lets an admin select multiple tools instead of editing
+// each one's own Location cascade individually. Same requireRole(2) threshold as the
+// single-tool edit endpoint below, and the same reasoning for not blocking a tool that's
+// currently 'Out': it isn't physically in any drawer while checked out anyway, so reassigning
+// where it lives once returned is a legitimate, unrelated action -- true whether moving one
+// tool or fifty. Deliberately only touches drawer_id, nothing else about the tool (status,
+// calibration, etc.), so it can't be used as a backdoor around the single-tool edit form's
+// other validation.
+//
+// MUST be registered before PUT /api/tools/:id -- Express matches routes in registration
+// order, and :id is a wildcard that would otherwise swallow a request to this exact path
+// (treating the literal string "batch-move" as if it were a qr_code/tool_id), which is
+// exactly what happened the first time this shipped: every call 404'd with "Tool not found"
+// instead of ever reaching this handler.
+app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { tool_ids, drawer_id } = req.body;
+    if (!Array.isArray(tool_ids) || tool_ids.length === 0) {
+        return res.status(400).json({ error: 'No tools selected.' });
+    }
+    if (!drawer_id) {
+        return res.status(400).json({ error: 'A destination drawer is required.' });
+    }
+    try {
+        const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
+        if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid destination drawer.' });
+
+        const result = await pool.query(
+            'UPDATE tools SET drawer_id = $1 WHERE tool_id = ANY($2::int[]) RETURNING tool_id',
+            [drawer_id, tool_ids]
+        );
+        res.json({ success: true, moved: result.rows.length });
+    } catch (err) {
+        console.error('Batch Move Error:', err);
+        res.status(500).json({ error: 'Failed to move tools.' });
+    }
+});
+
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
 app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
     const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number, drawer_id, group_id } = req.body;
@@ -1750,38 +1788,6 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         res.status(500).json({ error: 'Failed to update tool.' });
     } finally {
         client.release();
-    }
-});
-
-// Moves several tools to a different drawer in one action -- the Master Storage & Asset
-// Tree's Batch Move mode (admin.js) lets an admin select multiple tools instead of editing
-// each one's own Location cascade individually. Same requireRole(2) threshold as the
-// single-tool edit endpoint above, and the same reasoning for not blocking a tool that's
-// currently 'Out': it isn't physically in any drawer while checked out anyway, so reassigning
-// where it lives once returned is a legitimate, unrelated action -- true whether moving one
-// tool or fifty. Deliberately only touches drawer_id, nothing else about the tool (status,
-// calibration, etc.), so it can't be used as a backdoor around the single-tool edit form's
-// other validation.
-app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { tool_ids, drawer_id } = req.body;
-    if (!Array.isArray(tool_ids) || tool_ids.length === 0) {
-        return res.status(400).json({ error: 'No tools selected.' });
-    }
-    if (!drawer_id) {
-        return res.status(400).json({ error: 'A destination drawer is required.' });
-    }
-    try {
-        const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
-        if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid destination drawer.' });
-
-        const result = await pool.query(
-            'UPDATE tools SET drawer_id = $1 WHERE tool_id = ANY($2::int[]) RETURNING tool_id',
-            [drawer_id, tool_ids]
-        );
-        res.json({ success: true, moved: result.rows.length });
-    } catch (err) {
-        console.error('Batch Move Error:', err);
-        res.status(500).json({ error: 'Failed to move tools.' });
     }
 });
 
