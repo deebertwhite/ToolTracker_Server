@@ -425,6 +425,18 @@
         </div>
     </div>
 
+    <!-- Toolbox print sheet: a reference page for one toolbox (built by
+         openToolboxPrintSheet() in admin.js), meant to be printed and kept in a binder near
+         the physical box -- every drawer in it, with its photo and a table of its tools'
+         barcodes, so a tool can be signed out by scanning straight from the page. Hidden on
+         screen (display:none) until print time, when openToolboxPrintSheet() reveals it and
+         the .printable-area rule in style.css hides everything else; afterprint below hides
+         it again. Lives at the top level (not inside the entity modal that triggers it) so
+         print layout isn't affected by the modal's own overflow/stacking. -->
+    <div id="toolbox-print-sheet-area" class="printable-area" style="display:none;">
+        <div id="toolbox-print-sheet-content"></div>
+    </div>
+
     <script src="icons.js"></script>
     <script src="admin.js"></script>
     <script src="sw-register.js"></script>

@@ -307,6 +307,92 @@ async function handlePhotoUpload(event) {
 }
 
 // ==========================================
+// 4.5 TOOLBOX PRINT SHEET
+// ==========================================
+/**
+ * Builds and prints a reference sheet for one toolbox: every drawer in it, each with its own
+ * photo (if set) and a table of its tools -- name, barcode ID, serial number, a calibration
+ * note, and a scannable Data Matrix image -- meant to be printed and kept in a binder near
+ * the physical box, so a tool can be signed out by scanning straight from the page instead of
+ * needing a barcode label on the tool itself or in its drawer slot.
+ *
+ * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.). A printed
+ * page sitting in a binder for weeks can't track live state, and a stale "In" would be worse
+ * than no status at all; the calibration note is similarly just "Calibrated -- Due <date>"
+ * from whatever's cached right now, not a live compliance check. Retired tools are excluded
+ * (nothing to sign out). Reuses each tool's already-generated Large Data Matrix image (see
+ * BARCODE_SIZES in server.js) -- no new barcode generation needed, just a bigger size than
+ * the sticker-sized default for easier scanning off a printed page. Pure client-side render
+ * from the same globalBoxesCache/globalDrawersCache/globalToolsCache already kept in sync by
+ * renderEditableInfraTree() -- no server round trip.
+ *
+ * Follows the same .printable-area + window.print() pattern as the existing Custom Report
+ * Builder's Print button (see style.css's @media print block) -- the browser's own print
+ * rendering, no PDF library. #toolbox-print-sheet-area starts display:none (see admin.html)
+ * so it doesn't clutter the screen; this function reveals it right before printing, and the
+ * afterprint listener below hides it again afterward.
+ */
+function openToolboxPrintSheet(boxId) {
+    const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
+    const cellStyle = 'padding:6px; border-bottom:1px solid #ccc;';
+
+    const box = globalBoxesCache.find(b => b.box_id == boxId);
+    if (!box) return;
+    const dept = globalDeptsCache.find(d => d.dept_id == box.dept_id);
+    const drawers = globalDrawersCache.filter(d => d.box_id == boxId).sort(byName);
+
+    const drawerSections = drawers.map(drawer => {
+        const tools = globalToolsCache
+            .filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired')
+            .sort(byName);
+
+        const rows = tools.map(t => {
+            const calNote = t.is_calibrated
+                ? `Calibrated &mdash; Due ${t.cal_due_date ? t.cal_due_date.split('T')[0] : 'Unknown'}`
+                : '';
+            const barcodeImg = t.barcode_image_url_large
+                ? `<img src="${t.barcode_image_url_large}" style="width:72px; height:72px; object-fit:contain;">`
+                : '<span style="color:#999; font-size:11px;">No barcode on file</span>';
+            return `
+                <tr>
+                    <td style="width:84px; ${cellStyle}">${barcodeImg}</td>
+                    <td style="${cellStyle}">
+                        <strong>${t.name}</strong><br>
+                        <span style="font-family:monospace; font-size:12px;">${t.qr_code}</span>
+                        ${t.serial_number ? `<br><span style="font-size:11px;">S/N: ${t.serial_number}</span>` : ''}
+                    </td>
+                    <td style="${cellStyle} font-size:12px;">${calNote}</td>
+                </tr>`;
+        }).join('');
+
+        return `
+            <div style="break-inside:avoid; page-break-inside:avoid; margin-bottom:30px;">
+                <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${drawer.name}</h3>
+                ${drawer.photo_url ? `<img src="${drawer.photo_url}" style="max-width:280px; max-height:200px; object-fit:contain; float:right; margin:0 0 10px 12px; border:1px solid #999;">` : ''}
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead><tr><th style="text-align:left; padding:6px;">Scan</th><th style="text-align:left; padding:6px;">Tool</th><th style="text-align:left; padding:6px;">Calibration</th></tr></thead>
+                    <tbody>${rows || `<tr><td colspan="3" style="padding:6px; color:#666;">No tools currently assigned to this drawer.</td></tr>`}</tbody>
+                </table>
+                <div style="clear:both;"></div>
+            </div>`;
+    }).join('<div style="break-before:page; page-break-before:always;"></div>');
+
+    document.getElementById('toolbox-print-sheet-content').innerHTML = `
+        <h1 style="margin-bottom:2px;">${box.name}</h1>
+        <div style="color:#555; margin-bottom:20px;">${dept ? dept.name : ''} &mdash; printed ${new Date().toLocaleDateString()}</div>
+        ${drawerSections || '<p>This toolbox has no drawers yet.</p>'}
+    `;
+
+    document.getElementById('toolbox-print-sheet-area').style.display = 'block';
+    window.print();
+}
+
+window.addEventListener('afterprint', () => {
+    const area = document.getElementById('toolbox-print-sheet-area');
+    if (area) area.style.display = 'none';
+});
+
+// ==========================================
 // 5. PERSONNEL
 // ==========================================
 /** Display labels for each role value, used by the personnel entity modal's role dropdown. */
@@ -1048,6 +1134,8 @@ function openEntityModal(type, id) {
                 <button class="btn btn-secondary" onclick="deleteInfraItem('toolboxes', '${entity.box_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>
             `;
         }
+        // Read-only, so offered regardless of canEditInfra -- same level as viewing the modal at all.
+        actionsHtml += `<button class="btn btn-secondary" style="width:auto;" onclick="openToolboxPrintSheet('${entity.box_id}')">${icon('printer')} Print Sheet</button>`;
 
     } else if (type === 'drawer') {
         entity = globalDrawersCache.find(d => d.drawer_id == id);
