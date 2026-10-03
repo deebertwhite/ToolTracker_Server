@@ -727,9 +727,16 @@ const storage = multer.diskStorage({
     }
 });
 
+// 20MB, not 5 -- a phone photo picked from the existing library (as opposed to one just
+// taken through a live camera capture, which some mobile OSes downsample before handing to
+// the page) is routinely 8-20MB at full resolution, and this is only how large the file is
+// allowed to arrive here: the compression step a few lines below (sharp, resized to 1600px
+// and re-encoded at quality 82) still shrinks whatever comes in down to tens/low hundreds of
+// KB before it's ever stored permanently. Storage headroom isn't a concern either (the
+// external drive sits at ~2% used -- see the Disaster Recovery section).
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB Limit
+    limits: { fileSize: 20 * 1024 * 1024 }
 });
 
 /**
@@ -2166,7 +2173,27 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
 // Upload a photo and attach it to a user/tool/toolbox/drawer/calibration record. Requires
 // tool_rep+ (getRoleWeight >= 2) for tool and calibration photos, and dept_admin+
 // (getRoleWeight >= 3) for user/toolbox/drawer photos.
-app.post('/api/upload', requireFetchHeader, requireRole(2), upload.single('photo'), async (req, res) => {
+//
+// upload.single('photo') is called manually here (rather than listed directly as route
+// middleware) specifically so a multer error -- oversized file, wrong field name, a bad
+// stream -- can be turned into a normal JSON error response. Left to Express's default error
+// handler, it would never reach the route handler's own JSON responses at all: the client
+// would get a plain-text/HTML error body, `res.json()` on the frontend would throw trying to
+// parse it, and that gets caught by the frontend's generic catch block and shown as "Network
+// error during upload" -- which is exactly what this looked like for an oversized photo
+// before this fix, even though the real problem had nothing to do with the network.
+app.post('/api/upload', requireFetchHeader, requireRole(2), (req, res, next) => {
+    upload.single('photo')(req, res, (err) => {
+        if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'Photo is too large (max 20MB). Try a smaller photo, or a screenshot/lower-resolution copy of it.' });
+        }
+        if (err) {
+            console.error('Upload middleware error:', err.message);
+            return res.status(400).json({ error: 'Upload failed: ' + err.message });
+        }
+        next();
+    });
+}, async (req, res) => {
     const { entity_type, entity_id } = req.body;
 
     if (!req.file) return res.status(400).json({ error: 'No image file provided.' });

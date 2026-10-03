@@ -274,17 +274,36 @@ async function handlePhotoUpload(event) {
     formData.append('entity_type', uploadTarget.type);
     formData.append('entity_id', uploadTarget.id);
 
+    let res;
     try {
-        const res = await fetch('/api/upload', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
-        const data = await res.json();
-        if (res.ok) {
-            alert('✅ Photo uploaded successfully!');
-            if (uploadTarget.type === 'user') { loadUsers(); loadRosterDirectory(); }
-            else if (uploadTarget.type === 'calibration') { loadCalibrationHistory(uploadTarget.toolId); }
-            else { renderEditableInfraTree(); }
-        } else { alert('❌ ' + (data.error || 'Upload failed.')); }
-    } catch (err) { alert('❌ Network error during upload.'); }
-    finally { event.target.value = ''; }
+        res = await fetch('/api/upload', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+    } catch (err) {
+        alert('❌ Network error during upload.');
+        event.target.value = '';
+        return;
+    }
+
+    // Parsed separately from the fetch itself -- a response that arrived but isn't valid JSON
+    // (e.g. a proxy/server error page) is a server-side problem, not a "network error", and
+    // deserves its own message rather than being lumped in with an actual dropped connection.
+    let data;
+    try {
+        data = await res.json();
+    } catch (err) {
+        alert(`❌ Unexpected response from server (status ${res.status}). Try again, and let an admin know if it keeps happening.`);
+        event.target.value = '';
+        return;
+    }
+
+    if (res.ok) {
+        alert('✅ Photo uploaded successfully!');
+        if (uploadTarget.type === 'user') { loadUsers(); loadRosterDirectory(); }
+        else if (uploadTarget.type === 'calibration') { loadCalibrationHistory(uploadTarget.toolId); }
+        else { renderEditableInfraTree(); }
+    } else {
+        alert('❌ ' + (data.error || 'Upload failed.'));
+    }
+    event.target.value = '';
 }
 
 // ==========================================
