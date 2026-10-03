@@ -743,7 +743,7 @@ async function renderEditableInfraTree() {
             // visual size or nudging the row's layout.
             html += `<div class="card" style="border-left: 4px solid var(--accent); margin-bottom: 15px; padding: 15px;">
                         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; user-select: none;">
-                            <span class="icon toggle-icon tree-toggle-tap" style="color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)">${deptExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span>
+                            <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)"><span class="icon toggle-icon" style="color: var(--muted);">${deptExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
                             <h4 style="margin: 0; cursor: pointer;" onclick="openEntityModal('department', '${dept.dept_id}')">
                                 ${icon('building-2')} ${dept.name} <span style="font-weight:normal; color:var(--muted); font-size:13px;">(${dept.prefix_code})</span>
                             </h4>
@@ -762,7 +762,7 @@ async function renderEditableInfraTree() {
                 html += `<div class="tree-node" style="padding: 10px;">
                             <div style="display: flex; align-items: center; gap: 10px; user-select: none;">
                                 ${thumb}
-                                <span class="icon toggle-icon tree-toggle-tap" style="font-size: 12px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)">${boxExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span>
+                                <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)"><span class="icon toggle-icon" style="font-size: 12px; color: var(--muted);">${boxExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
                                 <span onclick="openEntityModal('toolbox', '${box.box_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                     <strong>${box.name}</strong>
                                     <span style="background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 10px; color: var(--accent); font-family: monospace;">${box.qr_code || 'NO-ID'}</span>
@@ -783,7 +783,7 @@ async function renderEditableInfraTree() {
                         html += `<div class="tree-child" style="padding: 6px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
                                     <div style="display: flex; align-items: center; gap: 8px; user-select: none;">
                                         ${drThumb}
-                                        <span class="icon toggle-icon tree-toggle-tap" style="font-size: 10px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)">${drawerExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span>
+                                        <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)"><span class="icon toggle-icon" style="font-size: 10px; color: var(--muted);">${drawerExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
                                         <span onclick="openEntityModal('drawer', '${dr.drawer_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                             <span style="font-weight: bold;">${dr.name}</span>
                                             <span style="font-size:11px; color:var(--muted); margin-left: 5px;">(${drToolsList.length} tools)</span>
@@ -818,8 +818,14 @@ async function renderEditableInfraTree() {
 
                                 // Whole row opens the entity modal -- there's nothing to expand/collapse
                                 // at this level (tools are leaves), so no separate toggle icon is needed.
+                                // In Batch Move mode, a checkbox is prepended instead -- its own
+                                // stopPropagation() keeps a checkbox click from also opening the modal.
+                                const batchCheckbox = batchMoveMode
+                                    ? `<input type="checkbox" onclick="event.stopPropagation();" onchange="toggleToolSelection(${tool.tool_id}, this.checked)" ${selectedToolIds.has(tool.tool_id) ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; flex-shrink:0;">`
+                                    : '';
                                 html += `
                                     <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02); cursor: pointer;" onclick="openEntityModal('tool', '${tool.qr_code}')">
+                                        ${batchCheckbox}
                                         <span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: ${statusColor};">${tool.status}</span>
                                         <span style="font-size: 13px; font-weight:bold;">${tool.name}</span>
                                         <span style="font-family: monospace; font-size: 10px; color: var(--muted);">${tool.qr_code}</span>
