@@ -357,11 +357,15 @@ async function handlePhotoUpload(event) {
 // 4.5 TOOLBOX PRINT SHEET
 // ==========================================
 /**
- * Builds and prints a reference sheet for one toolbox: every drawer in it, each with its own
- * photo (if set) and a table of its tools -- name, barcode ID, serial number, and a scannable
- * Data Matrix image -- meant to be printed and kept in a binder near the physical box, so a
- * tool can be signed out by scanning straight from the page instead of needing a barcode
- * label on the tool itself or in its drawer slot.
+ * Builds and prints a reference sheet for one toolbox: every drawer in it, each on its own page
+ * (titled "<toolbox> -- <drawer>" so a page is self-identifying without flipping back to the
+ * first one), with its own photo (if set) and a dense grid of its tools -- name, barcode ID,
+ * serial number, and a scannable Data Matrix image -- meant to be printed and kept in a binder
+ * near the physical box, so a tool can be signed out by scanning straight from the page instead
+ * of needing a barcode label on the tool itself or in its drawer slot. The grid (not a simple
+ * one-row-per-tool table) exists specifically to fit a typical drawer's full tool list on that
+ * one page; a handful of real drawers run 30-90+ tools deep and will still spill onto a second
+ * page no matter how dense the layout -- there's a real content-volume floor here.
  *
  * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.) or anything
  * date-based (calibration due date). These pages are meant to be printed once and left in
@@ -381,7 +385,6 @@ async function handlePhotoUpload(event) {
  */
 async function openToolboxPrintSheet(boxId) {
     const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
-    const cellStyle = 'padding:6px; border-bottom:1px solid #ccc;';
 
     const box = globalBoxesCache.find(b => b.box_id == boxId);
     if (!box) return;
@@ -393,31 +396,39 @@ async function openToolboxPrintSheet(boxId) {
             .filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired')
             .sort(byName);
 
-        const rows = tools.map(t => {
+        // A dense multi-column grid (not the one-row-per-tool table this replaced) so a typical
+        // drawer's full tool list fits on the one page it already starts on (see the page-break
+        // between drawers below) instead of spilling onto a second -- auto-fill lets the browser
+        // pack as many ~150px cards per row as the page width allows. A handful of real drawers
+        // run 30-90+ tools deep though, which genuinely cannot fit on one printed page at any
+        // reasonable size -- those still overflow onto a following page, same as before.
+        const cards = tools.map(t => {
             // scan-code.png (GET /api/tools/:id/scan-code.png) is a text-free Data Matrix generated
             // fresh for this purpose -- unlike barcode_image_url_large (a full sticker label: code +
             // ID + name baked in, meant to stand alone on the tool), there's no redundant text eating
-            // into the image, so the whole box is scannable code instead of under half of it.
-            const barcodeImg = `<img src="/api/tools/${t.tool_id}/scan-code.png" style="width:90px; height:90px; object-fit:contain;">`;
+            // into the image, so the whole box is scannable code instead of under half of it. 60px
+            // (~16mm at print) stays well within this app's own validated 10-20mm scannable range
+            // (see BARCODE_LABEL_MM in server.js) while roughly halving this card's footprint vs.
+            // the full-table layout's 90px row height.
+            const barcodeImg = `<img src="/api/tools/${t.tool_id}/scan-code.png" style="width:60px; height:60px; object-fit:contain; flex-shrink:0;">`;
             return `
-                <tr>
-                    <td style="width:100px; ${cellStyle}">${barcodeImg}</td>
-                    <td style="${cellStyle}">
-                        <strong>${t.name}</strong><br>
-                        <span style="font-family:monospace; font-size:12px;">${t.qr_code}</span>
-                        ${t.serial_number ? `<br><span style="font-size:11px;">S/N: ${t.serial_number}</span>` : ''}
-                    </td>
-                </tr>`;
+                <div style="display:flex; align-items:center; gap:6px; border:1px solid #ccc; padding:4px; break-inside:avoid; page-break-inside:avoid;">
+                    ${barcodeImg}
+                    <div style="min-width:0;">
+                        <div style="font-size:11px; font-weight:bold; line-height:1.2;">${t.name}</div>
+                        <div style="font-family:monospace; font-size:11px;">${t.qr_code}</div>
+                        ${t.serial_number ? `<div style="font-size:10px; color:#333;">S/N: ${t.serial_number}</div>` : ''}
+                    </div>
+                </div>`;
         }).join('');
 
         return `
-            <div style="break-inside:avoid; page-break-inside:avoid; margin-bottom:30px;">
-                <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${drawer.name}</h3>
-                ${drawer.photo_url ? `<img src="${drawer.photo_url}" style="max-width:280px; max-height:200px; object-fit:contain; float:right; margin:0 0 10px 12px; border:1px solid #999;">` : ''}
-                <table style="width:100%; min-width:0; border-collapse:collapse;">
-                    <thead><tr><th style="text-align:left; padding:6px; background:#fff; color:#000;">Scan</th><th style="text-align:left; padding:6px; background:#fff; color:#000;">Tool</th></tr></thead>
-                    <tbody>${rows || `<tr><td colspan="2" style="padding:6px; color:#666;">No tools currently assigned to this drawer.</td></tr>`}</tbody>
-                </table>
+            <div style="break-inside:avoid; page-break-inside:avoid; margin-bottom:20px;">
+                <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${box.name} &mdash; ${drawer.name}</h3>
+                ${drawer.photo_url ? `<img src="${drawer.photo_url}" style="max-width:180px; max-height:130px; object-fit:contain; float:right; margin:0 0 8px 12px; border:1px solid #999;">` : ''}
+                ${cards
+                    ? `<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap:6px;">${cards}</div>`
+                    : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`}
                 <div style="clear:both;"></div>
             </div>`;
     }).join('<div style="break-before:page; page-break-before:always;"></div>');
