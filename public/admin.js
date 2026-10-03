@@ -394,12 +394,14 @@ function openToolboxPrintSheet(boxId) {
             .sort(byName);
 
         const rows = tools.map(t => {
-            const barcodeImg = t.barcode_image_url_large
-                ? `<img src="${t.barcode_image_url_large}" style="width:72px; height:72px; object-fit:contain;">`
-                : '<span style="color:#999; font-size:11px;">No barcode on file</span>';
+            // scan-code.png (GET /api/tools/:id/scan-code.png) is a text-free Data Matrix generated
+            // fresh for this purpose -- unlike barcode_image_url_large (a full sticker label: code +
+            // ID + name baked in, meant to stand alone on the tool), there's no redundant text eating
+            // into the image, so the whole box is scannable code instead of under half of it.
+            const barcodeImg = `<img src="/api/tools/${t.tool_id}/scan-code.png" style="width:90px; height:90px; object-fit:contain;">`;
             return `
                 <tr>
-                    <td style="width:84px; ${cellStyle}">${barcodeImg}</td>
+                    <td style="width:100px; ${cellStyle}">${barcodeImg}</td>
                     <td style="${cellStyle}">
                         <strong>${t.name}</strong><br>
                         <span style="font-family:monospace; font-size:12px;">${t.qr_code}</span>

@@ -930,6 +930,27 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
     }
 });
 
+// Renders a Data Matrix PNG with NO baked-in text (no ID row, no name row) -- generated fresh
+// on every request rather than stored, since it's cheap (bwip-js is synchronous, this is a tiny
+// image) and nothing needs to cache it. Exists specifically for the toolbox print sheet
+// (openToolboxPrintSheet() in admin.js), which already prints the tool's name and ID as plain
+// text next to the code -- the normal stored barcode_image_url_large is a full sticker label
+// (code + ID + name, meant to stand alone on a drill), and baking that same redundant text into
+// a small inline table image left the actual scannable code occupying under half the image,
+// which is what made codes look blank/illegible on a printed page. 20mm/600dpi matches the
+// "large" size's real-world scanning footprint without the "large" column's 1200dpi engraving
+// resolution, which is unnecessary overkill for an inline/print image this small.
+app.get('/api/tools/:id/scan-code.png', requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query('SELECT qr_code FROM tools WHERE tool_id = $1', [req.params.id]);
+        if (result.rows.length === 0) return res.status(404).send('Tool not found.');
+        const { png } = await generatePngAtSize(result.rows[0].qr_code, 20, 600, false, 20, undefined, 'FFFFFF');
+        res.type('png').send(png);
+    } catch (err) {
+        res.status(500).send('Failed to generate barcode.');
+    }
+});
+
 // Logs a calibration record directly from the admin panel -- NOT tied to a QA transfer, so
 // existing inventory (whose last_cal_date/cal_due_date were set by the ingest form, a direct
 // edit, or CSV import, with no calibration_records row at all) can get a traceable record
