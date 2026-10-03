@@ -379,7 +379,7 @@ async function handlePhotoUpload(event) {
  * so it doesn't clutter the screen; this function reveals it right before printing, and the
  * afterprint listener below hides it again afterward.
  */
-function openToolboxPrintSheet(boxId) {
+async function openToolboxPrintSheet(boxId) {
     const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
     const cellStyle = 'padding:6px; border-bottom:1px solid #ccc;';
 
@@ -428,7 +428,21 @@ function openToolboxPrintSheet(boxId) {
         ${drawerSections || '<p>This toolbox has no drawers yet.</p>'}
     `;
 
-    document.getElementById('toolbox-print-sheet-area').style.display = 'block';
+    const area = document.getElementById('toolbox-print-sheet-area');
+    area.style.display = 'block';
+
+    // scan-code.png is generated fresh per request (unlike the old static barcode_image_url_large
+    // file), so it's measurably slower to load -- window.print() used to fire immediately after
+    // setting innerHTML above, before these <img>s had actually loaded, which rasterized as blank
+    // boxes on a real printer (screen preview/testing can misleadingly look fine if you happen to
+    // wait before looking). Wait for every image in the sheet to finish (load OR error -- a
+    // missing/broken one shouldn't block printing the rest) before printing.
+    const images = Array.from(area.querySelectorAll('img'));
+    await Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', resolve, { once: true });
+    })));
+
     window.print();
 }
 
