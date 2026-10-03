@@ -174,11 +174,11 @@
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
                             <h3>Master Storage & Asset Tree</h3>
                             <div style="display:flex; gap:8px;">
-                                <button class="btn-icon" id="btn-batch-move-toggle" style="padding: 4px 10px; font-size: 12px;" onclick="toggleBatchMoveMode()"><span class="icon" data-icon="move"></span> Batch Move</button>
+                                <button class="btn-icon" id="btn-batch-move-toggle" style="padding: 4px 10px; font-size: 12px;" onclick="toggleBatchMoveMode()"><span class="icon" data-icon="move"></span> Batch Select</button>
                                 <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree(); loadAuditStatus();"><span class="icon" data-icon="refresh-cw"></span> Refresh Data</button>
                             </div>
                         </div>
-                        <!-- Shown only while Batch Move mode is on (see toggleBatchMoveMode() in
+                        <!-- Shown only while batch-select mode is on (see toggleBatchMoveMode() in
                              admin.js) -- a checkbox then appears on every tool row in the tree
                              below, and this bar tracks the running selection. -->
                         <div id="batch-move-bar" style="display:none; align-items:center; justify-content:space-between; gap:10px; background: rgba(203,96,21,0.1); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; flex-wrap:wrap;">
@@ -186,6 +186,7 @@
                             <div style="display:flex; gap:8px; flex-wrap:wrap;">
                                 <button class="btn btn-secondary" style="width:auto;" onclick="clearBatchMoveSelection()">Clear Selection</button>
                                 <button class="btn btn-primary" style="width:auto;" onclick="openBatchMoveModal()">Move Selected...</button>
+                                <button class="btn btn-danger" style="width:auto;" onclick="confirmBatchDelete()">Delete Selected...</button>
                                 <button class="btn btn-secondary" style="width:auto;" onclick="toggleBatchMoveMode()">Exit Batch Mode</button>
                             </div>
                         </div>

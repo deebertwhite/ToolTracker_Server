@@ -367,11 +367,11 @@ async function handlePhotoUpload(event) {
  * date-based (calibration due date). These pages are meant to be printed once and left in
  * the binder indefinitely, not reprinted on any schedule -- a due date frozen in ink the day
  * it was printed would just go wrong forever, which is worse than not showing one at all.
- * Retired tools are excluded (nothing to sign out). Reuses each tool's already-generated
- * Large Data Matrix image (see BARCODE_SIZES in server.js) -- no new barcode generation
- * needed, just a bigger size than the sticker-sized default for easier scanning off a printed
- * page. Pure client-side render from the same globalBoxesCache/globalDrawersCache/
- * globalToolsCache already kept in sync by renderEditableInfraTree() -- no server round trip.
+ * Retired tools are excluded (nothing to sign out). Each code comes from
+ * GET /api/tools/:id/scan-code.png -- a text-free Data Matrix generated fresh for this purpose
+ * (see that route in server.js for why), not the tool's own stored sticker-label image. Layout
+ * is otherwise a pure client-side render from the same globalBoxesCache/globalDrawersCache/
+ * globalToolsCache already kept in sync by renderEditableInfraTree().
  *
  * Follows the same .printable-area + window.print() pattern as the existing Custom Report
  * Builder's Print button (see style.css's @media print block) -- the browser's own print
@@ -970,6 +970,29 @@ async function confirmBatchMove() {
     }
 }
 
+/** Permanently deletes every selected tool (DELETE /api/tools/batch-delete) after a confirm() prompt -- there's no undo, unlike a move. Stays in Batch Select mode afterward, same as confirmBatchMove(). */
+async function confirmBatchDelete() {
+    if (selectedToolIds.size === 0) return alert('⚠️ Select at least one tool first.');
+    if (!confirm(`Permanently delete ${selectedToolIds.size} tool(s)? This cannot be undone.`)) return;
+
+    try {
+        const res = await fetch('/api/tools/batch-delete', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ tool_ids: Array.from(selectedToolIds) })
+        });
+        const data = await res.json();
+        if (!res.ok) return alert('❌ ' + (data.error || 'Failed to delete tools.'));
+
+        selectedToolIds.clear();
+        updateBatchMoveCount();
+        await renderEditableInfraTree();
+        alert(`✅ Deleted ${data.deleted} tool(s).`);
+    } catch (e) {
+        alert('❌ Network error while deleting tools.');
+    }
+}
+
 /** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory audit for the CURRENT shift window (morning 04:00-14:00 or afternoon 14:00-04:00, see getAuditWindowStart in server.js) is already complete, or a red "-- Audit Pending" chip when it is not. Also shows which window is currently active in #audit-status-window. */
 async function loadAuditStatus() {
     const container = document.getElementById('audit-status-body');
@@ -1380,41 +1403,14 @@ function openEntityModal(type, id) {
             </div>
             <div style="margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Barcode Labels</div>
-                    ${(entity.barcode_image_url || entity.linear_barcode_image_url) ? `
-                        <a href="/api/tools/labels/export?qr_code=${encodeURIComponent(entity.qr_code)}" style="color:var(--blue); font-size:11px; text-decoration:none;">${icon('download')} Download All (ZIP)</a>
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Barcode</div>
+                    ${entity.barcode_image_url_small ? `
+                        <a href="${entity.barcode_image_url_small}" download style="color:var(--blue); font-size:11px; text-decoration:none;">${icon('download')} Download</a>
                     ` : ''}
                 </div>
-                <!-- min-width:0 overrides style.css's global table selector (min-width: 600px,
-                     meant for the wide, horizontally-scrollable data tables elsewhere in the
-                     app) -- without it this table forced itself wider than the ~400px modal,
-                     pushing the Code 128 column off screen despite table-layout:fixed. -->
-                <table style="width:100%; min-width:0; table-layout:fixed; border-collapse:collapse;">
-                    <thead>
-                        <tr style="font-size:10px; color:var(--muted); text-transform:uppercase;">
-                            <th style="width:18%; text-align:left; font-weight:normal; padding-bottom:6px;"></th>
-                            <th style="width:41%; text-align:center; font-weight:normal; padding-bottom:6px;">Data Matrix</th>
-                            <th style="width:41%; text-align:center; font-weight:normal; padding-bottom:6px;">Code 128</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${['small', 'medium', 'large'].map(size => {
-                            const dmUrl = entity[size === 'medium' ? 'barcode_image_url' : `barcode_image_url_${size}`];
-                            const linUrl = entity[size === 'medium' ? 'linear_barcode_image_url' : `linear_barcode_image_url_${size}`];
-                            const dmCell = dmUrl
-                                ? `<img src="${dmUrl}" onclick="openImageModal('${dmUrl}')" style="width:36px;height:36px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
-                                : `<span style="color:var(--muted); font-size:11px;">--</span>`;
-                            const linCell = linUrl
-                                ? `<img src="${linUrl}" onclick="openImageModal('${linUrl}')" style="width:100%;max-width:80px;height:26px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">`
-                                : `<span style="color:var(--muted); font-size:11px;">--</span>`;
-                            return `<tr>
-                                <td style="font-size:11px; color:var(--muted); text-transform:capitalize; padding:6px 0;">${size}</td>
-                                <td style="text-align:center; padding:6px 0;">${dmCell}</td>
-                                <td style="text-align:center; padding:6px 0;">${linCell}</td>
-                            </tr>`;
-                        }).join('')}
-                    </tbody>
-                </table>
+                ${entity.barcode_image_url_small
+                    ? `<div style="text-align:center;"><img src="${entity.barcode_image_url_small}" onclick="openImageModal('${entity.barcode_image_url_small}')" style="width:100px;height:100px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;"></div>`
+                    : `<span style="color:var(--muted); font-size:11px;">No barcode on file.</span>`}
             </div>
             ${!entity.photo_url ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:10px;">No photo on file.</div>` : ''}
         `;
