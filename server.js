@@ -1753,6 +1753,38 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
     }
 });
 
+// Moves several tools to a different drawer in one action -- the Master Storage & Asset
+// Tree's Batch Move mode (admin.js) lets an admin select multiple tools instead of editing
+// each one's own Location cascade individually. Same requireRole(2) threshold as the
+// single-tool edit endpoint above, and the same reasoning for not blocking a tool that's
+// currently 'Out': it isn't physically in any drawer while checked out anyway, so reassigning
+// where it lives once returned is a legitimate, unrelated action -- true whether moving one
+// tool or fifty. Deliberately only touches drawer_id, nothing else about the tool (status,
+// calibration, etc.), so it can't be used as a backdoor around the single-tool edit form's
+// other validation.
+app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { tool_ids, drawer_id } = req.body;
+    if (!Array.isArray(tool_ids) || tool_ids.length === 0) {
+        return res.status(400).json({ error: 'No tools selected.' });
+    }
+    if (!drawer_id) {
+        return res.status(400).json({ error: 'A destination drawer is required.' });
+    }
+    try {
+        const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
+        if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid destination drawer.' });
+
+        const result = await pool.query(
+            'UPDATE tools SET drawer_id = $1 WHERE tool_id = ANY($2::int[]) RETURNING tool_id',
+            [drawer_id, tool_ids]
+        );
+        res.json({ success: true, moved: result.rows.length });
+    } catch (err) {
+        console.error('Batch Move Error:', err);
+        res.status(500).json({ error: 'Failed to move tools.' });
+    }
+});
+
 // Sets (or clears) where a tool sits on its drawer's photo, for the visual shadow-board map
 // (see migrations/009_tool_positions.sql). Deliberately separate from PUT /api/tools/:id --
 // dragging a marker on a photo is a distinct, frequent, low-stakes action that shouldn't

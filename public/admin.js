@@ -23,6 +23,12 @@ let globalToolGroupsCache = [];
 // node expanded with nothing remembered at all.
 let treeExpandState = {};
 
+// Batch Move mode state for the Master Storage & Asset Tree -- see toggleBatchMoveMode() and
+// PUT /api/tools/batch-move. selectedToolIds holds numeric tool_id, not qr_code (matching
+// what the batch-move endpoint expects), unlike most of this file's tool lookups.
+let batchMoveMode = false;
+let selectedToolIds = new Set();
+
 // Bumped at the start of every renderEditableInfraTree() call so an overlapping, slower-to-
 // resolve call can detect it's no longer the latest and skip applying its (by then stale)
 // results -- see the guard in that function.
@@ -847,7 +853,92 @@ async function renderEditableInfraTree() {
         });
         container.innerHTML = html;
         requestAnimationFrame(() => window.scrollTo(0, savedScrollY));
-    } catch (e) { container.innerHTML = `<div style="color: var(--red); padding: 20px;">Error rendering map.</div>`; }
+    } catch (e) {
+        // Logged, not just swallowed -- a silent catch here previously made a real bug (a
+        // ReferenceError from an incomplete feature, accidentally shipped) look like a generic
+        // "something broke" with no way to tell what from the UI alone.
+        console.error('renderEditableInfraTree failed:', e);
+        container.innerHTML = `<div style="color: var(--red); padding: 20px;">Error rendering map.</div>`;
+    }
+}
+
+// ==========================================
+// 3.5 BATCH MOVE (Master Storage & Asset Tree)
+// ==========================================
+/**
+ * Toggles Batch Move mode: shows a checkbox on every tool row (re-renders the tree so they
+ * appear) and the selection-count bar, or hides both and clears any in-progress selection
+ * when turned back off.
+ */
+function toggleBatchMoveMode() {
+    batchMoveMode = !batchMoveMode;
+    const btn = document.getElementById('btn-batch-move-toggle');
+    const bar = document.getElementById('batch-move-bar');
+    if (btn) btn.classList.toggle('active', batchMoveMode);
+    if (!batchMoveMode) selectedToolIds.clear();
+    if (bar) bar.style.display = batchMoveMode ? 'flex' : 'none';
+    updateBatchMoveCount();
+    renderEditableInfraTree();
+}
+
+/** Adds/removes one tool_id from the running selection (called by each row's checkbox) and updates the count bar. */
+function toggleToolSelection(toolId, checked) {
+    if (checked) selectedToolIds.add(toolId); else selectedToolIds.delete(toolId);
+    updateBatchMoveCount();
+}
+
+/** Clears the selection (e.g. "Clear Selection" button) without leaving Batch Move mode, and re-renders so every checkbox unchecks. */
+function clearBatchMoveSelection() {
+    selectedToolIds.clear();
+    updateBatchMoveCount();
+    renderEditableInfraTree();
+}
+
+function updateBatchMoveCount() {
+    const el = document.getElementById('batch-move-count');
+    if (el) el.textContent = `${selectedToolIds.size} tool(s) selected`;
+}
+
+/** Opens the destination-drawer picker, populating its Department select fresh from globalDeptsCache (same cascade pattern as the Ingest New Asset / tool-edit Location fields). Requires at least one tool selected. */
+function openBatchMoveModal() {
+    if (selectedToolIds.size === 0) return alert('⚠️ Select at least one tool first.');
+    const subtitle = document.getElementById('batch-move-modal-subtitle');
+    if (subtitle) subtitle.textContent = `Moving ${selectedToolIds.size} tool(s) -- choose a destination drawer.`;
+
+    const deptSelect = document.getElementById('batch-move-dept');
+    deptSelect.innerHTML = '<option value="">-- Select Department --</option>' + globalDeptsCache.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
+    populateBoxSelect(document.getElementById('batch-move-box'), null);
+    populateDrawerSelect(document.getElementById('batch-move-drawer'), null);
+
+    document.getElementById('batch-move-modal-overlay').style.display = 'flex';
+}
+
+function closeBatchMoveModal() {
+    document.getElementById('batch-move-modal-overlay').style.display = 'none';
+}
+
+/** Submits the batch move to PUT /api/tools/batch-move, then closes the modal, clears the selection (but stays in Batch Move mode -- ready for another round), and refreshes the tree. */
+async function confirmBatchMove() {
+    const drawerId = document.getElementById('batch-move-drawer').value;
+    if (!drawerId) return alert('⚠️ Select a destination drawer.');
+
+    try {
+        const res = await fetch('/api/tools/batch-move', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ tool_ids: Array.from(selectedToolIds), drawer_id: drawerId })
+        });
+        const data = await res.json();
+        if (!res.ok) return alert('❌ ' + (data.error || 'Failed to move tools.'));
+
+        closeBatchMoveModal();
+        selectedToolIds.clear();
+        updateBatchMoveCount();
+        await renderEditableInfraTree();
+        alert(`✅ Moved ${data.moved} tool(s).`);
+    } catch (e) {
+        alert('❌ Network error while moving tools.');
+    }
 }
 
 /** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory audit for the CURRENT shift window (morning 04:00-14:00 or afternoon 14:00-04:00, see getAuditWindowStart in server.js) is already complete, or a red "-- Audit Pending" chip when it is not. Also shows which window is currently active in #audit-status-window. */
