@@ -14,6 +14,20 @@ let globalToolsCache = [];
 let globalUsersCache = [];
 let globalToolGroupsCache = [];
 
+// Which dept-content-/box-content-/drawer-content- nodes of the Master Storage & Asset Tree
+// are currently expanded, keyed by that content div's id -- see toggleTreeVisibility() and
+// renderEditableInfraTree(). Anything not present here is treated as collapsed (the default
+// for a node never touched this session), and any entry here survives a full tree rebuild
+// (e.g. after saving an edit), so expanding down into one toolbox/drawer and then editing a
+// tool no longer dumps the whole tree back open -- previously every render started every
+// node expanded with nothing remembered at all.
+let treeExpandState = {};
+
+// Bumped at the start of every renderEditableInfraTree() call so an overlapping, slower-to-
+// resolve call can detect it's no longer the latest and skip applying its (by then stale)
+// results -- see the guard in that function.
+let treeRenderToken = 0;
+
 // ==========================================
 // 2. UTILITIES & VIEW TOGGLES
 // ==========================================
@@ -108,20 +122,20 @@ function closeSubPanel(workspaceId, subhubId) {
  * Expands/collapses one node (department, toolbox, or drawer) of the infrastructure tree
  * rendered by renderEditableInfraTree(). Flips the referenced containerId between
  * display:block/none and flips its sibling .toggle-icon between a chevron-down (expanded)
- * and chevron-right (collapsed).
+ * and chevron-right (collapsed). Also records the new state in treeExpandState, keyed by
+ * containerId, so a later full tree rebuild (renderEditableInfraTree() re-fetches and
+ * rebuilds from scratch on every save) can restore exactly which nodes were open instead of
+ * defaulting everything back to expanded.
  */
 function toggleTreeVisibility(containerId, headerElement) {
     const container = document.getElementById(containerId);
     const toggleIcon = headerElement.querySelector('.toggle-icon');
     if (!container) return;
 
-    if (container.style.display === 'none') {
-        container.style.display = 'block';
-        if (toggleIcon) toggleIcon.innerHTML = ICONS['chevron-down'];
-    } else {
-        container.style.display = 'none';
-        if (toggleIcon) toggleIcon.innerHTML = ICONS['chevron-right'];
-    }
+    const expanding = container.style.display === 'none';
+    container.style.display = expanding ? 'block' : 'none';
+    if (toggleIcon) toggleIcon.innerHTML = expanding ? ICONS['chevron-down'] : ICONS['chevron-right'];
+    treeExpandState[containerId] = expanding;
 }
 
 // ==========================================
@@ -311,20 +325,20 @@ async function handlePhotoUpload(event) {
 // ==========================================
 /**
  * Builds and prints a reference sheet for one toolbox: every drawer in it, each with its own
- * photo (if set) and a table of its tools -- name, barcode ID, serial number, a calibration
- * note, and a scannable Data Matrix image -- meant to be printed and kept in a binder near
- * the physical box, so a tool can be signed out by scanning straight from the page instead of
- * needing a barcode label on the tool itself or in its drawer slot.
+ * photo (if set) and a table of its tools -- name, barcode ID, serial number, and a scannable
+ * Data Matrix image -- meant to be printed and kept in a binder near the physical box, so a
+ * tool can be signed out by scanning straight from the page instead of needing a barcode
+ * label on the tool itself or in its drawer slot.
  *
- * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.). A printed
- * page sitting in a binder for weeks can't track live state, and a stale "In" would be worse
- * than no status at all; the calibration note is similarly just "Calibrated -- Due <date>"
- * from whatever's cached right now, not a live compliance check. Retired tools are excluded
- * (nothing to sign out). Reuses each tool's already-generated Large Data Matrix image (see
- * BARCODE_SIZES in server.js) -- no new barcode generation needed, just a bigger size than
- * the sticker-sized default for easier scanning off a printed page. Pure client-side render
- * from the same globalBoxesCache/globalDrawersCache/globalToolsCache already kept in sync by
- * renderEditableInfraTree() -- no server round trip.
+ * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.) or anything
+ * date-based (calibration due date). These pages are meant to be printed once and left in
+ * the binder indefinitely, not reprinted on any schedule -- a due date frozen in ink the day
+ * it was printed would just go wrong forever, which is worse than not showing one at all.
+ * Retired tools are excluded (nothing to sign out). Reuses each tool's already-generated
+ * Large Data Matrix image (see BARCODE_SIZES in server.js) -- no new barcode generation
+ * needed, just a bigger size than the sticker-sized default for easier scanning off a printed
+ * page. Pure client-side render from the same globalBoxesCache/globalDrawersCache/
+ * globalToolsCache already kept in sync by renderEditableInfraTree() -- no server round trip.
  *
  * Follows the same .printable-area + window.print() pattern as the existing Custom Report
  * Builder's Print button (see style.css's @media print block) -- the browser's own print
@@ -347,9 +361,6 @@ function openToolboxPrintSheet(boxId) {
             .sort(byName);
 
         const rows = tools.map(t => {
-            const calNote = t.is_calibrated
-                ? `Calibrated &mdash; Due ${t.cal_due_date ? t.cal_due_date.split('T')[0] : 'Unknown'}`
-                : '';
             const barcodeImg = t.barcode_image_url_large
                 ? `<img src="${t.barcode_image_url_large}" style="width:72px; height:72px; object-fit:contain;">`
                 : '<span style="color:#999; font-size:11px;">No barcode on file</span>';
@@ -361,7 +372,6 @@ function openToolboxPrintSheet(boxId) {
                         <span style="font-family:monospace; font-size:12px;">${t.qr_code}</span>
                         ${t.serial_number ? `<br><span style="font-size:11px;">S/N: ${t.serial_number}</span>` : ''}
                     </td>
-                    <td style="${cellStyle} font-size:12px;">${calNote}</td>
                 </tr>`;
         }).join('');
 
@@ -370,8 +380,8 @@ function openToolboxPrintSheet(boxId) {
                 <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${drawer.name}</h3>
                 ${drawer.photo_url ? `<img src="${drawer.photo_url}" style="max-width:280px; max-height:200px; object-fit:contain; float:right; margin:0 0 10px 12px; border:1px solid #999;">` : ''}
                 <table style="width:100%; min-width:0; border-collapse:collapse;">
-                    <thead><tr><th style="text-align:left; padding:6px; background:#fff; color:#000;">Scan</th><th style="text-align:left; padding:6px; background:#fff; color:#000;">Tool</th><th style="text-align:left; padding:6px; background:#fff; color:#000;">Calibration</th></tr></thead>
-                    <tbody>${rows || `<tr><td colspan="3" style="padding:6px; color:#666;">No tools currently assigned to this drawer.</td></tr>`}</tbody>
+                    <thead><tr><th style="text-align:left; padding:6px; background:#fff; color:#000;">Scan</th><th style="text-align:left; padding:6px; background:#fff; color:#000;">Tool</th></tr></thead>
+                    <tbody>${rows || `<tr><td colspan="2" style="padding:6px; color:#666;">No tools currently assigned to this drawer.</td></tr>`}</tbody>
                 </table>
                 <div style="clear:both;"></div>
             </div>`;
@@ -662,18 +672,54 @@ function exportScopedLabels() {
  * any level. Clicking a department/toolbox/drawer/tool's name opens openEntityModal(), which
  * is the only place those actions live now (gated there by role weight, same thresholds as
  * before: canEditDepts >= 4, canEditInfra >= 3, canEditTools >= 2). Departments/toolboxes/
- * drawers additionally have a small toggle-icon (separate click target) for expand/collapse,
- * driven by toggleTreeVisibility() via the generated dept-content-/box-content-/
- * drawer-content- element ids; tools are leaves, so their whole row just opens the modal.
+ * drawers additionally have a toggle-icon (separate click target, with padding+negative-margin
+ * for a real touch target on a phone/tablet without changing its visual size) for
+ * expand/collapse, driven by toggleTreeVisibility() via the generated dept-content-/
+ * box-content-/drawer-content- element ids; tools are leaves, so their whole row just opens
+ * the modal.
+ *
+ * Every node's expanded/collapsed state is read from treeExpandState (default collapsed for
+ * anything not in it) and baked into its initial display/chevron here, so this full rebuild --
+ * which runs after every single dept/box/drawer/tool create/edit/delete, there's no
+ * incremental patching -- doesn't dump the whole tree back open and lose whatever the admin
+ * had drilled down into. The page's scroll position is saved/restored around the rebuild for
+ * the same reason.
  */
 async function renderEditableInfraTree() {
     const container = document.getElementById('editable-infra-tree-container');
     if(!container) return;
-    container.innerHTML = `<div style="text-align: center; color: var(--muted); padding: 20px;">Fetching structural data...</div>`;
-    
+
+    // This function is called independently from a dozen+ places (every dept/box/drawer/tool
+    // create/edit/delete) with no sequencing between calls. If two overlap -- a slow fetch
+    // from an earlier call resolving after a newer one already rendered -- the stale call
+    // would otherwise overwrite the fresh tree with outdated data AND yank the scroll position
+    // back to wherever it was when the stale call started. This token guards against that:
+    // only the call that's still the most recently started one is allowed to actually apply
+    // its results.
+    const renderToken = ++treeRenderToken;
+
+    // This whole container is rebuilt from scratch below (not patched in place), which would
+    // otherwise reset the page's scroll position every time -- jarring right after saving an
+    // edit, when the admin is almost always still looking at the exact spot they just edited.
+    // Restored once the rebuilt tree (now at its correct, taller-or-shorter height thanks to
+    // treeExpandState) has actually settled, not synchronously -- the browser hasn't
+    // recalculated layout yet immediately after innerHTML is assigned.
+    const savedScrollY = window.scrollY;
+
+    // Deliberately NOT replaced with a "Fetching..." placeholder here -- this function reruns
+    // after every single create/edit/delete, and on a local/fast connection that placeholder
+    // did nothing but collapse the whole tree to one line and then immediately re-expand it
+    // once data arrived, a jarring flash for no real benefit. Leaving the previous render in
+    // place until the new one is actually ready to swap in is both less disruptive and avoids
+    // a second layout pass.
     try {
         const [storageRes, toolsRes] = await Promise.all([fetch('/api/storage'), fetch('/api/tools')]);
         const storage = await storageRes.json(); const tools = await toolsRes.json();
+
+        // A newer call already started (and possibly already rendered) while this one was
+        // still fetching -- bail out entirely rather than applying now-stale data over it,
+        // touching neither the shared caches below nor the DOM/scroll position.
+        if (renderToken !== treeRenderToken) return;
 
         globalDeptsCache = storage.departments;
         globalBoxesCache = storage.toolboxes;
@@ -683,17 +729,26 @@ async function renderEditableInfraTree() {
         let html = '';
         storage.departments.forEach(dept => {
             const deptContentId = `dept-content-${dept.dept_id}`;
+            // Departments default OPEN (there are only a handful, and they're just names +
+            // toolbox counts -- not where the actual clutter/scrolling problem is), unless the
+            // admin has explicitly collapsed this one. Toolboxes and drawers below default
+            // CLOSED instead (treeExpandState[id] === true) since that's where a fully-expanded
+            // tree gets genuinely overwhelming -- every tool in every drawer in every box.
+            const deptExpanded = treeExpandState[deptContentId] !== false;
 
             // Clicking the toggle-icon expands/collapses; clicking the name opens the entity
             // modal (view details, or edit/delete if permitted) -- see openEntityModal().
+            // The toggle icon's padding+negative-margin gives it a real touch target (was just
+            // the bare glyph, too small to tap reliably on a phone/tablet) without changing its
+            // visual size or nudging the row's layout.
             html += `<div class="card" style="border-left: 4px solid var(--accent); margin-bottom: 15px; padding: 15px;">
                         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; user-select: none;">
-                            <span class="icon toggle-icon" style="color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)">${ICONS['chevron-down']}</span>
+                            <span class="icon toggle-icon tree-toggle-tap" style="color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${deptContentId}', this.parentElement)">${deptExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span>
                             <h4 style="margin: 0; cursor: pointer;" onclick="openEntityModal('department', '${dept.dept_id}')">
                                 ${icon('building-2')} ${dept.name} <span style="font-weight:normal; color:var(--muted); font-size:13px;">(${dept.prefix_code})</span>
                             </h4>
                         </div>
-                        <div id="${deptContentId}">`;
+                        <div id="${deptContentId}" style="display:${deptExpanded ? 'block' : 'none'};">`;
 
             const deptBoxes = storage.toolboxes.filter(b => b.dept_id === dept.dept_id);
             if(deptBoxes.length === 0) html += `<div class="tree-item" style="color:var(--muted);">No storage installed.</div>`;
@@ -702,18 +757,19 @@ async function renderEditableInfraTree() {
                 const boxTools = tools.tools.filter(t => { const dr = storage.drawers.find(d => d.drawer_id === t.drawer_id); return dr && dr.box_id === box.box_id; });
                 const thumb = box.photo_url ? `<img src="${box.photo_url}" onclick="openImageModal('${box.photo_url}')" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : icon('toolbox');
                 const boxContentId = `box-content-${box.box_id}`;
+                const boxExpanded = treeExpandState[boxContentId] === true;
 
                 html += `<div class="tree-node" style="padding: 10px;">
                             <div style="display: flex; align-items: center; gap: 10px; user-select: none;">
                                 ${thumb}
-                                <span class="icon toggle-icon" style="font-size: 12px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)">${ICONS['chevron-down']}</span>
+                                <span class="icon toggle-icon tree-toggle-tap" style="font-size: 12px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)">${boxExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span>
                                 <span onclick="openEntityModal('toolbox', '${box.box_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                     <strong>${box.name}</strong>
                                     <span style="background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 10px; color: var(--accent); font-family: monospace;">${box.qr_code || 'NO-ID'}</span>
                                     <span style="font-size:12px; color:var(--muted);">(${boxTools.length} Assets)</span>
                                 </span>
                             </div>
-                            <div id="${boxContentId}" style="margin-top: 10px;">`;
+                            <div id="${boxContentId}" style="margin-top: 10px; display:${boxExpanded ? 'block' : 'none'};">`;
 
                 const boxDrawers = storage.drawers.filter(d => d.box_id === box.box_id).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
@@ -722,17 +778,18 @@ async function renderEditableInfraTree() {
                         const drToolsList = tools.tools.filter(t => t.drawer_id === dr.drawer_id);
                         const drThumb = dr.photo_url ? `<img src="${dr.photo_url}" onclick="openImageModal('${dr.photo_url}')" style="width: 20px; height: 20px; border-radius: 4px; object-fit: cover; cursor: zoom-in;">` : icon('folder');
                         const drawerContentId = `drawer-content-${dr.drawer_id}`;
+                        const drawerExpanded = treeExpandState[drawerContentId] === true;
 
                         html += `<div class="tree-child" style="padding: 6px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
                                     <div style="display: flex; align-items: center; gap: 8px; user-select: none;">
                                         ${drThumb}
-                                        <span class="icon toggle-icon" style="font-size: 10px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)">${ICONS['chevron-down']}</span>
+                                        <span class="icon toggle-icon tree-toggle-tap" style="font-size: 10px; color: var(--muted); cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)">${drawerExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span>
                                         <span onclick="openEntityModal('drawer', '${dr.drawer_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                             <span style="font-weight: bold;">${dr.name}</span>
                                             <span style="font-size:11px; color:var(--muted); margin-left: 5px;">(${drToolsList.length} tools)</span>
                                         </span>
                                     </div>
-                                    <div id="${drawerContentId}" style="margin-top: 8px; padding-left: 20px; border-left: 1px dashed var(--border);">`;
+                                    <div id="${drawerContentId}" style="margin-top: 8px; padding-left: 20px; border-left: 1px dashed var(--border); display:${drawerExpanded ? 'block' : 'none'};">`;
 
                         if (drToolsList.length === 0) {
                             html += `<div style="font-size: 12px; color: var(--muted); padding: 4px 0;">Drawer is empty.</div>`;
@@ -783,6 +840,7 @@ async function renderEditableInfraTree() {
                       </div>`; 
         });
         container.innerHTML = html;
+        requestAnimationFrame(() => window.scrollTo(0, savedScrollY));
     } catch (e) { container.innerHTML = `<div style="color: var(--red); padding: 20px;">Error rendering map.</div>`; }
 }
 
