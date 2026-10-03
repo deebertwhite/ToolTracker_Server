@@ -1387,7 +1387,7 @@ function openEntityModal(type, id) {
                 <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Tool Positions (Shadow Board Map)</div>
                 <div id="em-position-map-wrap" style="position:relative;display:inline-block;max-width:100%;border-radius:8px;overflow:hidden;border:1px solid var(--border);line-height:0;">
                     <img id="em-position-map-img" src="${entity.photo_url}" style="display:block;max-width:100%;">
-                    <div id="em-position-map-markers" style="position:absolute;top:0;left:0;width:100%;height:100%;"></div>
+                    <div id="em-position-map-markers" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
                 </div>
                 <div id="em-position-map-controls" style="margin-top:10px;"></div>
             </div>
@@ -1722,7 +1722,7 @@ function renderPositionMap(drawer) {
         <div title="${t.name} (${t.status})" onclick="event.stopPropagation();${canEditTools ? ` unplaceToolPosition('${t.qr_code}')` : ''}"
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
                     width:16px; height:16px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
-                    box-shadow:0 0 4px rgba(0,0,0,0.6);${canEditTools ? ' cursor:pointer;' : ''}"></div>
+                    box-shadow:0 0 4px rgba(0,0,0,0.6); pointer-events:auto;${canEditTools ? ' cursor:pointer;' : ''}"></div>
     `).join('');
 
     const img = document.getElementById('em-position-map-img');
