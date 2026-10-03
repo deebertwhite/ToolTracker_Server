@@ -369,8 +369,8 @@ function openToolboxPrintSheet(boxId) {
             <div style="break-inside:avoid; page-break-inside:avoid; margin-bottom:30px;">
                 <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${drawer.name}</h3>
                 ${drawer.photo_url ? `<img src="${drawer.photo_url}" style="max-width:280px; max-height:200px; object-fit:contain; float:right; margin:0 0 10px 12px; border:1px solid #999;">` : ''}
-                <table style="width:100%; border-collapse:collapse;">
-                    <thead><tr><th style="text-align:left; padding:6px;">Scan</th><th style="text-align:left; padding:6px;">Tool</th><th style="text-align:left; padding:6px;">Calibration</th></tr></thead>
+                <table style="width:100%; min-width:0; border-collapse:collapse;">
+                    <thead><tr><th style="text-align:left; padding:6px; background:#fff; color:#000;">Scan</th><th style="text-align:left; padding:6px; background:#fff; color:#000;">Tool</th><th style="text-align:left; padding:6px; background:#fff; color:#000;">Calibration</th></tr></thead>
                     <tbody>${rows || `<tr><td colspan="3" style="padding:6px; color:#666;">No tools currently assigned to this drawer.</td></tr>`}</tbody>
                 </table>
                 <div style="clear:both;"></div>
