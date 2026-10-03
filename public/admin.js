@@ -29,6 +29,13 @@ let treeExpandState = {};
 let batchMoveMode = false;
 let selectedToolIds = new Set();
 
+let adminIdleTimer = null;
+// Separate from (and much shorter than) the session cookie's own 8-hour sliding expiry (see
+// server.js) -- that protects the credential itself from living forever, this protects a
+// shared/unattended admin terminal from being left logged in and walked away from. Five
+// minutes of no mouse/keyboard/touch activity anywhere on the page logs out automatically.
+const ADMIN_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
 // Bumped at the start of every renderEditableInfraTree() call so an overlapping, slower-to-
 // resolve call can detect it's no longer the latest and skip applying its (by then stale)
 // results -- see the guard in that function.
@@ -207,6 +214,8 @@ function bootstrapAdminUI(user) {
     // whenever they're actually managed -- this bootstrap fetch just covers the case where a
     // tool is edited before Reports has ever been visited this session.
     fetch('/api/tool-groups').then(r => r.json()).then(data => { if (data.success) globalToolGroupsCache = data.groups; }).catch(() => {});
+
+    resetAdminIdleTimer();
 }
 
 /** Authenticates against POST /api/login with the badge/username + PIN entered on the #auth-wall. On success the server establishes a session cookie and bootstrapAdminUI() takes over from there. */
@@ -255,6 +264,24 @@ async function logoutAdmin() {
         window.location.reload();
     }
 }
+
+/**
+ * Restarts the 5-minute idle-logout countdown (see ADMIN_IDLE_TIMEOUT_MS). Called on every
+ * mousedown/mousemove/keydown/scroll/touchstart/click once a session is active, and once from
+ * bootstrapAdminUI() to start the clock. No-ops while the login wall is showing so a stray
+ * event listener firing before login (or after logout, until the next reload) can't do anything.
+ */
+function resetAdminIdleTimer() {
+    if (adminIdleTimer) clearTimeout(adminIdleTimer);
+    if (!currentAdminBadge) return;
+    adminIdleTimer = setTimeout(() => {
+        alert('⏱️ Logged out after 5 minutes of inactivity.');
+        logoutAdmin();
+    }, ADMIN_IDLE_TIMEOUT_MS);
+}
+['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click'].forEach(evt => {
+    document.addEventListener(evt, resetAdminIdleTimer, { passive: true });
+});
 
 /** Submits the logged-in user's own username/PIN changes from the My Account panel to PUT /api/users/me/update, then clears the input fields on success. */
 async function updateMyAccount() {
