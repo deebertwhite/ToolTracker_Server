@@ -291,6 +291,63 @@ async function updateMyAccount() {
     else { const err = await res.json(); alert('❌ ' + err.error); }
 }
 
+/**
+ * Loads the logged-in user's own login card into #my-login-card-preview, if one's been
+ * generated -- self-service counterpart to the "Login Card" section on a subordinate's entity
+ * card (see issueUserLoginCard()/printUserLoginCard()), which a super_admin can never reach for
+ * their OWN account: GET /api/users only ever returns *subordinates* (strictly lower role
+ * weight), so the single most senior account in the system never appears in its own Manage
+ * Accounts list at all, let alone passes the hierarchy check that route's issue/view actions
+ * require. Probes with a throwaway Image() rather than fetch() so a 404 (no card yet) shows a
+ * plain "not generated" message instead of a broken-image icon.
+ */
+function loadMyLoginCard() {
+    const preview = document.getElementById('my-login-card-preview');
+    const printBtn = document.getElementById('btn-print-my-card');
+    if (!preview) return;
+    const probe = new Image();
+    const src = `/api/users/me/login-card.png?t=${Date.now()}`; // cache-bust so a reissue is reflected immediately
+    probe.onload = () => {
+        preview.innerHTML = `<img src="${src}" style="width:120px;height:120px;object-fit:contain;background:#fff;border-radius:4px;">`;
+        if (printBtn) printBtn.style.display = '';
+    };
+    probe.onerror = () => {
+        preview.innerHTML = `<span style="color:var(--muted); font-size:12px;">No login card generated yet.</span>`;
+        if (printBtn) printBtn.style.display = 'none';
+    };
+    probe.src = src;
+}
+
+/** Issues/reissues the logged-in user's own login card (POST /api/users/me/login-token), then reloads the preview. Reissuing invalidates whatever card they already had, same as the admin-issued version. */
+async function issueMyLoginCard() {
+    if (document.getElementById('my-login-card-preview').querySelector('img') && !confirm('Reissue your login card? Your current card (printed or digital) will stop working immediately.')) return;
+    const res = await fetch('/api/users/me/login-token', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' } });
+    if (!res.ok) return alert('❌ Failed to generate login card.');
+    loadMyLoginCard();
+}
+
+/** Prints the logged-in user's own login card -- same layout as printUserLoginCard(), just sourced from GET /api/session for full_name/badge_id (self) instead of globalUsersCache (subordinates only, see loadMyLoginCard()'s comment). */
+async function printMyLoginCard() {
+    const session = await (await fetch('/api/session')).json();
+    if (!session.success) return;
+
+    document.getElementById('toolbox-print-sheet-content').innerHTML = `
+        <div style="display:flex; align-items:center; gap:20px; border:2px solid #000; border-radius:12px; padding:24px; max-width:400px;">
+            <img src="/api/users/me/login-card.png" style="width:140px; height:140px; object-fit:contain;">
+            <div>
+                <div style="font-size:20px; font-weight:bold;">${session.user.full_name}</div>
+                <div style="font-family:monospace; font-size:14px; color:#555; margin-top:4px;">${session.user.badge_id}</div>
+                <div style="font-size:11px; color:#777; margin-top:10px;">Scan to sign in to the ToolTracker admin panel.</div>
+            </div>
+        </div>
+    `;
+
+    const area = document.getElementById('toolbox-print-sheet-area');
+    area.style.display = 'block';
+    await waitForImages(area);
+    window.print();
+}
+
 // ==========================================
 // 4. PHOTO UPLOADS
 // ==========================================

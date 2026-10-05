@@ -1273,6 +1273,23 @@ app.post('/api/users/:badge_id/reset-pin', requireFetchHeader, requireRole(1), a
     }
 });
 
+// Self-service: issue/reissue the logged-in user's OWN login card -- no hierarchy check, since
+// acting on yourself is always allowed (same reasoning as PUT /api/users/me/update above). This
+// exists because the hierarchy-gated route below requires strictly outranking the target, which
+// a super_admin can never satisfy for themselves (nothing outranks a super_admin) -- without
+// this, the single most senior account in the system would be the one person who could never
+// get their own card. MUST be registered before POST /api/users/:badge_id/login-token -- that
+// wildcard route would otherwise swallow this literal "me" path, the same way PUT
+// /api/tools/batch-move once collided with PUT /api/tools/:id.
+app.post('/api/users/me/login-token', requireFetchHeader, requireRole(1), async (req, res) => {
+    try {
+        await pool.query('UPDATE users SET login_token = $1 WHERE badge_id = $2', [generateLoginToken(), req.authUser.badge_id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to issue login card.' });
+    }
+});
+
 // Issues (or reissues) a user's login-card QR token -- same hierarchy rule as reset-pin above.
 // Reissuing overwrites the old token outright, so a lost/compromised card stops working the
 // moment a new one is generated; there's no way to have two valid cards for one person at once.
@@ -1287,6 +1304,22 @@ app.post('/api/users/:badge_id/login-token', requireFetchHeader, requireRole(1),
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Failed to issue login card.' });
+    }
+});
+
+// Self-service: render the logged-in user's OWN login card. No hierarchy check needed (same
+// reasoning as POST /api/users/me/login-token above) -- requireRole(1) is enough since
+// req.authUser.badge_id is the verified session identity, never a client-supplied badge. MUST
+// be registered before GET /api/users/:badge_id/login-card.png for the same route-ordering
+// reason as the POST version above.
+app.get('/api/users/me/login-card.png', requireRole(1), async (req, res) => {
+    try {
+        const result = await pool.query('SELECT login_token FROM users WHERE badge_id = $1', [req.authUser.badge_id]);
+        if (!result.rows[0]?.login_token) return res.status(404).send('No login card issued yet.');
+        const { png } = await generateQrPngAtSize(result.rows[0].login_token, 20, 600, 'FFFFFF');
+        res.type('png').send(png);
+    } catch (err) {
+        res.status(500).send('Failed to generate login card.');
     }
 });
 

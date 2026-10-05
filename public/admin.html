@@ -65,7 +65,7 @@
         <!-- Hub view: top-level landing grid with 4 cards (Account, Personnel, Inventory, Reports); each card calls openWorkspace() to reveal its panel below -->
         <div id="hub-view" class="grid-container no-print">
             <!-- Card 1: Account -->
-            <div class="hub-card" onclick="openWorkspace('ws-account')">
+            <div class="hub-card" onclick="openWorkspace('ws-account'); loadMyLoginCard();">
                 <div class="hub-icon"><span class="icon" data-icon="user"></span></div><div class="hub-title">My Account</div><div class="hub-desc">Update personal credentials.</div>
             </div>
             <!-- Card 2: Personnel (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
@@ -92,6 +92,15 @@
                     <div class="form-group"><label class="form-label">New Username</label><input class="form-input" id="my-new-username" placeholder="Leave blank to keep current"></div>
                     <div class="form-group"><label class="form-label">New PIN Code</label><input class="form-input" id="my-new-pin" type="password" placeholder="Leave blank to keep current"></div>
                     <button class="btn" onclick="updateMyAccount()">Save Security Updates</button>
+                </div>
+                <div class="card" style="max-width: 500px;">
+                    <h3 style="margin-bottom: 8px;">My Login Card</h3>
+                    <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">Scan this at the login screen to sign in instantly, no PIN needed. Print it or save it to your phone.</p>
+                    <div id="my-login-card-preview" style="margin-bottom:12px;"><span style="color:var(--muted); font-size:12px;">Loading...</span></div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-secondary" style="width:auto;" onclick="issueMyLoginCard()"><span class="icon" data-icon="qr-code"></span> Generate / Reissue Card</button>
+                        <button class="btn btn-secondary" style="width:auto; display:none;" id="btn-print-my-card" onclick="printMyLoginCard()"><span class="icon" data-icon="printer"></span> Print My Card</button>
+                    </div>
                 </div>
             </div>
 
