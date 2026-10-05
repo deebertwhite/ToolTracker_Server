@@ -49,7 +49,11 @@ function startWorkflow(mode) {
 
     document.getElementById('screen-idle').style.display = 'none';
     document.getElementById('screen-auth').style.display = 'flex';
-    document.getElementById('auth-badge-input').focus();
+    // Login card is the fast path (scan with no click first, see #auth-login-card-input's own
+    // comment) -- focusing here on every workflow start, not just the page's initial autofocus,
+    // is what actually makes that true after the very first session of the day. Without this, a
+    // USB scanner's keystrokes land in #auth-badge-input instead for every subsequent session.
+    document.getElementById('auth-login-card-input').focus();
 }
 
 /**
@@ -66,6 +70,7 @@ function resetToIdle() {
     auditExcludedCount = 0;
     auditGateReturnPending = false;
 
+    document.getElementById('auth-login-card-input').value = '';
     document.getElementById('auth-badge-input').value = '';
     document.getElementById('auth-pin-input').value = '';
     document.getElementById('screen-action').style.display = 'none';
@@ -109,34 +114,81 @@ async function authenticateUser() {
             return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Identity not recognized.'));
         }
 
-        activeUser = {
-            badgeId: data.user.badge_id,
-            name: data.user.full_name,
-            initials: data.user.full_name.split(' ').map(n => n[0]).join(''),
-            pin: pin,
-            deptId: data.user.dept_id,
-            role: data.user.role,
-            grantedDeptIds: data.user.granted_dept_ids || []
-        };
-
-        if (data.user.photo_url) {
-            document.getElementById('user-avatar').innerHTML = `<img src="${data.user.photo_url}" />`;
-        } else {
-            document.getElementById('user-avatar').textContent = activeUser.initials;
-        }
-
-        document.getElementById('user-name').textContent = activeUser.name;
         document.getElementById('auth-badge-input').value = '';
         document.getElementById('auth-pin-input').value = '';
-
-        document.getElementById('screen-auth').style.display = 'none';
-        document.getElementById('screen-action').style.display = 'flex';
-
-        setupActionScreen();
-        loadKioskAuditStatus();
+        completeKioskAuth(data.user, { pin });
     } catch (err) {
         showToast(`${icon('circle-x', 'icon-danger')} Server error.`);
     }
+}
+
+/**
+ * Login-card counterpart to authenticateUser() -- scanning a card (camera or USB scanner, see
+ * startAuthQrCameraScanner()/#auth-login-card-input) signs straight in with no PIN, same model
+ * as the admin panel's QR login (see POST /api/login/qr there vs POST /api/kiosk-auth here with
+ * login_token instead of login_id+pin).
+ */
+async function handleKioskQrAuth(token) {
+    try {
+        const response = await fetch('/api/kiosk-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login_token: token })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Login card not recognized.'));
+        }
+
+        completeKioskAuth(data.user, { loginToken: token });
+    } catch (err) {
+        showToast(`${icon('circle-x', 'icon-danger')} Server error.`);
+    }
+}
+
+/**
+ * Shared success path for both authenticateUser() (PIN) and handleKioskQrAuth() (login card):
+ * builds activeUser, sets the topbar avatar/name, and swaps #screen-auth for #screen-action.
+ * `credential` is exactly one of {pin} or {loginToken} -- whichever activeUser caches, every
+ * kiosk action for the rest of this session resubmits it instead of re-prompting (see
+ * techCredentialFields() below).
+ */
+function completeKioskAuth(user, credential) {
+    activeUser = {
+        badgeId: user.badge_id,
+        name: user.full_name,
+        initials: user.full_name.split(' ').map(n => n[0]).join(''),
+        pin: credential.pin || null,
+        loginToken: credential.loginToken || null,
+        deptId: user.dept_id,
+        role: user.role,
+        grantedDeptIds: user.granted_dept_ids || []
+    };
+
+    if (user.photo_url) {
+        document.getElementById('user-avatar').innerHTML = `<img src="${user.photo_url}" />`;
+    } else {
+        document.getElementById('user-avatar').textContent = activeUser.initials;
+    }
+
+    document.getElementById('user-name').textContent = activeUser.name;
+
+    document.getElementById('screen-auth').style.display = 'none';
+    document.getElementById('screen-action').style.display = 'flex';
+
+    setupActionScreen();
+    loadKioskAuditStatus();
+}
+
+/**
+ * Whichever credential activeUser authenticated with, ready to spread into a kiosk action's
+ * fetch body -- {login_token} if they scanned a login card, {pin} if they typed/scanned a badge
+ * and entered a PIN. Every kiosk action after the initial sign-in resubmits this instead of
+ * re-prompting (see completeKioskAuth() above).
+ */
+function techCredentialFields() {
+    return activeUser.loginToken ? { login_token: activeUser.loginToken } : { pin: activeUser.pin };
 }
 
 /**
@@ -663,10 +715,20 @@ function playScanFeedback() {
  * Scanning" button so the operator has a way to close it explicitly.
  * Surfaces toasts for no-camera and permission-denied failure paths.
  */
-function executeCameraScan(elementId, successCallback, continuous = false) {
+async function executeCameraScan(elementId, successCallback, continuous = false) {
     document.getElementById(elementId).style.display = 'block';
 
-    if (html5QrScannerInstance) { html5QrScannerInstance.clear(); }
+    // html5QrScannerInstance is one shared module-level scanner -- if a previous scan is still
+    // actively running (e.g. two scan buttons on the same screen, like #auth-reader's badge
+    // scan and the new login-card scan), .clear() alone throws ("Cannot clear while scan is
+    // ongoing, close it first"), aborting this function before the new instance ever starts.
+    // .stop() first (the correct way to halt an active scan) avoids that; both are wrapped
+    // since calling either on an already-stopped/never-started instance can itself reject/throw.
+    // Same fix as initCameraCore() in admin.js.
+    if (html5QrScannerInstance) {
+        try { await html5QrScannerInstance.stop(); } catch (e) { /* already stopped */ }
+        try { html5QrScannerInstance.clear(); } catch (e) { /* nothing to clear */ }
+    }
     html5QrScannerInstance = new Html5Qrcode(elementId);
 
     // Tracks the last code seen by this scan session so the same barcode sitting in
@@ -710,10 +772,21 @@ function executeCameraScan(elementId, successCallback, continuous = false) {
  * authenticateUser() to log the technician in.
  */
 function startAuthCameraScanner() {
-    executeCameraScan('auth-reader', (txt) => { 
-        document.getElementById('auth-badge-input').value = txt; 
-        authenticateUser(); 
-    }); 
+    executeCameraScan('auth-reader', (txt) => {
+        document.getElementById('auth-badge-input').value = txt;
+        authenticateUser();
+    });
+}
+
+/**
+ * Camera lifecycle: opens the same auth-screen camera (#auth-reader) but for a login card
+ * instead of a badge -- decoded text goes straight to handleKioskQrAuth() instead of filling a
+ * field, since a login card logs straight in with no PIN. Shares #auth-reader with
+ * startAuthCameraScanner() above (executeCameraScan() safely hands off between them, see its
+ * own comment); only one scan ever happens at a time on this screen.
+ */
+function startAuthQrCameraScanner() {
+    executeCameraScan('auth-reader', (txt) => { handleKioskQrAuth(txt); });
 }
 
 /**
@@ -745,12 +818,13 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuou
  * when called with no managerPin this
  * ALWAYS shows #override-modal (clearing/focusing #override-pin-input)
  * and returns, rather than only doing so after a rejected attempt.
- * submitTransactionWithOverride() re-invokes this same function with
- * managerPin populated once the sign-off PIN has been entered.
+ * submitTransactionWithOverride()/submitTransactionWithOverrideToken() re-invoke this same
+ * function with managerCredential populated ({pin} or {token}) once the sign-off PIN or login
+ * card has been entered.
  *
  * Error-handling branches inspected on a non-ok response (button is
  * restored first in every case):
- *   - BAD_TECH_PIN: the technician's own session PIN (activeUser.pin)
+ *   - BAD_TECH_PIN: the technician's own cached credential (activeUser.pin/loginToken)
  *     is stale/wrong — re-entering the sign-off PIN can't fix this,
  *     so the kiosk is sent back to resetToIdle().
  *   - SIGNOFF_REQUIRED: shouldn't normally happen since the modal
@@ -769,7 +843,7 @@ function startToolCameraScanner(readerId, inputId, triggerFunc = null, continuou
  * On success, the override modal (if open) is hidden, a success
  * toast is shown, and the kiosk returns to the idle screen.
  */
-async function submitTransaction(managerPin = null) {
+async function submitTransaction(managerCredential = null) {
     // Everything below is wrapped in one top-level try/catch -- previously only the
     // fetch itself was guarded, so any unexpected DOM/state error in the synchronous
     // setup above it (element lookups, button locking) would fail completely silently:
@@ -779,11 +853,14 @@ async function submitTransaction(managerPin = null) {
     try {
         if (batchQueue.length === 0) return showToast(`${icon('triangle-alert', 'icon-warning')} Queue empty.`);
 
-        if (!managerPin) {
+        if (!managerCredential) {
             // Universal gate: always require sign-off before finalizing, for BOTH OUT and IN.
             document.getElementById('override-pin-input').value = '';
+            document.getElementById('override-login-card-input').value = '';
             document.getElementById('override-modal').style.display = 'flex';
-            document.getElementById('override-pin-input').focus();
+            // Login card is the fast path here too (same reasoning as startWorkflow()) -- a USB
+            // scanner's keystrokes need to land in this field, not the PIN one, with no click.
+            document.getElementById('override-login-card-input').focus();
             return;
         }
 
@@ -796,10 +873,10 @@ async function submitTransaction(managerPin = null) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 badge_id: activeUser.badgeId,
-                pin: activeUser.pin,
+                ...techCredentialFields(),
                 action: pendingMode === 'OUT' ? 'CHECKOUT_TOOL' : 'CHECKIN_TOOL',
                 qr_codes: batchQueue,
-                manager_pin: managerPin,
+                ...(managerCredential.loginToken ? { manager_login_token: managerCredential.loginToken } : { manager_pin: managerCredential.pin }),
                 work_order: pendingMode === 'OUT' ? document.getElementById('kiosk-work-order').value : undefined
             })
         });
@@ -813,14 +890,18 @@ async function submitTransaction(managerPin = null) {
             // Handle Custom Hard-Stops
             if (data.code === 'BAD_TECH_PIN') {
                 document.getElementById('override-modal').style.display = 'none';
-                showToast(`${icon('circle-x', 'icon-danger')} Your session PIN is invalid. Please sign in again.`);
+                // Covers both credential types activeUser might be caching (see
+                // techCredentialFields()) -- a stale PIN and a reissued/invalidated login
+                // token hit this exact same server response, so the message can't say "PIN"
+                // specifically without being wrong half the time.
+                showToast(`${icon('circle-x', 'icon-danger')} Your session credentials are invalid. Please sign in again.`);
                 return resetToIdle();
             }
             else if (data.code === 'SIGNOFF_REQUIRED') {
-                return showToast(icon('triangle-alert', 'icon-warning') + ' ' + (data.error || 'Sign-off PIN is required.'));
+                return showToast(icon('triangle-alert', 'icon-warning') + ' ' + (data.error || 'Sign-off is required.'));
             }
             else if (data.code === 'BAD_PIN') {
-                return showToast(`${icon('circle-x', 'icon-danger')} Invalid Buddy PIN.`);
+                return showToast(`${icon('circle-x', 'icon-danger')} Invalid buddy PIN or login card.`);
             }
             else if (data.code === 'SIGNOFF_SAME_PERSON') {
                 return showToast(`${icon('circle-x', 'icon-danger')} Sign-off must be from a different person.`);
@@ -862,7 +943,21 @@ function submitTransactionWithOverride() {
     try {
         const pin = document.getElementById('override-pin-input').value.trim();
         if (!pin) return showToast(`${icon('triangle-alert', 'icon-warning')} PIN is required.`);
-        submitTransaction(pin); // Re-run the exact same transaction, but pass the PIN this time
+        submitTransaction({ pin }); // Re-run the exact same transaction, but pass the PIN this time
+    } catch (err) {
+        showToast(icon('circle-x', 'icon-danger') + ' ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
+    }
+}
+
+/**
+ * Buddy sign-off via login card (camera or USB scanner, see #override-login-card-input) --
+ * same retry flow as submitTransactionWithOverride() above, just with a scanned token instead
+ * of a typed PIN. Called directly from the card-scan input's Enter handler / camera callback
+ * with the decoded text, rather than reading a stored field first.
+ */
+function submitTransactionWithOverrideToken(token) {
+    try {
+        submitTransaction({ loginToken: token });
     } catch (err) {
         showToast(icon('circle-x', 'icon-danger') + ' ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
     }
@@ -911,7 +1006,7 @@ async function submitProblemReport() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 badge_id: activeUser.badgeId,
-                pin: activeUser.pin,
+                ...techCredentialFields(),
                 qr_code: qr,
                 issue_type: issueType,
                 notes: notes
@@ -952,7 +1047,7 @@ async function submitCalibrationTransfer(qr, notes) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 badge_id: activeUser.badgeId,
-                pin: activeUser.pin,
+                ...techCredentialFields(),
                 qr_code: qr,
                 qa_dept_id: qaDeptId,
                 notes: notes
@@ -1078,7 +1173,7 @@ async function acceptIncomingTransfer(transferId) {
         const res = await fetch(`/api/transfers/${transferId}/qa-accept`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ badge_id: activeUser.badgeId, pin: activeUser.pin })
+            body: JSON.stringify({ badge_id: activeUser.badgeId, ...techCredentialFields() })
         });
         const data = await res.json();
         if (!res.ok) {
@@ -1137,7 +1232,7 @@ async function submitCalibrationComplete() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 badge_id: activeUser.badgeId,
-                pin: activeUser.pin,
+                ...techCredentialFields(),
                 last_cal_date: lastCalDate,
                 cal_due_date: calDueDate,
                 provider,
@@ -1173,7 +1268,7 @@ async function acceptReturnedTransfer(transferId) {
         const res = await fetch(`/api/transfers/${transferId}/home-accept`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ badge_id: activeUser.badgeId, pin: activeUser.pin })
+            body: JSON.stringify({ badge_id: activeUser.badgeId, ...techCredentialFields() })
         });
         const data = await res.json();
         if (!res.ok) {

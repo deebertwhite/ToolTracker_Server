@@ -1095,10 +1095,67 @@ app.post('/api/logout', (req, res) => {
     });
 });
 
-// Kiosk login: identify a user by badge_id/username + PIN for quick kiosk access.
+/**
+ * Resolves the kiosk-side "technician" credential for a request -- either a bcrypt-matched PIN
+ * (the original mechanism, bundling the existing lockout bookkeeping) or a login-card token
+ * (see users.login_token), so a login card can stand in for a PIN at every kiosk action, not
+ * just the sign-in screen (POST /api/kiosk-auth below, plus every route further down that
+ * re-verifies badge_id+pin on each action: /api/transactions, /api/kiosk/report-issue,
+ * /api/transfers/initiate|:id/qa-accept|:id/complete-cal|:id/home-accept).
+ *
+ * When login_token is given, the token ALONE identifies the person -- callers MUST use the
+ * RETURNED user's badge_id/user_id downstream, never a separately client-supplied badge_id,
+ * the same reasoning as POST /api/login/qr. Login-card attempts skip lockout/attempt-counting
+ * entirely -- that mechanism throttles guessing a short PIN, which doesn't apply to a 128-bit
+ * token (brute-forcing one is infeasible regardless of attempt throttling).
+ * @param {import('pg').Pool|import('pg').PoolClient} db
+ * @returns {Promise<{ok: true, user: {user_id, badge_id, full_name, dept_id, role}} | {ok: false, reason: 'locked'|'invalid'}>}
+ */
+async function resolveKioskCredential(db, badge_id, pin, login_token) {
+    if (login_token) {
+        const result = await db.query(
+            'SELECT user_id, badge_id, full_name, dept_id, role FROM users WHERE login_token = $1 AND is_active = true',
+            [login_token]
+        );
+        return result.rows[0] ? { ok: true, user: result.rows[0] } : { ok: false, reason: 'invalid' };
+    }
+    if (!badge_id || !pin) return { ok: false, reason: 'invalid' };
+
+    const lockout = await checkLockout(badge_id);
+    if (lockout.locked) return { ok: false, reason: 'locked' };
+
+    const result = await db.query(
+        'SELECT user_id, badge_id, full_name, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true',
+        [badge_id]
+    );
+    if (result.rows.length === 0 || !(await bcrypt.compare(pin, result.rows[0].pin_hash))) {
+        await recordFailedPinAttempt(badge_id);
+        return { ok: false, reason: 'invalid' };
+    }
+    await resetFailedPinAttempts(badge_id);
+    const { pin_hash, ...user } = result.rows[0];
+    return { ok: true, user };
+}
+
+// Kiosk login: identify a user by badge_id/username + PIN, OR a login-card token, for quick
+// kiosk access.
 app.post('/api/kiosk-auth', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
-    const { login_id, pin } = req.body;
+    const { login_id, pin, login_token } = req.body;
     try {
+        if (login_token) {
+            // granted_dept_ids isn't on resolveKioskCredential()'s minimal shape (the other
+            // callers don't need it), so re-fetch it here the same way the login_id+pin path
+            // below does -- this is a one-off identity check per action, not a persistent
+            // session, so this is the one place to get it from.
+            const cred = await resolveKioskCredential(pool, null, null, login_token);
+            if (!cred.ok) return res.status(401).json({ error: 'Invalid or inactive login card.', code: 'BAD_CREDENTIALS' });
+            const accessRes = await pool.query(
+                'SELECT COALESCE(array_agg(dept_id), \'{}\') AS granted_dept_ids FROM user_department_access WHERE user_id = $1',
+                [cred.user.user_id]
+            );
+            return res.json({ success: true, user: { ...cred.user, granted_dept_ids: accessRes.rows[0].granted_dept_ids } });
+        }
+
         // granted_dept_ids rides along here (same pattern as requireRole in the admin session
         // path) so the kiosk can filter/group the audit toolbox picker to what this person can
         // actually access, without a second round trip -- kiosk-auth is a one-off identity
@@ -2419,46 +2476,53 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), (req, res, next) => 
 // restriction, any coworker can confirm) and, for checkouts, a same-day AUDIT of the tool's home
 // department (see getAuditGatePendingToolboxes).
 app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
-    const { badge_id, pin, action, qr_codes, manager_pin, work_order } = req.body;
+    const { badge_id, pin, login_token, action, qr_codes, manager_pin, manager_login_token, work_order } = req.body;
     const trimmedWorkOrder = (work_order || '').trim() || null;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        // 1. Authenticate the Technician (badge_id + pin)
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, dept_id, role, full_name, badge_id, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        // 1. Authenticate the Technician (badge_id + pin, or a login-card token -- see
+        // resolveKioskCredential()).
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
-        // 2. Buddy sign-off PIN is now always required, for both checkout and check-in.
-        if (!manager_pin) {
+        // 2. Buddy sign-off is now always required, for both checkout and check-in -- a PIN
+        // (any active user, matched by trying each one -- see below) or a login-card token
+        // (a direct, unambiguous lookup, no loop needed).
+        if (!manager_pin && !manager_login_token) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ error: 'Buddy sign-off PIN is required.', code: 'SIGNOFF_REQUIRED' });
+            return res.status(400).json({ error: 'Buddy sign-off is required.', code: 'SIGNOFF_REQUIRED' });
         }
 
-        // Hashed PINs can't be matched via a SQL WHERE clause (no signer badge_id is known
-        // ahead of time -- the sign-off is identified purely by whoever's PIN matches), so
-        // every active user is fetched and checked in turn. Any active person qualifies as
-        // the buddy (no role restriction -- a technician can sign off another technician),
-        // the only real requirement is being a different person (checked next). Shop-scale
-        // candidate counts (dozens at most) make this negligible at bcrypt's cost factor.
-        const candidatesRes = await client.query(
-            "SELECT user_id, full_name, badge_id, role, pin_hash FROM users WHERE is_active = true"
-        );
         let signoff = null;
-        for (const candidate of candidatesRes.rows) {
-            if (await bcrypt.compare(manager_pin, candidate.pin_hash)) {
-                signoff = candidate;
-                break;
+        if (manager_login_token) {
+            const signoffRes = await client.query(
+                'SELECT user_id, full_name, badge_id, role FROM users WHERE login_token = $1 AND is_active = true',
+                [manager_login_token]
+            );
+            signoff = signoffRes.rows[0] || null;
+        } else {
+            // Hashed PINs can't be matched via a SQL WHERE clause (no signer badge_id is known
+            // ahead of time -- the sign-off is identified purely by whoever's PIN matches), so
+            // every active user is fetched and checked in turn. Any active person qualifies as
+            // the buddy (no role restriction -- a technician can sign off another technician),
+            // the only real requirement is being a different person (checked next). Shop-scale
+            // candidate counts (dozens at most) make this negligible at bcrypt's cost factor.
+            const candidatesRes = await client.query(
+                "SELECT user_id, full_name, badge_id, role, pin_hash FROM users WHERE is_active = true"
+            );
+            for (const candidate of candidatesRes.rows) {
+                if (await bcrypt.compare(manager_pin, candidate.pin_hash)) {
+                    signoff = candidate;
+                    break;
+                }
             }
         }
         if (!signoff) {
@@ -2873,7 +2937,7 @@ app.post('/api/work-orders/:work_order/reopen', requireFetchHeader, requireRole(
 // tool that broke or went missing in someone's hands. Not legal while 'Pending Transfer',
 // 'In Calibration', or 'Retired'.
 app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
-    const { badge_id, pin, qr_code, issue_type, notes } = req.body;
+    const { badge_id, pin, login_token, qr_code, issue_type, notes } = req.body;
 
     if (!['Broken', 'Missing', 'Worn'].includes(issue_type)) {
         return res.status(400).json({ error: 'Invalid issue_type. Must be one of: Broken, Missing, Worn.', code: 'INVALID_ISSUE_TYPE' });
@@ -2884,17 +2948,13 @@ app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above a
     try {
         await client.query('BEGIN');
 
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
         // Location/department snapshotted now (as text, not a foreign key) since it
         // describes where the tool WAS when this incident was reported -- if it's later
@@ -2948,23 +3008,19 @@ app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above a
 // Initiate a QA transfer for a tool. Home department is resolved server-side from the tool's
 // drawer_id -> drawers.box_id -> toolboxes.dept_id; never trusts a client-supplied home dept.
 app.post('/api/transfers/initiate', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
-    const { badge_id, pin, qr_code, qa_dept_id, notes } = req.body;
+    const { badge_id, pin, login_token, qr_code, qa_dept_id, notes } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
         const toolQuery = `
             SELECT t.tool_id, t.status, t.drawer_id, b.dept_id AS home_dept_id
@@ -3073,23 +3129,19 @@ app.get('/api/transfers', async (req, res) => {
 // QA side accepts an incoming transfer and begins calibration.
 app.post('/api/transfers/:transfer_id/qa-accept', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin } = req.body;
+    const { badge_id, pin, login_token } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -3136,24 +3188,20 @@ app.post('/api/transfers/:transfer_id/qa-accept', /* DISABLED: authLimiter -- se
 // enough for FAA-grade calibration traceability.
 app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes, result } = req.body;
+    const { badge_id, pin, login_token, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes, result } = req.body;
     const calResult = result === 'Fail' ? 'Fail' : 'Pass';
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -3229,23 +3277,19 @@ app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter --
 // Home department accepts the returned, calibrated tool back.
 app.post('/api/transfers/:transfer_id/home-accept', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin } = req.body;
+    const { badge_id, pin, login_token } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, dept_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
@@ -3289,23 +3333,19 @@ app.post('/api/transfers/:transfer_id/home-accept', /* DISABLED: authLimiter -- 
 // Cancel a transfer. Only legal while still AWAITING_QA_ACCEPT (before QA has taken possession).
 app.post('/api/transfers/:transfer_id/cancel', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin, reason } = req.body;
+    const { badge_id, pin, login_token, reason } = req.body;
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        const lockout = await checkLockout(badge_id);
-        if (lockout.locked) { await client.query('ROLLBACK'); return res.status(423).json(LOCKOUT_RESPONSE); }
-
-        const userRes = await client.query('SELECT user_id, role, pin_hash FROM users WHERE badge_id = $1 AND is_active = true', [badge_id]);
-        if (userRes.rows.length === 0 || !(await bcrypt.compare(pin, userRes.rows[0].pin_hash))) {
-            await recordFailedPinAttempt(badge_id);
+        const cred = await resolveKioskCredential(client, badge_id, pin, login_token);
+        if (!cred.ok) {
             await client.query('ROLLBACK');
+            if (cred.reason === 'locked') return res.status(423).json(LOCKOUT_RESPONSE);
             return res.status(401).json({ error: 'Invalid Technician Badge or PIN.', code: 'BAD_TECH_PIN' });
         }
-        const user = userRes.rows[0];
-        await resetFailedPinAttempts(badge_id);
+        const user = cred.user;
 
         const transferRes = await client.query('SELECT * FROM tool_transfers WHERE transfer_id = $1', [transfer_id]);
         if (transferRes.rows.length === 0) {
