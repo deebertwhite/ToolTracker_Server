@@ -29,7 +29,20 @@
 
         <!-- Shared by both startQrLoginCamera() and startAdminLoginCamera() (see initCameraCore()) -- only one scan ever happens at a time on this screen, so one reader element/camera stream serves both entry points. -->
         <div id="admin-login-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
-        <button class="btn" style="margin-bottom: 20px;" onclick="startQrLoginCamera()"><span class="icon" data-icon="qr-code"></span> Scan Login Card</button>
+
+        <!-- Primary login-card entry point: a plain text field, not just the camera button below --
+             a USB barcode-gun scanner (same "shared PC with no camera, wired scanner instead"
+             pattern as kiosk.html's #kiosk-scan-input) just types the decoded token here like a
+             keyboard, then sends Enter. autofocus so a scan works the instant this page loads,
+             with no click first. The camera button stays for a phone/tablet with no scanner. -->
+        <div class="form-group">
+            <label class="form-label">Login Card</label>
+            <div style="display: flex; gap: 8px;">
+                <input class="form-input" id="admin-login-card-input" placeholder="Scan with a USB scanner..." autofocus
+                       onkeydown="if(event.key==='Enter' && this.value.trim()){playScanFeedback();handleQrLoginScan(this.value.trim());this.value='';}">
+                <button class="btn-icon" onclick="startQrLoginCamera()"><span class="icon" data-icon="qr-code"></span></button>
+            </div>
+        </div>
 
         <div style="display:flex; align-items:center; gap:10px; margin-bottom: 16px; color: var(--muted); font-size: 11px;">
             <div style="flex:1; height:1px; background: var(--border);"></div>
