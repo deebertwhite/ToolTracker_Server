@@ -991,7 +991,7 @@ app.get('/api/tools/next-id', async (req, res) => {
             WHERE NOT EXISTS (SELECT 1 FROM used_numbers u WHERE u.num = gs.num);
         `;
         const result = await pool.query(query, [`${prefix}%`]);
-        const nextSequence = String(result.rows[0].next_number).padStart(6, '0');
+        const nextSequence = String(result.rows[0].next_number).padStart(4, '0');
         res.json({ success: true, next_sequence: nextSequence });
     } catch (err) {
         res.status(500).json({ error: 'Failed to calculate ID.' });
