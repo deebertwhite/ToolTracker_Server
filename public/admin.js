@@ -357,15 +357,41 @@ async function handlePhotoUpload(event) {
 // 4.5 TOOLBOX PRINT SHEET
 // ==========================================
 /**
+ * Resolves once every <img> under container has finished loading (or errored -- a missing/
+ * broken one shouldn't block printing the rest). Shared by openToolboxPrintSheet() and
+ * printUserLoginCard() below: both build print content full of <img>s generated fresh per
+ * request (scan-code.png / login-card.png) rather than pre-existing static files, so they load
+ * measurably slower than a typical cached image -- window.print() firing before they're done
+ * rasterizes blank boxes on a real printer (a screen preview taken even a moment later can
+ * misleadingly look fine, which is how this shipped broken once already).
+ */
+async function waitForImages(container) {
+    const images = Array.from(container.querySelectorAll('img'));
+    await Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', resolve, { once: true });
+    })));
+}
+
+/**
  * Builds and prints a reference sheet for one toolbox: every drawer in it, each on its own page
  * (titled "<toolbox> -- <drawer>" so a page is self-identifying without flipping back to the
- * first one), with its own photo (if set) and a dense grid of its tools -- name, barcode ID,
- * serial number, and a scannable Data Matrix image -- meant to be printed and kept in a binder
- * near the physical box, so a tool can be signed out by scanning straight from the page instead
- * of needing a barcode label on the tool itself or in its drawer slot. The grid (not a simple
- * one-row-per-tool table) exists specifically to fit a typical drawer's full tool list on that
- * one page; a handful of real drawers run 30-90+ tools deep and will still spill onto a second
- * page no matter how dense the layout -- there's a real content-volume floor here.
+ * first one), meant to be printed and kept in a binder near the physical box, so a tool can be
+ * signed out by scanning straight from the page instead of needing a barcode label on the tool
+ * itself or in its drawer slot.
+ *
+ * Tools already pinpointed on the drawer's photo (the shadow-board map, see renderPositionMap())
+ * get a numbered marker drawn right on the photo at that exact spot -- a real infographic, not
+ * just a list -- plus a matching numbered badge on their card in the legend grid below, so
+ * "what tool is this" is answerable by eye from the photo alone, with the legend as the
+ * scannable backup. A numbered pin (not the full code or name) is deliberate: a code shrunk
+ * enough to avoid overlapping its neighbors on a busy photo would be well under a physically
+ * reliable scan size, and 30-90+ labels directly on one photo (several real drawers run that
+ * deep) would be unreadable clutter -- the legend is where the actual scan code and full detail
+ * live, at a size that's always legible/scannable regardless of how crowded the drawer is.
+ * Tools not yet pinpointed still appear in the legend (unnumbered, listed after the pinned
+ * ones) so the sheet is complete and fully usable from day one -- pinpointing more tools over
+ * time just makes the photo map more complete, it's never required before printing.
  *
  * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.) or anything
  * date-based (calibration due date). These pages are meant to be printed once and left in
@@ -383,6 +409,12 @@ async function handlePhotoUpload(event) {
  * so it doesn't clutter the screen; this function reveals it right before printing, and the
  * afterprint listener below hides it again afterward.
  */
+// Shared "black circle, white bold number" look for both the on-photo pin and the legend
+// card's corner badge below -- same base visual at two different sizes; each caller layers its
+// own position:absolute placement (and, for the on-photo pin, an extra border/ring for contrast
+// against a busy photo background that the card badge doesn't need against its plain white card).
+const pinBadgeStyle = (sizePx) => `width:${sizePx}px; height:${sizePx}px; border-radius:50%; background:#000; color:#fff; display:flex; align-items:center; justify-content:center; font-size:${sizePx <= 18 ? 10 : 11}px; font-weight:bold;`;
+
 async function openToolboxPrintSheet(boxId) {
     const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
 
@@ -392,27 +424,42 @@ async function openToolboxPrintSheet(boxId) {
     const drawers = globalDrawersCache.filter(d => d.box_id == boxId).sort(byName);
 
     const drawerSections = drawers.map(drawer => {
-        const tools = globalToolsCache
-            .filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired')
-            .sort(byName);
+        const tools = globalToolsCache.filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired');
 
-        // A dense multi-column grid (not the one-row-per-tool table this replaced) so a typical
-        // drawer's full tool list fits on the one page it already starts on (see the page-break
-        // between drawers below) instead of spilling onto a second -- auto-fill lets the browser
-        // pack as many ~150px cards per row as the page width allows. A handful of real drawers
-        // run 30-90+ tools deep though, which genuinely cannot fit on one printed page at any
-        // reasonable size -- those still overflow onto a following page, same as before.
-        const cards = tools.map(t => {
+        // Tools already pinpointed on the drawer photo (shadow-board map, see renderPositionMap())
+        // get a numbered marker on the photo plus a matching badge in the legend below -- reading
+        // order top-to-bottom/left-to-right so the numbers roughly match how an eye scans the
+        // photo. Tools not yet pinpointed still appear in the legend (unnumbered, after the pinned
+        // ones) so the sheet is complete and fully scannable from day one -- it just gets more of
+        // an at-a-glance map as more tools get physically pinpointed in the app over time.
+        const positioned = tools.filter(t => t.position_x !== null && t.position_y !== null)
+            .sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
+        const unpositioned = tools.filter(t => t.position_x === null || t.position_y === null).sort(byName);
+
+        const pins = drawer.photo_url && positioned.length ? positioned.map((t, i) => `
+            <div style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
+                        border:2px solid #fff; box-shadow:0 0 0 1px #000; ${pinBadgeStyle(22)}">${i + 1}</div>
+        `).join('') : '';
+
+        // A dense multi-column grid so a typical drawer's full tool list fits on the one page it
+        // already starts on (see the page-break between drawers below) instead of spilling onto a
+        // second -- auto-fill lets the browser pack as many ~150px cards per row as the page width
+        // allows. A handful of real drawers run 30-90+ tools deep though, which genuinely cannot
+        // fit on one printed page at any reasonable size -- those still overflow onto a following
+        // page.
+        const card = (t, pinNumber) => {
             // scan-code.png (GET /api/tools/:id/scan-code.png) is a text-free Data Matrix generated
             // fresh for this purpose -- unlike barcode_image_url_large (a full sticker label: code +
             // ID + name baked in, meant to stand alone on the tool), there's no redundant text eating
             // into the image, so the whole box is scannable code instead of under half of it. 60px
             // (~16mm at print) stays well within this app's own validated 10-20mm scannable range
-            // (see BARCODE_LABEL_MM in server.js) while roughly halving this card's footprint vs.
-            // the full-table layout's 90px row height.
+            // (see BARCODE_LABEL_MM in server.js) -- the same reason the on-photo pin above is just
+            // a number rather than a full code: a code shrunk enough to avoid overlapping its
+            // neighbors on a busy photo would be well under a physically reliable scan size.
             const barcodeImg = `<img src="/api/tools/${t.tool_id}/scan-code.png" style="width:60px; height:60px; object-fit:contain; flex-shrink:0;">`;
             return `
-                <div style="display:flex; align-items:center; gap:6px; border:1px solid #ccc; padding:4px; break-inside:avoid; page-break-inside:avoid;">
+                <div style="position:relative; display:flex; align-items:center; gap:6px; border:1px solid #ccc; padding:4px; break-inside:avoid; page-break-inside:avoid;">
+                    ${pinNumber ? `<div style="position:absolute; top:-6px; left:-6px; ${pinBadgeStyle(18)}">${pinNumber}</div>` : ''}
                     ${barcodeImg}
                     <div style="min-width:0;">
                         <div style="font-size:11px; font-weight:bold; line-height:1.2;">${t.name}</div>
@@ -420,16 +467,22 @@ async function openToolboxPrintSheet(boxId) {
                         ${t.serial_number ? `<div style="font-size:10px; color:#333;">S/N: ${t.serial_number}</div>` : ''}
                     </div>
                 </div>`;
-        }).join('');
+        };
+        const cards = positioned.map((t, i) => card(t, i + 1)).join('') + unpositioned.map(t => card(t, null)).join('');
 
         return `
             <div style="break-inside:avoid; page-break-inside:avoid; margin-bottom:20px;">
                 <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${box.name} &mdash; ${drawer.name}</h3>
-                ${drawer.photo_url ? `<img src="${drawer.photo_url}" style="max-width:180px; max-height:130px; object-fit:contain; float:right; margin:0 0 8px 12px; border:1px solid #999;">` : ''}
+                ${drawer.photo_url ? `
+                    <div style="position:relative; display:inline-block; max-width:100%; line-height:0; margin-bottom:10px;">
+                        <img src="${drawer.photo_url}" style="display:block; max-width:100%; max-height:380px; object-fit:contain; border:1px solid #999;">
+                        <div style="position:absolute; top:0; left:0; width:100%; height:100%;">${pins}</div>
+                    </div>
+                    ${!positioned.length ? `<p style="color:#666; font-size:11px; margin:0 0 10px;">No tools pinpointed on this photo yet -- see the shadow board map on the drawer's entity card.</p>` : ''}
+                ` : ''}
                 ${cards
                     ? `<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap:6px;">${cards}</div>`
                     : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`}
-                <div style="clear:both;"></div>
             </div>`;
     }).join('<div style="break-before:page; page-break-before:always;"></div>');
 
@@ -441,19 +494,7 @@ async function openToolboxPrintSheet(boxId) {
 
     const area = document.getElementById('toolbox-print-sheet-area');
     area.style.display = 'block';
-
-    // scan-code.png is generated fresh per request (unlike the old static barcode_image_url_large
-    // file), so it's measurably slower to load -- window.print() used to fire immediately after
-    // setting innerHTML above, before these <img>s had actually loaded, which rasterized as blank
-    // boxes on a real printer (screen preview/testing can misleadingly look fine if you happen to
-    // wait before looking). Wait for every image in the sheet to finish (load OR error -- a
-    // missing/broken one shouldn't block printing the rest) before printing.
-    const images = Array.from(area.querySelectorAll('img'));
-    await Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
-        img.addEventListener('load', resolve, { once: true });
-        img.addEventListener('error', resolve, { once: true });
-    })));
-
+    await waitForImages(area);
     window.print();
 }
 
@@ -546,6 +587,49 @@ async function deactivateUser(id) {
     await fetch(`/api/users/${id}/deactivate`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' } });
     closeEntityModal();
     loadUsers(); loadRosterDirectory();
+}
+
+/**
+ * Issues or reissues a login-card QR token via POST /api/users/:id/login-token, then re-opens
+ * the entity modal so it picks up the fresh globalUsersCache state (has_login_card / the new
+ * card image) immediately instead of needing the admin to close and reopen it by hand.
+ * Reissuing confirms first since it invalidates whatever card the person already has in hand.
+ */
+async function issueUserLoginCard(id, isReissue) {
+    if (isReissue && !confirm(`Reissue the login card for ${id}? Their current card (printed or digital) will stop working immediately.`)) return;
+    const res = await fetch(`/api/users/${id}/login-token`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' } });
+    if (!res.ok) return alert('❌ Failed to generate login card.');
+    await loadUsers();
+    openEntityModal('user', id);
+}
+
+/**
+ * Prints a single login card: the QR (login-card.png) plus the person's name/badge as plain
+ * text next to it -- not baked into the PNG itself (see generateQrPngAtSize() in
+ * scripts/lib/datamatrix.js), so this stays simple HTML rather than needing server-side text
+ * compositing the way the tool barcode labels do. Same .printable-area + window.print()
+ * pattern as the toolbox print sheet; reuses that same printable area rather than adding a
+ * second one, since only one is ever shown at a time.
+ */
+async function printUserLoginCard(badgeId) {
+    const user = globalUsersCache.find(u => u.badge_id === badgeId);
+    if (!user || !user.has_login_card) return;
+
+    document.getElementById('toolbox-print-sheet-content').innerHTML = `
+        <div style="display:flex; align-items:center; gap:20px; border:2px solid #000; border-radius:12px; padding:24px; max-width:400px;">
+            <img src="/api/users/${badgeId}/login-card.png" style="width:140px; height:140px; object-fit:contain;">
+            <div>
+                <div style="font-size:20px; font-weight:bold;">${user.full_name}</div>
+                <div style="font-family:monospace; font-size:14px; color:#555; margin-top:4px;">${badgeId}</div>
+                <div style="font-size:11px; color:#777; margin-top:10px;">Scan to sign in to the ToolTracker admin panel.</div>
+            </div>
+        </div>
+    `;
+
+    const area = document.getElementById('toolbox-print-sheet-area');
+    area.style.display = 'block';
+    await waitForImages(area);
+    window.print();
 }
 
 // ==========================================
@@ -1232,9 +1316,18 @@ function playScanFeedback() {
 }
 
 /** Shared html5-qrcode bootstrap: reveals the given reader element, tears down any previous scanner instance, and starts scanning using the rear-facing camera specifically (`facingMode: "environment"`, requested directly rather than enumerating devices and guessing which index is the rear camera -- that order is unpredictable across phones/browsers, and iOS in particular often lists the front camera first). Falls back to whatever camera is available if no rear camera exists (e.g. a laptop webcam). Invokes callback(decodedText) once a code is read (stopping the scanner and hiding the reader first). Alerts the operator if the scanner fails to start (no camera, permission denied, etc). */
-function initCameraCore(elementId, callback) {
+async function initCameraCore(elementId, callback) {
     document.getElementById(elementId).style.display = 'block';
-    if (html5QrAdminInstance) { html5QrAdminInstance.clear(); }
+    // html5QrAdminInstance is one shared module-level scanner -- if a previous scan is still
+    // actively running (e.g. the operator opened this scanner, then clicked a different scan
+    // button before anything decoded), .clear() alone throws ("Cannot clear while scan is
+    // ongoing, close it first"), aborting this function before the new instance ever starts.
+    // .stop() first (the correct way to halt an active scan) avoids that; both are wrapped since
+    // calling either on an already-stopped/never-started instance can itself reject/throw.
+    if (html5QrAdminInstance) {
+        try { await html5QrAdminInstance.stop(); } catch (e) { /* already stopped */ }
+        try { html5QrAdminInstance.clear(); } catch (e) { /* nothing to clear */ }
+    }
     html5QrAdminInstance = new Html5Qrcode(elementId);
     html5QrAdminInstance.start(
         { facingMode: "environment" },
@@ -1242,8 +1335,32 @@ function initCameraCore(elementId, callback) {
         (txt) => { playScanFeedback(); html5QrAdminInstance.stop().then(() => { document.getElementById(elementId).style.display = 'none'; callback(txt); }); }
     ).catch((err) => { alert("Camera Error"); document.getElementById(elementId).style.display = 'none'; });
 }
-/** Opens the login-screen scanner and writes the decoded badge id into #admin-badge. */
-function startAdminLoginCamera() { initCameraCore('admin-auth-reader', (txt) => { document.getElementById('admin-badge').value = txt; }); }
+/** Opens the login-screen scanner and writes the decoded badge id into #admin-badge. Shares #admin-login-reader with startQrLoginCamera() below -- only one scan happens at a time on this screen either way, so one reader element/camera stream serves both entry points. */
+function startAdminLoginCamera() { initCameraCore('admin-login-reader', (txt) => { document.getElementById('admin-badge').value = txt; }); }
+
+/** Opens the login-card scanner (see "Scan Login Card" on #auth-wall) -- decoded text goes straight to handleQrLoginScan() instead of filling a field, since a login card logs straight in with no PIN. */
+function startQrLoginCamera() { initCameraCore('admin-login-reader', handleQrLoginScan); }
+
+/**
+ * Submits a scanned login-card token to POST /api/login/qr -- no PIN involved, unlike
+ * loginAdmin() below. On success, hands off to bootstrapAdminUI() exactly the same as a normal
+ * badge/PIN login; on failure (card not recognized, or the account's been deactivated/reissued
+ * since this card was printed), surfaces the error and leaves the manual form available.
+ */
+async function handleQrLoginScan(token) {
+    try {
+        const response = await fetch('/api/login/qr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+        });
+        const data = await response.json();
+        if (!response.ok) return alert('❌ ' + (data.error || 'Login card not recognized.'));
+        bootstrapAdminUI(data.user);
+    } catch (err) {
+        alert('Server connection failure.');
+    }
+}
 /** Opens the asset-ingest scanner and writes the decoded value into the given input, overwriting whatever auto-generated barcode was there -- the department/toolbox/drawer selection is unaffected either way. */
 function startAdminAssetCamera(readerId, inputId) { initCameraCore(readerId, (txt) => { document.getElementById(inputId).value = txt; }); }
 
@@ -1653,6 +1770,20 @@ function openEntityModal(type, id) {
             <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Department</div><div style="font-size:14px;margin-top:4px;">${entity.department_name || '--'}</div></div>
             <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">System Role</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${ROLE_LABELS[entity.role] || entity.role}</div></div>
             ${grantedNames.length > 0 ? `<div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Also Manages</div><div style="font-size:14px;margin-top:4px;">${grantedNames.join(', ')}</div></div>` : ''}
+            <div style="margin-top:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Login Card</div>
+                ${entity.has_login_card ? `
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <img src="/api/users/${entity.badge_id}/login-card.png" onclick="openImageModal('/api/users/${entity.badge_id}/login-card.png')" style="width:70px;height:70px;object-fit:contain;background:#fff;border-radius:4px;cursor:zoom-in;">
+                        <div style="display:flex; flex-direction:column; gap:6px;">
+                            <button class="btn btn-secondary" style="width:auto;" onclick="printUserLoginCard('${entity.badge_id}')">${icon('printer')} Print Card</button>
+                            <button class="btn btn-secondary" style="width:auto; font-size:11px;" onclick="issueUserLoginCard('${entity.badge_id}', true)">${icon('refresh-cw')} Reissue (invalidates old card)</button>
+                        </div>
+                    </div>
+                ` : `
+                    <button class="btn btn-secondary" style="width:auto;" onclick="issueUserLoginCard('${entity.badge_id}', false)">${icon('qr-code')} Generate Login Card</button>
+                `}
+            </div>
         `;
         fieldsHtml = `
             <div class="form-group">

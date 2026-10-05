@@ -23,12 +23,13 @@ const { Pool, types } = require('pg');
 types.setTypeParser(1114, (val) => new Date(val + 'Z'));
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const multer = require('multer');
 const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
-const { generatePngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
+const { generatePngAtSize, generateQrPngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
 const { buildZip } = require('./scripts/lib/zip');
 
 const app = express();
@@ -326,6 +327,17 @@ function requireFetchHeader(req, res, next) {
  * @returns {string} a 6-digit PIN, e.g. "042817"
  */
 const generatePin = () => Math.floor(100000 + Math.random() * 900000).toString();
+
+/**
+ * Generates a random login-card token (see users.login_token, migrations/016_user_login_qr.sql)
+ * -- 32 hex characters (128 bits) from a CSPRNG, long enough that guessing/brute-forcing one is
+ * infeasible, unlike the 6-digit PIN above which relies on bcrypt + lockout instead of length.
+ * Deliberately a separate value from badge_id/username (not just a QR of the existing
+ * identifier) so reissuing a lost/compromised card invalidates the old one without touching the
+ * person's actual login identity.
+ * @returns {string} 32 lowercase hex characters
+ */
+const generateLoginToken = () => crypto.randomBytes(16).toString('hex');
 
 // PINs are hashed with bcrypt (see users.pin_hash) rather than stored in the plaintext
 // pin column, which is kept temporarily as a rollback safety net during rollout (see
@@ -1031,6 +1043,29 @@ app.post('/api/login', /* DISABLED: authLimiter -- see note above authLimiter's 
     }
 });
 
+// Login-card QR login: scanning a printed/digital card logs straight in, no PIN -- the badge_id
+// + PIN form above remains as the explicit backup for a lost/forgotten card. Deliberately NOT
+// subject to checkLockout/failed_pin_attempts: that mechanism throttles guessing a short 6-digit
+// PIN, which doesn't apply here -- login_token is a 128-bit random value (see
+// generateLoginToken()), so brute-forcing one is infeasible regardless of attempt throttling.
+app.post('/api/login/qr', async (req, res) => {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'No code scanned.' });
+    try {
+        const result = await pool.query(
+            'SELECT user_id, badge_id, full_name, username, role, is_active FROM users WHERE login_token = $1',
+            [token]
+        );
+        if (result.rows.length === 0 || !result.rows[0].is_active) return res.status(401).json({ error: 'Invalid or inactive login card.' });
+
+        const user = result.rows[0];
+        req.session.user = { badge_id: user.badge_id };
+        res.json({ success: true, user });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error during login.' });
+    }
+});
+
 // Restores admin login state on page reload -- admin.js calls this on load instead of
 // always showing the login wall. req.session.user only ever holds badge_id (see
 // /api/login); role/dept/name are re-fetched fresh here rather than trusted from a
@@ -1110,6 +1145,7 @@ app.get('/api/users', requireRole(1), async (req, res) => {
         // their home one without a separate round trip per row.
         const query = `
             SELECT u.user_id, u.badge_id, u.username, u.email, u.full_name, u.role, u.dept_id, d.name AS department_name, u.photo_url,
+                   (u.login_token IS NOT NULL) AS has_login_card,
                    COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
             FROM users u
             LEFT JOIN departments d ON u.dept_id = d.dept_id
@@ -1234,6 +1270,46 @@ app.post('/api/users/:badge_id/reset-pin', requireFetchHeader, requireRole(1), a
         res.json({ success: true, new_pin: newPin });
     } catch (err) {
         res.status(500).json({ error: 'Failed to reset PIN.' });
+    }
+});
+
+// Issues (or reissues) a user's login-card QR token -- same hierarchy rule as reset-pin above.
+// Reissuing overwrites the old token outright, so a lost/compromised card stops working the
+// moment a new one is generated; there's no way to have two valid cards for one person at once.
+app.post('/api/users/:badge_id/login-token', requireFetchHeader, requireRole(1), async (req, res) => {
+    const { badge_id } = req.params;
+    try {
+        const target = await pool.query('SELECT role FROM users WHERE badge_id = $1', [badge_id]);
+        if (target.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+        if (req.authUser.weight <= getRoleWeight(target.rows[0].role)) return res.status(403).json({ error: 'Hierarchy Violation.' });
+
+        await pool.query('UPDATE users SET login_token = $1 WHERE badge_id = $2', [generateLoginToken(), badge_id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to issue login card.' });
+    }
+});
+
+// Renders a user's login-card QR as a PNG. Same hierarchy check as reset-pin/login-token above
+// (requester must outrank the target) -- NOT just requireRole(3), because the QR encodes the
+// actual login_token: anyone who can decode the image can log in as that person with no PIN
+// (see POST /api/login/qr), so this needs the same protection as issuing the token in the first
+// place, not merely the weaker "can view the Manage Accounts list" gate loadUsers() itself uses
+// (that list is additionally filtered server-side to subordinates only, which this route -- a
+// direct badge_id lookup -- does not inherit for free). 20mm/600dpi: a QR this physically small
+// already decodes reliably with any phone camera at normal reading distance; much larger just
+// wastes card space. No human-readable text baked in -- the printable card (see
+// printUserLoginCard() in admin.js) overlays the person's name/badge as ordinary HTML text.
+app.get('/api/users/:badge_id/login-card.png', requireRole(3), async (req, res) => {
+    try {
+        const result = await pool.query('SELECT role, login_token FROM users WHERE badge_id = $1', [req.params.badge_id]);
+        if (result.rows.length === 0) return res.status(404).send('User not found.');
+        if (req.authUser.weight <= getRoleWeight(result.rows[0].role)) return res.status(403).send('Hierarchy Violation.');
+        if (!result.rows[0].login_token) return res.status(404).send('No login card issued for this user.');
+        const { png } = await generateQrPngAtSize(result.rows[0].login_token, 20, 600, 'FFFFFF');
+        res.type('png').send(png);
+    } catch (err) {
+        res.status(500).send('Failed to generate login card.');
     }
 });
 

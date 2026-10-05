@@ -22,13 +22,21 @@
     <input type="file" id="global-photo-upload" style="display: none;" accept="image/*" onchange="handlePhotoUpload(event)">
     <a href="index.html" class="persistent-home no-print"><span class="icon" data-icon="home"></span> Main Hub</a>
 
-    <!-- Auth wall: login gate shown before a badge/PIN session is established; hidden and swapped for #admin-app on successful loginAdmin() -->
+    <!-- Auth wall: login gate shown before a badge/PIN session is established; hidden and swapped for #admin-app on successful loginAdmin() (badge/PIN) or handleQrLoginScan() (login card) -->
     <div id="auth-wall">
         <h2 style="margin-bottom: 8px; text-align: center;">LTA Portal Login</h2>
-        <p style="color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 24px;">Enter Badge ID or Username</p>
-        
-        <div id="admin-auth-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
-        
+        <p style="color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 16px;">Scan your login card, or sign in manually below</p>
+
+        <!-- Shared by both startQrLoginCamera() and startAdminLoginCamera() (see initCameraCore()) -- only one scan ever happens at a time on this screen, so one reader element/camera stream serves both entry points. -->
+        <div id="admin-login-reader" class="camera-reader" style="width: 100%; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
+        <button class="btn" style="margin-bottom: 20px;" onclick="startQrLoginCamera()"><span class="icon" data-icon="qr-code"></span> Scan Login Card</button>
+
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom: 16px; color: var(--muted); font-size: 11px;">
+            <div style="flex:1; height:1px; background: var(--border);"></div>
+            <div>OR SIGN IN MANUALLY</div>
+            <div style="flex:1; height:1px; background: var(--border);"></div>
+        </div>
+
         <div class="form-group">
             <label class="form-label">Identifier (Badge or Username)</label>
             <div style="display: flex; gap: 8px;">
@@ -461,11 +469,14 @@
     <!-- Toolbox print sheet: a reference page for one toolbox (built by
          openToolboxPrintSheet() in admin.js), meant to be printed and kept in a binder near
          the physical box -- every drawer in it, with its photo and a table of its tools'
-         barcodes, so a tool can be signed out by scanning straight from the page. Hidden on
-         screen (display:none) until print time, when openToolboxPrintSheet() reveals it and
-         the .printable-area rule in style.css hides everything else; afterprint below hides
-         it again. Lives at the top level (not inside the entity modal that triggers it) so
-         print layout isn't affected by the modal's own overflow/stacking. -->
+         barcodes, so a tool can be signed out by scanning straight from the page. Also reused
+         by printUserLoginCard() for a single login card -- genuinely generic "whatever's in
+         here prints" content, nothing toolbox-specific about the container itself, just named
+         for whichever feature needed it first. Hidden on screen (display:none) until print
+         time, when either function reveals it and the .printable-area rule in style.css hides
+         everything else; afterprint below hides it again. Lives at the top level (not inside
+         the entity modal that triggers it) so print layout isn't affected by the modal's own
+         overflow/stacking. -->
     <div id="toolbox-print-sheet-area" class="printable-area" style="display:none;">
         <div id="toolbox-print-sheet-content"></div>
     </div>

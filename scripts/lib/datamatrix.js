@@ -25,11 +25,13 @@ function textOptions(text, textYOffset) {
     return opts;
 }
 
-// Renders at scale:1 with zero padding, so the resulting pixel dimensions are
-// exactly the pure code's module grid size (including bwip-js's built-in quiet
-// zone), with no human-readable text row included.
-async function getModuleGridSize(text) {
-    const png = await bwipjs.toBuffer({ bcid: 'datamatrix', text, scale: 1, paddingwidth: 0, paddingheight: 0 });
+// Renders at scale:1 with zero padding, so the resulting pixel dimensions are exactly the pure
+// code's module grid size (including bwip-js's built-in quiet zone), with no human-readable
+// text row included. bcid defaults to 'datamatrix' (every pre-existing caller's symbology);
+// generateQrPngAtSize() below passes 'qrcode' to reuse the exact same scale-from-grid-size math
+// rather than re-deriving it.
+async function getModuleGridSize(text, bcid = 'datamatrix') {
+    const png = await bwipjs.toBuffer({ bcid, text, scale: 1, paddingwidth: 0, paddingheight: 0 });
     return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
 }
 
@@ -111,6 +113,31 @@ async function generatePngAtSize(text, targetMm, dpi = 1200, withText = true, pa
     const png = withPhysicalDpi(rawPng, dpi);
     const actualCodeMm = (grid.width * scale / dpi) * MM_PER_INCH; // size of the scannable code itself, excluding any text row or padding
     return { png, dpi, scale, requestedMm: targetMm, actualCodeMm };
+}
+
+/**
+ * Renders a plain QR code PNG (no human-readable text baked in -- a login card prints the
+ * person's name/badge as ordinary HTML text alongside the image instead) at roughly targetMm
+ * physical size. QR specifically, not Data Matrix like every other code in this app: this is
+ * for the user login-card feature (see POST /api/login/qr in server.js), where the audience is
+ * a generic phone camera / photo-library save rather than a dedicated warehouse scanner, and QR
+ * is what every phone's default camera app and both phone wallets recognize without a dedicated
+ * scanning app.
+ * @param {string} text
+ * @param {number} targetMm
+ * @param {number} [dpi=600]
+ * @param {string} [backgroundColor] - hex, no '#' -- see generatePngAtSize() for why this matters.
+ * @returns {Promise<{png: Buffer}>}
+ */
+async function generateQrPngAtSize(text, targetMm, dpi = 600, backgroundColor) {
+    const grid = await getModuleGridSize(text, 'qrcode');
+    const targetPx = (targetMm / MM_PER_INCH) * dpi;
+    const scale = Math.max(1, Math.round(targetPx / grid.width));
+    const opts = { bcid: 'qrcode', text, scale, paddingwidth: 2, paddingheight: 2 };
+    if (backgroundColor !== undefined) opts.backgroundcolor = backgroundColor;
+    const rawPng = await bwipjs.toBuffer(opts);
+    const png = withPhysicalDpi(rawPng, dpi);
+    return { png };
 }
 
 /**
@@ -255,4 +282,4 @@ async function addNameRow(labelPng, name) {
         .toBuffer();
 }
 
-module.exports = { getModuleGridSize, generatePngAtSize, generateLinearBarcodePng, generateSvgAtSize, textOptions, addNameRow };
+module.exports = { getModuleGridSize, generatePngAtSize, generateQrPngAtSize, generateLinearBarcodePng, generateSvgAtSize, textOptions, addNameRow };
