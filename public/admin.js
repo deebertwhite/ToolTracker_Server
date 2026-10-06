@@ -1266,6 +1266,14 @@ async function fetchNextToolId() {
  * camera scan (see startAdminAssetCamera). On success, resets the form and refreshes the
  * infrastructure tree.
  */
+/** Change handler for #add-tool-photo -- swaps the placeholder camera icon for a thumbnail of the chosen file, purely client-side (nothing uploaded yet, see addNewTool()). */
+function previewAddToolPhoto() {
+    const file = document.getElementById('add-tool-photo').files[0];
+    const preview = document.getElementById('add-tool-photo-preview');
+    if (!file) { preview.innerHTML = `<span class="icon" data-icon="camera" style="color: var(--muted);"></span>`; hydrateIcons(preview); return; }
+    preview.innerHTML = `<img src="${URL.createObjectURL(file)}" style="width:100%;height:100%;object-fit:cover;">`;
+}
+
 async function addNewTool() {
     const payload = {
         name: document.getElementById('add-tool-name').value,
@@ -1283,7 +1291,32 @@ async function addNewTool() {
 
     const res = await fetch('/api/tools', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
     if (res.ok) {
-        alert(`✅ Asset saved: ${payload.qr_code}`);
+        // Best-effort, same reasoning as every other photo upload in this app -- a tool the
+        // admin just filled out an entire form for shouldn't be reported as "failed" over a
+        // photo that can just as easily be added afterward from its own card (the only way
+        // this worked before today). POST /api/upload is the exact same endpoint/entity_type
+        // the "Photo" button on an existing tool's card already uses -- there's no bespoke
+        // "attach a photo at creation time" path on the server, just this form sequencing the
+        // two existing requests back to back.
+        const photoFile = document.getElementById('add-tool-photo').files[0];
+        let photoMessage = '';
+        if (photoFile) {
+            const formData = new FormData();
+            formData.append('photo', photoFile);
+            formData.append('entity_type', 'tool');
+            formData.append('entity_id', payload.qr_code);
+            try {
+                const photoRes = await fetch('/api/upload', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+                if (!photoRes.ok) {
+                    const photoData = await photoRes.json().catch(() => ({}));
+                    photoMessage = `\n⚠️ Photo upload failed: ${photoData.error || 'unknown error'}. You can add it later from the tool's card.`;
+                }
+            } catch (err) {
+                photoMessage = `\n⚠️ Photo upload failed (network error). You can add it later from the tool's card.`;
+            }
+        }
+
+        alert(`✅ Asset saved: ${payload.qr_code}${photoMessage}`);
         document.getElementById('add-tool-name').value = '';
         document.getElementById('add-tool-desc').value = '';
         document.getElementById('add-tool-serial').value = '';
@@ -1293,6 +1326,8 @@ async function addNewTool() {
         document.getElementById('add-tool-box').innerHTML = '<option value="">-- Select a department first --</option>';
         document.getElementById('add-tool-drawer').innerHTML = '<option value="">-- Select a toolbox first --</option>';
         document.getElementById('add-tool-id').value = '';
+        document.getElementById('add-tool-photo').value = '';
+        previewAddToolPhoto();
         renderEditableInfraTree();
     } else {
         const data = await res.json();

@@ -285,6 +285,20 @@
                                     <button class="btn-icon" onclick="startAdminAssetCamera('admin-reader-add', 'add-tool-id')"><span class="icon" data-icon="camera"></span></button>
                                 </div>
                             </div>
+
+                            <!-- Optional: uploaded right along with the rest of the form via
+                                 addNewTool() -- POST /api/tools doesn't itself accept a file, so
+                                 this is a second request to the existing POST /api/upload
+                                 (entity_type=tool, entity_id=the qr_code just assigned) right
+                                 after the tool is created, same endpoint "Photo" on an existing
+                                 tool's card already uses. -->
+                            <div class="form-group" style="margin: 0;">
+                                <label class="form-label">Photo</label>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <input type="file" accept="image/*" class="form-input" id="add-tool-photo" style="padding: 8px;" onchange="previewAddToolPhoto()">
+                                    <div id="add-tool-photo-preview" style="width: 36px; height: 36px; border-radius: 6px; background: var(--surface2); flex-shrink: 0; display: flex; align-items: center; justify-content: center; overflow: hidden;"><span class="icon" data-icon="camera" style="color: var(--muted);"></span></div>
+                                </div>
+                            </div>
                         </div>
                         <div style="background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; margin-top: 15px; border: 1px solid var(--border);">
                             <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;">
