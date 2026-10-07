@@ -482,6 +482,14 @@ async function openToolboxPrintSheet(boxId) {
     if (!box) return;
     const drawers = globalDrawersCache.filter(d => d.box_id == boxId).sort(byName);
 
+    // Explicit inches, not width:100%/height:100% -- #toolbox-print-sheet-area (.printable-area)
+    // has no height of its own (just width:100%, see style.css), so a percentage height here
+    // would have nothing definite to resolve against and collapse to the content's own natural
+    // size instead of actually filling a page (confirmed via a live PDF-generation test: the
+    // page div measured 0 height). Matches the 17x11in page / 0.25in margin injected into
+    // #toolbox-sheet-page-size below -- keep both in sync if either ever changes.
+    const PAGE_SIZE = 'width:16.5in; height:10.5in;';
+
     // Compact scan-code-plus-text card, reused for both the floated on-photo overlay and the
     // not-yet-pinpointed sidebar at two different sizes -- 46px for the overlay (sized for the
     // photo's own available room), 36px for the sidebar (a narrow fixed-width column, so every
@@ -513,7 +521,7 @@ async function openToolboxPrintSheet(boxId) {
                         ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px;">${toolCard(t, 50)}</div>`).join('')}
                    </div>`
                 : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
-            return `<div style="break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${grid}</div>`;
+            return `<div style="break-before: page; ${PAGE_SIZE} box-sizing:border-box; display:flex; flex-direction:column;">${title}${grid}</div>`;
         }
 
         // Reading order top-to-bottom/left-to-right so a glance down the sidebar roughly
@@ -549,7 +557,7 @@ async function openToolboxPrintSheet(boxId) {
             ? `<div style="flex:1 1 auto; min-height:0; display:flex; gap:12px;">${photoArea}${sidebar}</div>`
             : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
 
-        return `<div style="break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${body}</div>`;
+        return `<div style="break-before: page; ${PAGE_SIZE} box-sizing:border-box; display:flex; flex-direction:column;">${title}${body}</div>`;
     }).join('');
 
     document.getElementById('toolbox-print-sheet-content').innerHTML = drawerPages || `<p>This toolbox has no drawers yet.</p>`;
