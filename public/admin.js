@@ -431,35 +431,36 @@ async function waitForImages(container) {
 }
 
 /**
- * Builds and prints a reference sheet for one toolbox: every drawer in it, each a full tabloid
+ * Builds and prints a reference sheet for one toolbox: every drawer in it gets a full tabloid
  * (11x17in landscape -- see the injected <style> right before window.print() below, which sets
- * this scoped to just this print job) page of its own, titled "<toolbox> -- <drawer>" so a page
- * is self-identifying without flipping back to the first one.
+ * this scoped to just this print job) "map" page, titled "<toolbox> -- <drawer>" so a page is
+ * self-identifying without flipping back to the first one. A drawer with a photo and at least
+ * one tool also gets a second "Tool List" page right after its map, with full details (code,
+ * name, ID) for every tool in it.
  * Meant to be printed and kept in a binder near the physical box, so a tool can be signed out by
  * scanning straight from the page instead of needing a barcode label on the tool itself or in
  * its drawer slot.
  *
- * The drawer's photo fills essentially the whole page, and every tool already pinpointed on it
- * (the shadow-board map, see renderPositionMap()) gets its own scan code floated directly over
- * its exact spot in the photo -- the code's own opaque white background (see
- * generatePngAtSize()'s backgroundColor, server.js) is legible on its own against whatever's
- * behind it, no extra card needed. A real infographic: glance at the photo, scan the tool right
- * there. Deliberately code-only, not code-plus-name-plus-ID -- an earlier version floated the
- * full card and a real print showed it overlapping badly on drawers with several tools
- * positioned close together, which no page size fully fixes (it's an actual physical-crowding
- * problem, not a layout one); dropping the text down to just the ~13mm code (still within this
- * app's own validated 10-20mm scannable range) shrinks each overlay to a much smaller footprint
- * and keeps the one thing that actually matters here -- scanning it -- fully intact. The large
- * tabloid page is still what makes floating anything directly on the photo practical at all
- * (the previous letter-sized version used numbered pins pointing to a separate legend instead,
- * since even a bare code shrunk to fit inline on that smaller photo would've been under a
- * reliable scan size).
+ * The drawer's photo fills essentially the whole map page, and every tool already pinpointed on
+ * it (the shadow-board map, see renderPositionMap()) gets its own scan code floated directly over
+ * its exact spot in the photo, tagged with a small numbered badge (1, 2, 3...) in reading order
+ * (top-to-bottom, left-to-right) -- the SAME numbers label the matching rows on the Tool List
+ * page right after it, so a glance at either page finds the other's entry for the same tool. The
+ * code itself is still there to scan directly from the map; the badge is purely a human
+ * cross-reference. An earlier version floated the full name+ID text directly on the photo instead
+ * of a number, which a real print showed overlapping badly on drawers with several tools
+ * positioned close together (an actual physical-crowding problem, not a layout one) -- a small
+ * number avoids that while still answering "which tool is this" at a glance, with the full detail
+ * living on the dedicated list page instead. The large tabloid page is still what makes floating
+ * anything directly on the photo practical at all (an earlier letter-sized version used numbered
+ * pins pointing to a separate legend instead, since even a bare code shrunk to fit inline on that
+ * smaller photo would've been under a reliable scan size).
  *
  * Tools not yet pinpointed can't be floated on the photo at all (there's no position to use) --
- * they list instead in a narrow sidebar alongside it, so the sheet is always complete even
- * before every tool has been pinpointed; pinpointing more over time just shrinks that sidebar
- * and grows the map. A drawer with no photo on file at all falls back to a dense full-page grid
- * of every tool in it (the sheet's pre-overlay layout), since there's nothing to float cards on.
+ * they list instead in a narrow sidebar alongside the map (no number, since there's no map badge
+ * to match) and again, unnumbered, at the end of the Tool List page. A drawer with no photo on
+ * file at all falls back to a single dense full-page grid of every tool in it instead of a
+ * map+list pair, since there's no map to pair a list with -- that grid already shows full details.
  *
  * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.) or anything
  * date-based (calibration due date). These pages are meant to be printed once and left in
@@ -491,12 +492,14 @@ async function openToolboxPrintSheet(boxId) {
     // page div measured 0 height). Matches the 17x11in page / 0.25in margin injected into
     // #toolbox-sheet-page-size below -- keep both in sync if either ever changes.
     const PAGE_SIZE = 'width:16.5in; height:10.5in;';
+    const pageDiv = (inner) => `<div style="break-before: page; ${PAGE_SIZE} box-sizing:border-box; display:flex; flex-direction:column;">${inner}</div>`;
 
     // Compact scan-code-plus-text card, used for the not-yet-pinpointed sidebar and the no-photo
-    // grid fallback -- NOT the on-photo overlay, which is code-only (see `overlays` below) to
-    // avoid the text pushing neighboring tools' labels into each other on a busy photo. Neither
-    // of these two layouts has that overlap risk (a sidebar list and an auto-wrapping grid both
-    // just add rows as needed), so there's no reason to drop the name/ID text here too.
+    // grid fallback -- NOT the on-photo overlay, which floats just a numbered code (see
+    // `overlays` below) to avoid text pushing neighboring tools' labels into each other on a busy
+    // photo. Neither of these two layouts has that overlap risk (a sidebar list and an
+    // auto-wrapping grid both just add rows as needed), so there's no reason to drop the name/ID
+    // text here too.
     const toolCard = (t, codeSizePx) => `
         <div style="display:flex; align-items:center; gap:4px; white-space:nowrap;">
             <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:${codeSizePx}px; height:${codeSizePx}px; object-fit:contain; flex-shrink:0;">
@@ -506,44 +509,70 @@ async function openToolboxPrintSheet(boxId) {
             </div>
         </div>`;
 
+    // Small circular number badge, shared by the map overlay and the Tool List row below so
+    // both stay visually consistent. box-sizing:border-box makes `size` the badge's full
+    // rendered footprint (border included) regardless of borderPx, so line-height (the content
+    // box's height) is always just size - borderPx*2 -- without that, a bordered badge's content
+    // box is actually size+borderPx*2, and a line-height matching `size` leaves the number
+    // visibly off-center (caught in review: the map badge below was doing exactly this).
+    const numberBadge = (number, size, borderPx) => `
+        <div style="box-sizing:border-box; flex:0 0 auto; width:${size}px; height:${size}px; border-radius:50%; text-align:center;
+                    line-height:${size - borderPx * 2}px; font-size:12px; font-weight:bold; color:#fff;
+                    background:${number != null ? '#000' : 'transparent'};
+                    ${borderPx ? `border:${borderPx}px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.6);` : ''}">${number != null ? number : ''}</div>`;
+
+    // Tool List page row -- same code+name+ID as toolCard() above, plus a leading number badge
+    // matching the one floated over this tool's position on the map page (null for an
+    // unpositioned tool, which has no map badge to match).
+    const detailRow = (t, number) => `
+        <div style="display:flex; align-items:center; gap:8px; border:1px solid #ccc; border-radius:5px; padding:6px;">
+            ${numberBadge(number, 22, 0)}
+            ${toolCard(t, 44)}
+        </div>`;
+
+    const pageTitle = (drawer, label) => `
+        <div style="flex:0 0 auto; display:flex; justify-content:space-between; align-items:baseline; margin:0 0 8px; padding-bottom:6px; border-bottom:3px solid #000;">
+            <h3 style="margin:0; font-size:24px;">${box.name} &mdash; ${drawer.name}${label ? ` <span style="font-size:16px; font-weight:normal; color:#555;">(${label})</span>` : ''}</h3>
+            <span style="font-size:11px; color:#555;">printed ${new Date().toLocaleDateString()}</span>
+        </div>`;
+
     const drawerPages = drawers.map(drawer => {
         const tools = globalToolsCache.filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired');
-        const title = `
-            <div style="flex:0 0 auto; display:flex; justify-content:space-between; align-items:baseline; margin:0 0 8px; padding-bottom:6px; border-bottom:3px solid #000;">
-                <h3 style="margin:0; font-size:24px;">${box.name} &mdash; ${drawer.name}</h3>
-                <span style="font-size:11px; color:#555;">printed ${new Date().toLocaleDateString()}</span>
-            </div>`;
 
         if (!drawer.photo_url) {
             // No photo to float cards on -- fall back to a dense grid of every tool, same as
             // the sidebar card style just bigger, filling the whole page instead of a narrow
             // column. The large tabloid page means even this fallback fits far more per page
-            // than the old letter-sized version did.
+            // than the old letter-sized version did. Already shows full details, so there's no
+            // separate Tool List page for this case.
             const grid = tools.length
                 ? `<div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:10px; align-content:start;">
                         ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px;">${toolCard(t, 50)}</div>`).join('')}
                    </div>`
                 : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
-            return `<div style="break-before: page; ${PAGE_SIZE} box-sizing:border-box; display:flex; flex-direction:column;">${title}${grid}</div>`;
+            return pageDiv(`${pageTitle(drawer)}${grid}`);
         }
 
         // Reading order top-to-bottom/left-to-right so a glance down the sidebar roughly
-        // matches a glance down the photo, for whatever's left unpinpointed.
+        // matches a glance down the photo, for whatever's left unpinpointed -- also the order
+        // the 1, 2, 3... map badges and Tool List rows are numbered in.
         const positioned = tools.filter(t => t.position_x !== null && t.position_y !== null)
             .sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
         const unpositioned = tools.filter(t => t.position_x === null || t.position_y === null).sort(byName);
 
-        // Code only, no name/ID text -- an early real print showed text-plus-code cards
-        // overlapping on drawers with several tools positioned close together (expected for a
-        // physically tight drawer; not something any page size fully solves). Dropping the text
-        // shrinks each overlay down to just the code's own square footprint, which is already a
-        // solid white square with black modules (generatePngAtSize()'s backgroundColor:'FFFFFF',
-        // see server.js) -- legible on its own against the photo with no extra card/border
-        // needed. Scanning it is still the core purpose; the name/ID stays visible for the
-        // not-yet-pinpointed sidebar below, where list layout has no overlap risk at all.
-        const overlays = positioned.map(t => `
-            <img src="/api/tools/${t.tool_id}/scan-code.png" style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%;
-                        transform:translate(-50%,-50%); width:50px; height:50px; object-fit:contain; box-shadow:0 1px 4px rgba(0,0,0,0.6);">
+        // Code plus a small numbered badge, not the full name/ID text -- an early real print
+        // showed text-plus-code cards overlapping on drawers with several tools positioned close
+        // together (expected for a physically tight drawer; not something any page size fully
+        // solves). The code is already a solid white square with black modules
+        // (generatePngAtSize()'s backgroundColor:'FFFFFF', see server.js) -- legible on its own
+        // against the photo with no extra card/border needed; the badge sits just outside its
+        // corner so it doesn't cover any modules. Full name/ID lives on the Tool List page,
+        // keyed by this same number.
+        const overlays = positioned.map((t, idx) => `
+            <div style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%); width:50px; height:50px;">
+                <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:50px; height:50px; object-fit:contain; display:block; box-shadow:0 1px 4px rgba(0,0,0,0.6);">
+                <div style="position:absolute; top:-8px; left:-8px;">${numberBadge(idx + 1, 20, 2)}</div>
+            </div>
         `).join('');
 
         const sidebar = unpositioned.length ? `
@@ -566,7 +595,17 @@ async function openToolboxPrintSheet(boxId) {
             ? `<div style="flex:1 1 auto; min-height:0; display:flex; gap:12px;">${photoArea}${sidebar}</div>`
             : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
 
-        return `<div style="break-before: page; ${PAGE_SIZE} box-sizing:border-box; display:flex; flex-direction:column;">${title}${body}</div>`;
+        const mapPage = pageDiv(`${pageTitle(drawer)}${body}`);
+        if (!tools.length) return mapPage;
+
+        const detailGrid = `
+            <div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:8px; align-content:start;">
+                ${positioned.map((t, idx) => detailRow(t, idx + 1)).join('')}
+                ${unpositioned.map(t => detailRow(t, null)).join('')}
+            </div>`;
+        const detailPage = pageDiv(`${pageTitle(drawer, 'Tool List')}${detailGrid}`);
+
+        return mapPage + detailPage;
     }).join('');
 
     document.getElementById('toolbox-print-sheet-content').innerHTML = drawerPages || `<p>This toolbox has no drawers yet.</p>`;
@@ -1783,7 +1822,10 @@ function openEntityModal(type, id) {
         // as loadCalibrationHistory()/loadIncidentHistory() for tools.
         readHtml = entity.photo_url ? `
             <div id="em-position-map-section" style="margin-top:15px;">
-                <div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Tool Positions (Shadow Board Map)</div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Tool Positions (Shadow Board Map)</div>
+                    ${canEditTools ? `<button type="button" class="btn-icon" style="width:28px;height:28px;padding:0;" title="Open large editor to drag tools into position" onclick="openPositionEditor(${entity.drawer_id})">${icon('move')}</button>` : ''}
+                </div>
                 <div id="em-position-map-wrap" style="position:relative;display:inline-block;max-width:100%;border-radius:8px;overflow:hidden;border:1px solid var(--border);line-height:0;">
                     <img id="em-position-map-img" src="${entity.photo_url}" style="display:block;max-width:100%;">
                     <div id="em-position-map-markers" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
@@ -2112,6 +2154,22 @@ function openEntityModal(type, id) {
 }
 
 /**
+ * Shared data prep for both the compact position-map preview (renderPositionMap) and the
+ * full-screen position editor (renderPositionEditor) -- splits a drawer's tools into
+ * placed/unplaced and gives both the same status-to-marker-color mapping, so the two views
+ * can't silently drift apart on what counts as "placed" or what color a status gets.
+ */
+function getDrawerPositionData(drawer) {
+    const drawerTools = globalToolsCache.filter(t => t.drawer_id === drawer.drawer_id);
+    return {
+        drawerTools,
+        placed: drawerTools.filter(t => t.position_x !== null && t.position_y !== null),
+        unplaced: drawerTools.filter(t => t.position_x === null || t.position_y === null),
+        statusColor: (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)'),
+    };
+}
+
+/**
  * Renders the shadow-board map inside an open drawer modal (see the `readHtml` built for
  * type === 'drawer' in openEntityModal) -- a colored marker for every tool in this drawer
  * that already has a saved position (green/accent/red, same convention as the inventory
@@ -2126,10 +2184,7 @@ function renderPositionMap(drawer) {
     const controlsEl = document.getElementById('em-position-map-controls');
     if (!markersEl || !controlsEl) return; // modal was closed/switched before this ran
 
-    const drawerTools = globalToolsCache.filter(t => t.drawer_id === drawer.drawer_id);
-    const placed = drawerTools.filter(t => t.position_x !== null && t.position_y !== null);
-    const unplaced = drawerTools.filter(t => t.position_x === null || t.position_y === null);
-    const statusColor = (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)');
+    const { drawerTools, placed, unplaced, statusColor } = getDrawerPositionData(drawer);
 
     markersEl.innerHTML = placed.map(t => `
         <div title="${t.name} (${t.status})" onclick="event.stopPropagation();${canEditTools ? ` unplaceToolPosition('${t.qr_code}')` : ''}"
@@ -2183,6 +2238,7 @@ async function placeToolPosition(qrCode, x, y) {
         if (tool) { tool.position_x = x; tool.position_y = y; }
         const drawer = globalDrawersCache.find(d => d.drawer_id == document.getElementById('em-target-id').value);
         if (drawer) renderPositionMap(drawer);
+        if (positionEditorDrawerId) renderPositionEditor();
     } catch (err) {
         alert('❌ Network error while placing tool.');
     }
@@ -2205,9 +2261,147 @@ async function unplaceToolPosition(qrCode) {
         tool.position_x = null; tool.position_y = null;
         const drawer = globalDrawersCache.find(d => d.drawer_id == document.getElementById('em-target-id').value);
         if (drawer) renderPositionMap(drawer);
+        if (positionEditorDrawerId) renderPositionEditor();
     } catch (err) {
         alert('❌ Network error while removing marker.');
     }
+}
+
+/**
+ * Full-screen position editor (#position-editor-overlay) -- a larger, drag-enabled version of
+ * the compact shadow-board preview above, opened via the "move" button next to a drawer's
+ * Tool Positions section. Markers here can be dragged to reposition (not just click-to-place/
+ * click-to-remove like the compact map, whose markers are too small to drag reliably), and an
+ * optional snap-to-grid keeps placements tidy. placeToolPosition()/unplaceToolPosition() refresh
+ * this editor too (see `positionEditorDrawerId` check in each) so edits made here or in the
+ * compact map stay in sync without re-rendering twice.
+ */
+let positionEditorDrawerId = null;
+const POSITION_GRID_STEP = 0.05;
+
+/** Snaps a fractional (0-1) coordinate to POSITION_GRID_STEP when #pe-snap-toggle is checked, and always clamps to [0,1]. */
+function snapPositionCoord(v) {
+    const clamped = Math.max(0, Math.min(1, v));
+    const snapOn = document.getElementById('pe-snap-toggle')?.checked;
+    return snapOn ? Math.round(clamped / POSITION_GRID_STEP) * POSITION_GRID_STEP : clamped;
+}
+
+/** Opens the full-screen position editor for a drawer (must already have a photo). */
+function openPositionEditor(drawerId) {
+    const drawer = globalDrawersCache.find(d => d.drawer_id == drawerId);
+    if (!drawer || !drawer.photo_url) return;
+    positionEditorDrawerId = drawer.drawer_id;
+    document.getElementById('pe-title').textContent = drawer.name;
+    document.getElementById('pe-map-img').src = drawer.photo_url;
+    document.getElementById('position-editor-overlay').style.display = 'flex';
+    renderPositionEditor();
+}
+
+/** Closes the position editor. Edits are already saved live (each drag/click PUTs immediately), so this just hides the overlay. */
+function closePositionEditor() {
+    document.getElementById('position-editor-overlay').style.display = 'none';
+    document.getElementById('pe-map-img').src = '';
+    positionEditorDrawerId = null;
+}
+
+/** (Re)draws the position editor's grid lines, markers, and unplaced-tool picker for the currently open drawer. */
+function renderPositionEditor() {
+    const drawer = globalDrawersCache.find(d => d.drawer_id === positionEditorDrawerId);
+    const markersEl = document.getElementById('pe-markers');
+    const controlsEl = document.getElementById('pe-controls');
+    const imgEl = document.getElementById('pe-map-img');
+    const gridEl = document.getElementById('pe-grid-overlay');
+    if (!drawer || !markersEl || !controlsEl || !imgEl) return;
+
+    const snapOn = document.getElementById('pe-snap-toggle')?.checked;
+    gridEl.style.backgroundSize = `${POSITION_GRID_STEP * 100}% ${POSITION_GRID_STEP * 100}%`;
+    gridEl.style.backgroundImage = snapOn
+        ? 'linear-gradient(to right, rgba(255,255,255,0.35) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.35) 1px, transparent 1px)'
+        : 'none';
+
+    const { drawerTools, placed, unplaced, statusColor } = getDrawerPositionData(drawer);
+
+    markersEl.innerHTML = placed.map(t => `
+        <div title="${t.name} (${t.status})" onpointerdown="startDragMarker(event, '${t.qr_code}', this)"
+             style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
+                    width:26px; height:26px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
+                    box-shadow:0 0 4px rgba(0,0,0,0.6); pointer-events:auto; cursor:grab; touch-action:none;"></div>
+    `).join('');
+
+    if (unplaced.length === 0) {
+        imgEl.onclick = null;
+        controlsEl.innerHTML = drawerTools.length === 0
+            ? `<div style="color:var(--muted);">No tools assigned to this drawer yet.</div>`
+            : `<div style="color:var(--muted);">Every tool in this drawer is placed. Drag a marker to move it, or click (without dragging) to remove it.</div>`;
+        return;
+    }
+
+    controlsEl.innerHTML = `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:white;">
+            <label style="margin:0;white-space:nowrap;">Click the photo to place:</label>
+            <select class="form-select" id="pe-tool-select" style="width:auto;flex:1;min-width:200px;">
+                ${unplaced.map(t => `<option value="${t.qr_code}">${t.name} (${t.qr_code})</option>`).join('')}
+            </select>
+        </div>
+        <div style="font-size:11px;color:#ccc;margin-top:6px;">Drag an existing marker to reposition it, or click it (without dragging) to remove it.</div>
+    `;
+    imgEl.onclick = (event) => {
+        const select = document.getElementById('pe-tool-select');
+        if (!select || !select.value) return;
+        const rect = imgEl.getBoundingClientRect();
+        const x = snapPositionCoord((event.clientX - rect.left) / rect.width);
+        const y = snapPositionCoord((event.clientY - rect.top) / rect.height);
+        placeToolPosition(select.value, x, y);
+    };
+}
+
+/**
+ * Wires up a drag gesture on a position-editor marker, starting from its pointerdown. Moves the
+ * marker live (visual only) as the pointer moves; on release, a real drag (>4px moved) commits
+ * the new position via placeToolPosition(), while a plain click/tap (no movement) instead removes
+ * the marker via unplaceToolPosition(), mirroring the compact map's click-to-remove convention.
+ * Uses setPointerCapture so move/up keep firing on the marker even once the pointer leaves it.
+ * The image rect and snap-to-grid setting are captured once here rather than re-read on every
+ * pointermove (neither can change mid-gesture) -- this runs on the highest-frequency event in
+ * the feature, so avoiding a repeated getBoundingClientRect()/DOM lookup per move matters.
+ * Listens for pointercancel as well as pointerup (a gesture can be interrupted by an alt-tab, OS
+ * gesture, or multi-touch) and drops the change rather than committing a possibly-partial drag --
+ * without this, the listeners would leak on that marker and the next drag would double them up.
+ */
+function startDragMarker(event, qrCode, markerEl) {
+    event.preventDefault();
+    const startX = event.clientX, startY = event.clientY;
+    const imgEl = document.getElementById('pe-map-img');
+    const rect = imgEl.getBoundingClientRect();
+    const snapOn = document.getElementById('pe-snap-toggle')?.checked;
+    const snap = (v) => {
+        const clamped = Math.max(0, Math.min(1, v));
+        return snapOn ? Math.round(clamped / POSITION_GRID_STEP) * POSITION_GRID_STEP : clamped;
+    };
+    let moved = false, pendingX = null, pendingY = null;
+    markerEl.setPointerCapture(event.pointerId);
+    markerEl.style.cursor = 'grabbing';
+
+    const onMove = (e) => {
+        if (!moved && Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return;
+        moved = true;
+        pendingX = snap((e.clientX - rect.left) / rect.width);
+        pendingY = snap((e.clientY - rect.top) / rect.height);
+        markerEl.style.left = (pendingX * 100) + '%';
+        markerEl.style.top = (pendingY * 100) + '%';
+    };
+    const onEnd = (e) => {
+        markerEl.removeEventListener('pointermove', onMove);
+        markerEl.removeEventListener('pointerup', onEnd);
+        markerEl.removeEventListener('pointercancel', onEnd);
+        markerEl.style.cursor = 'grab';
+        if (e.type === 'pointercancel') return;
+        if (moved) placeToolPosition(qrCode, pendingX, pendingY);
+        else unplaceToolPosition(qrCode);
+    };
+    markerEl.addEventListener('pointermove', onMove);
+    markerEl.addEventListener('pointerup', onEnd);
+    markerEl.addEventListener('pointercancel', onEnd);
 }
 
 /**
