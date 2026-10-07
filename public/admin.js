@@ -509,24 +509,27 @@ async function openToolboxPrintSheet(boxId) {
             </div>
         </div>`;
 
-    // Small circular number badge, shared by the map overlay and the Tool List row below so
-    // both stay visually consistent. box-sizing:border-box makes `size` the badge's full
-    // rendered footprint (border included) regardless of borderPx, so line-height (the content
-    // box's height) is always just size - borderPx*2 -- without that, a bordered badge's content
-    // box is actually size+borderPx*2, and a line-height matching `size` leaves the number
-    // visibly off-center (caught in review: the map badge below was doing exactly this).
-    const numberBadge = (number, size, borderPx) => `
+    // Small circular number badge, shared by the map overlay and the Tool List row below so both
+    // stay visually consistent. White background with black text, not the other way around --
+    // style.css's `@media print` block forces `color: black !important` on everything under
+    // .printable-area (this whole print sheet), which silently turned a white number on a black
+    // circle invisible (caught via a live print render, not the diff review -- the DOM had the
+    // right "1"/"2" text all along, it just rendered black-on-black). Matches the scan code
+    // image's own established "opaque white, legible against anything" approach instead of
+    // fighting that print rule. box-sizing:border-box plus no border means line-height can just
+    // equal `size` to center the number -- no border-width math to get wrong.
+    const numberBadge = (number, size) => `
         <div style="box-sizing:border-box; flex:0 0 auto; width:${size}px; height:${size}px; border-radius:50%; text-align:center;
-                    line-height:${size - borderPx * 2}px; font-size:12px; font-weight:bold; color:#fff;
-                    background:${number != null ? '#000' : 'transparent'};
-                    ${borderPx ? `border:${borderPx}px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.6);` : ''}">${number != null ? number : ''}</div>`;
+                    line-height:${size}px; font-size:12px; font-weight:bold; color:#000;
+                    background:${number != null ? '#fff' : 'transparent'};
+                    ${number != null ? 'box-shadow:0 1px 3px rgba(0,0,0,0.6);' : ''}">${number != null ? number : ''}</div>`;
 
     // Tool List page row -- same code+name+ID as toolCard() above, plus a leading number badge
     // matching the one floated over this tool's position on the map page (null for an
     // unpositioned tool, which has no map badge to match).
     const detailRow = (t, number) => `
         <div style="display:flex; align-items:center; gap:8px; border:1px solid #ccc; border-radius:5px; padding:6px;">
-            ${numberBadge(number, 22, 0)}
+            ${numberBadge(number, 22)}
             ${toolCard(t, 44)}
         </div>`;
 
@@ -571,7 +574,7 @@ async function openToolboxPrintSheet(boxId) {
         const overlays = positioned.map((t, idx) => `
             <div style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%); width:50px; height:50px;">
                 <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:50px; height:50px; object-fit:contain; display:block; box-shadow:0 1px 4px rgba(0,0,0,0.6);">
-                <div style="position:absolute; top:-8px; left:-8px;">${numberBadge(idx + 1, 20, 2)}</div>
+                <div style="position:absolute; top:-8px; left:-8px;">${numberBadge(idx + 1, 20)}</div>
             </div>
         `).join('');
 
