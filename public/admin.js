@@ -432,8 +432,9 @@ async function waitForImages(container) {
 
 /**
  * Builds and prints a reference sheet for one toolbox: every drawer in it, each a full tabloid
- * (11x17in landscape, see the `toolbox-sheet` named @page in style.css) page of its own, titled
- * "<toolbox> -- <drawer>" so a page is self-identifying without flipping back to the first one.
+ * (11x17in landscape -- see the injected <style> right before window.print() below, which sets
+ * this scoped to just this print job) page of its own, titled "<toolbox> -- <drawer>" so a page
+ * is self-identifying without flipping back to the first one.
  * Meant to be printed and kept in a binder near the physical box, so a tool can be signed out by
  * scanning straight from the page instead of needing a barcode label on the tool itself or in
  * its drawer slot.
@@ -512,7 +513,7 @@ async function openToolboxPrintSheet(boxId) {
                         ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px;">${toolCard(t, 50)}</div>`).join('')}
                    </div>`
                 : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
-            return `<div style="page: toolbox-sheet; break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${grid}</div>`;
+            return `<div style="break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${grid}</div>`;
         }
 
         // Reading order top-to-bottom/left-to-right so a glance down the sidebar roughly
@@ -548,7 +549,7 @@ async function openToolboxPrintSheet(boxId) {
             ? `<div style="flex:1 1 auto; min-height:0; display:flex; gap:12px;">${photoArea}${sidebar}</div>`
             : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
 
-        return `<div style="page: toolbox-sheet; break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${body}</div>`;
+        return `<div style="break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${body}</div>`;
     }).join('');
 
     document.getElementById('toolbox-print-sheet-content').innerHTML = drawerPages || `<p>This toolbox has no drawers yet.</p>`;
@@ -556,12 +557,26 @@ async function openToolboxPrintSheet(boxId) {
     const area = document.getElementById('toolbox-print-sheet-area');
     area.style.display = 'block';
     await waitForImages(area);
+
+    // Scopes the tabloid/landscape page size to just this print job -- a CSS named page
+    // (`@page toolbox-sheet { }` + `page: toolbox-sheet;`) looked like the right tool for this
+    // (avoid affecting printUserLoginCard(), which reuses this same print area for an unrelated
+    // small card) but a live PDF-generation test showed Chromium's print pipeline doesn't
+    // actually honor a named @page's `size` -- confirmed it silently fell back to plain Letter.
+    // An unnamed `@page { size: ... }` rule IS honored, so this injects one just for this print
+    // call and the afterprint listener below removes it again right after.
+    const pageSizeStyle = document.createElement('style');
+    pageSizeStyle.id = 'toolbox-sheet-page-size';
+    pageSizeStyle.textContent = '@page { size: 17in 11in; margin: 0.25in; }';
+    document.head.appendChild(pageSizeStyle);
+
     window.print();
 }
 
 window.addEventListener('afterprint', () => {
     const area = document.getElementById('toolbox-print-sheet-area');
     if (area) area.style.display = 'none';
+    document.getElementById('toolbox-sheet-page-size')?.remove();
 });
 
 // ==========================================
