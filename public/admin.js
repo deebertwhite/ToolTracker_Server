@@ -431,24 +431,32 @@ async function waitForImages(container) {
 }
 
 /**
- * Builds and prints a reference sheet for one toolbox: every drawer in it, each on its own page
- * (titled "<toolbox> -- <drawer>" so a page is self-identifying without flipping back to the
- * first one), meant to be printed and kept in a binder near the physical box, so a tool can be
- * signed out by scanning straight from the page instead of needing a barcode label on the tool
- * itself or in its drawer slot.
+ * Builds and prints a reference sheet for one toolbox: every drawer in it, each a full tabloid
+ * (11x17in landscape, see the `toolbox-sheet` named @page in style.css) page of its own, titled
+ * "<toolbox> -- <drawer>" so a page is self-identifying without flipping back to the first one.
+ * Meant to be printed and kept in a binder near the physical box, so a tool can be signed out by
+ * scanning straight from the page instead of needing a barcode label on the tool itself or in
+ * its drawer slot.
  *
- * Tools already pinpointed on the drawer's photo (the shadow-board map, see renderPositionMap())
- * get a numbered marker drawn right on the photo at that exact spot -- a real infographic, not
- * just a list -- plus a matching numbered badge on their card in the legend grid below, so
- * "what tool is this" is answerable by eye from the photo alone, with the legend as the
- * scannable backup. A numbered pin (not the full code or name) is deliberate: a code shrunk
- * enough to avoid overlapping its neighbors on a busy photo would be well under a physically
- * reliable scan size, and 30-90+ labels directly on one photo (several real drawers run that
- * deep) would be unreadable clutter -- the legend is where the actual scan code and full detail
- * live, at a size that's always legible/scannable regardless of how crowded the drawer is.
- * Tools not yet pinpointed still appear in the legend (unnumbered, listed after the pinned
- * ones) so the sheet is complete and fully usable from day one -- pinpointing more tools over
- * time just makes the photo map more complete, it's never required before printing.
+ * The drawer's photo fills essentially the whole page, and every tool already pinpointed on it
+ * (the shadow-board map, see renderPositionMap()) gets its own small card -- scan code, name,
+ * ID -- floated directly over its exact spot in the photo, white-on-transparent so it stays
+ * legible against whatever's behind it. A real infographic: glance at the photo, read the tool
+ * right off it, scan it right there. The large tabloid page is what makes this practical where
+ * it wasn't on a normal letter page -- the previous version of this sheet used numbered pins
+ * pointing to a separate legend instead, specifically because a code small enough to sit inline
+ * without overlapping its neighbors on a letter-sized photo would've been under a reliable scan
+ * size. At 11x17 a 46px/~12mm code (still within this app's own validated 10-20mm scannable
+ * range, see BARCODE_LABEL_MM in server.js) has real room to breathe for a typical drawer's
+ * tool count and spacing -- an unusually dense drawer can still end up with overlapping cards,
+ * since no page size removes an actual physical crowding problem, but that's now a real
+ * exception rather than the normal case.
+ *
+ * Tools not yet pinpointed can't be floated on the photo at all (there's no position to use) --
+ * they list instead in a narrow sidebar alongside it, so the sheet is always complete even
+ * before every tool has been pinpointed; pinpointing more over time just shrinks that sidebar
+ * and grows the map. A drawer with no photo on file at all falls back to a dense full-page grid
+ * of every tool in it (the sheet's pre-overlay layout), since there's nothing to float cards on.
  *
  * A static catalog snapshot only -- deliberately NOT live status (In/Out/etc.) or anything
  * date-based (calibration due date). These pages are meant to be printed once and left in
@@ -466,88 +474,84 @@ async function waitForImages(container) {
  * so it doesn't clutter the screen; this function reveals it right before printing, and the
  * afterprint listener below hides it again afterward.
  */
-// Shared "black circle, white bold number" look for both the on-photo pin and the legend
-// card's corner badge below -- same base visual at two different sizes; each caller layers its
-// own position:absolute placement (and, for the on-photo pin, an extra border/ring for contrast
-// against a busy photo background that the card badge doesn't need against its plain white card).
-const pinBadgeStyle = (sizePx) => `width:${sizePx}px; height:${sizePx}px; border-radius:50%; background:#000; color:#fff; display:flex; align-items:center; justify-content:center; font-size:${sizePx <= 18 ? 10 : 11}px; font-weight:bold;`;
-
 async function openToolboxPrintSheet(boxId) {
     const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
 
     const box = globalBoxesCache.find(b => b.box_id == boxId);
     if (!box) return;
-    const dept = globalDeptsCache.find(d => d.dept_id == box.dept_id);
     const drawers = globalDrawersCache.filter(d => d.box_id == boxId).sort(byName);
 
-    const drawerSections = drawers.map(drawer => {
-        const tools = globalToolsCache.filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired');
+    // Compact scan-code-plus-text card, reused for both the floated on-photo overlay and the
+    // not-yet-pinpointed sidebar at two different sizes -- 46px for the overlay (sized for the
+    // photo's own available room), 36px for the sidebar (a narrow fixed-width column, so every
+    // card there needs to be noticeably smaller to leave room for the name/ID text beside it).
+    const toolCard = (t, codeSizePx) => `
+        <div style="display:flex; align-items:center; gap:4px; white-space:nowrap;">
+            <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:${codeSizePx}px; height:${codeSizePx}px; object-fit:contain; flex-shrink:0;">
+            <div style="line-height:1.15; min-width:0;">
+                <div style="font-size:12px; font-weight:bold; white-space:${codeSizePx > 40 ? 'nowrap' : 'normal'};">${t.name}</div>
+                <div style="font-size:11px; font-family:monospace;">${t.qr_code}</div>
+            </div>
+        </div>`;
 
-        // Tools already pinpointed on the drawer photo (shadow-board map, see renderPositionMap())
-        // get a numbered marker on the photo plus a matching badge in the legend below -- reading
-        // order top-to-bottom/left-to-right so the numbers roughly match how an eye scans the
-        // photo. Tools not yet pinpointed still appear in the legend (unnumbered, after the pinned
-        // ones) so the sheet is complete and fully scannable from day one -- it just gets more of
-        // an at-a-glance map as more tools get physically pinpointed in the app over time.
+    const drawerPages = drawers.map(drawer => {
+        const tools = globalToolsCache.filter(t => t.drawer_id == drawer.drawer_id && t.status !== 'Retired');
+        const title = `
+            <div style="flex:0 0 auto; display:flex; justify-content:space-between; align-items:baseline; margin:0 0 8px; padding-bottom:6px; border-bottom:3px solid #000;">
+                <h3 style="margin:0; font-size:24px;">${box.name} &mdash; ${drawer.name}</h3>
+                <span style="font-size:11px; color:#555;">printed ${new Date().toLocaleDateString()}</span>
+            </div>`;
+
+        if (!drawer.photo_url) {
+            // No photo to float cards on -- fall back to a dense grid of every tool, same as
+            // the sidebar card style just bigger, filling the whole page instead of a narrow
+            // column. The large tabloid page means even this fallback fits far more per page
+            // than the old letter-sized version did.
+            const grid = tools.length
+                ? `<div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:10px; align-content:start;">
+                        ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px;">${toolCard(t, 50)}</div>`).join('')}
+                   </div>`
+                : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
+            return `<div style="page: toolbox-sheet; break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${grid}</div>`;
+        }
+
+        // Reading order top-to-bottom/left-to-right so a glance down the sidebar roughly
+        // matches a glance down the photo, for whatever's left unpinpointed.
         const positioned = tools.filter(t => t.position_x !== null && t.position_y !== null)
             .sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
         const unpositioned = tools.filter(t => t.position_x === null || t.position_y === null).sort(byName);
 
-        const pins = drawer.photo_url && positioned.length ? positioned.map((t, i) => `
+        const overlays = positioned.map(t => `
             <div style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
-                        border:2px solid #fff; box-shadow:0 0 0 1px #000; ${pinBadgeStyle(22)}">${i + 1}</div>
-        `).join('') : '';
+                        background:rgba(255,255,255,0.95); border:1.5px solid #000; border-radius:5px; padding:3px 6px;
+                        box-shadow:0 1px 4px rgba(0,0,0,0.6);">
+                ${toolCard(t, 46)}
+            </div>`).join('');
 
-        // A dense multi-column grid so a typical drawer's full tool list fits on the one page it
-        // already starts on (see the page-break between drawers below) instead of spilling onto a
-        // second -- auto-fill lets the browser pack as many ~150px cards per row as the page width
-        // allows. A handful of real drawers run 30-90+ tools deep though, which genuinely cannot
-        // fit on one printed page at any reasonable size -- those still overflow onto a following
-        // page.
-        const card = (t, pinNumber) => {
-            // scan-code.png (GET /api/tools/:id/scan-code.png) is a text-free Data Matrix generated
-            // fresh for this purpose -- unlike barcode_image_url_large (a full sticker label: code +
-            // ID + name baked in, meant to stand alone on the tool), there's no redundant text eating
-            // into the image, so the whole box is scannable code instead of under half of it. 60px
-            // (~16mm at print) stays well within this app's own validated 10-20mm scannable range
-            // (see BARCODE_LABEL_MM in server.js) -- the same reason the on-photo pin above is just
-            // a number rather than a full code: a code shrunk enough to avoid overlapping its
-            // neighbors on a busy photo would be well under a physically reliable scan size.
-            const barcodeImg = `<img src="/api/tools/${t.tool_id}/scan-code.png" style="width:60px; height:60px; object-fit:contain; flex-shrink:0;">`;
-            return `
-                <div style="position:relative; display:flex; align-items:center; gap:6px; border:1px solid #ccc; padding:4px; break-inside:avoid; page-break-inside:avoid;">
-                    ${pinNumber ? `<div style="position:absolute; top:-6px; left:-6px; ${pinBadgeStyle(18)}">${pinNumber}</div>` : ''}
-                    ${barcodeImg}
-                    <div style="min-width:0;">
-                        <div style="font-size:11px; font-weight:bold; line-height:1.2;">${t.name}</div>
-                        <div style="font-family:monospace; font-size:11px;">${t.qr_code}</div>
-                        ${t.serial_number ? `<div style="font-size:10px; color:#333;">S/N: ${t.serial_number}</div>` : ''}
-                    </div>
-                </div>`;
-        };
-        const cards = positioned.map((t, i) => card(t, i + 1)).join('') + unpositioned.map(t => card(t, null)).join('');
+        const sidebar = unpositioned.length ? `
+            <div style="flex:0 0 2.5in; min-width:0; overflow-y:auto; border-left:1px solid #ccc; padding-left:10px;">
+                <div style="font-size:12px; font-weight:bold; color:#333; margin-bottom:8px;">Not Yet Pinpointed</div>
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    ${unpositioned.map(t => `<div style="border:1px solid #ccc; border-radius:4px; padding:5px;">${toolCard(t, 36)}</div>`).join('')}
+                </div>
+            </div>` : '';
 
-        return `
-            <div style="break-inside:avoid; page-break-inside:avoid; margin-bottom:20px;">
-                <h3 style="margin-bottom:8px; border-bottom:2px solid #000; padding-bottom:4px;">${box.name} &mdash; ${drawer.name}</h3>
-                ${drawer.photo_url ? `
-                    <div style="position:relative; display:inline-block; max-width:100%; line-height:0; margin-bottom:10px;">
-                        <img src="${drawer.photo_url}" style="display:block; max-width:100%; max-height:380px; object-fit:contain; border:1px solid #999;">
-                        <div style="position:absolute; top:0; left:0; width:100%; height:100%;">${pins}</div>
-                    </div>
-                    ${!positioned.length ? `<p style="color:#666; font-size:11px; margin:0 0 10px;">No tools pinpointed on this photo yet -- see the shadow board map on the drawer's entity card.</p>` : ''}
-                ` : ''}
-                ${cards
-                    ? `<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap:6px;">${cards}</div>`
-                    : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`}
+        const photoArea = `
+            <div style="flex:1 1 auto; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden;">
+                <div style="position:relative; display:inline-block; line-height:0; max-width:100%; max-height:100%;">
+                    <img src="${drawer.photo_url}" style="display:block; max-width:100%; max-height:100%; object-fit:contain;">
+                    <div style="position:absolute; top:0; left:0; width:100%; height:100%;">${overlays}</div>
+                </div>
             </div>`;
-    }).join('<div style="break-before:page; page-break-before:always;"></div>');
 
-    document.getElementById('toolbox-print-sheet-content').innerHTML = `
-        <h1 style="margin-bottom:2px;">${box.name}</h1>
-        <div style="color:#555; margin-bottom:20px;">${dept ? dept.name : ''} &mdash; printed ${new Date().toLocaleDateString()}</div>
-        ${drawerSections || '<p>This toolbox has no drawers yet.</p>'}
-    `;
+        const body = tools.length
+            ? `<div style="flex:1 1 auto; min-height:0; display:flex; gap:12px;">${photoArea}${sidebar}</div>`
+            : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
+
+        return `<div style="page: toolbox-sheet; break-before: page; width:100%; height:100%; box-sizing:border-box; display:flex; flex-direction:column;">${title}${body}</div>`;
+    }).join('');
+
+    document.getElementById('toolbox-print-sheet-content').innerHTML = drawerPages || `<p>This toolbox has no drawers yet.</p>`;
 
     const area = document.getElementById('toolbox-print-sheet-area');
     area.style.display = 'block';
@@ -1192,7 +1196,7 @@ async function deleteInfraItem(type, id) {
     if (!confirm(`Are you sure you want to delete this structure? It will only succeed if it is empty.`)) return;
     try {
         const res = await fetch(`/api/${type}/${id}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
-        if (res.ok) { renderEditableInfraTree(); syncStorageHierarchyDropdowns(); } 
+        if (res.ok) { closeEntityModal(); renderEditableInfraTree(); syncStorageHierarchyDropdowns(); }
         else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to delete.')); }
     } catch (err) { alert('❌ Network error.'); }
 }

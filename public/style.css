@@ -242,4 +242,13 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
     .no-print { display: none !important; }
     table { border: 1px solid #ccc; }
     th, td { border-bottom: 1px solid #ccc; padding: 8px; }
+
+    /* Toolbox print sheet pages (openToolboxPrintSheet() in admin.js) print at tabloid/ledger
+       size, landscape -- large enough for a drawer photo to fill nearly the whole page with a
+       tool's scan code + name overlaid directly on it. Scoped to just these pages via the named
+       -page `page: toolbox-sheet;` property (set inline per page in admin.js) rather than
+       applying to this whole @media print block, so printUserLoginCard() -- which reuses the
+       same #toolbox-print-sheet-area container for an unrelated small card -- keeps printing at
+       whatever the browser's normal default page size is. */
+    @page toolbox-sheet { size: 17in 11in; margin: 0.25in; }
 }
