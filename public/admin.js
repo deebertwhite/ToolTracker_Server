@@ -440,18 +440,20 @@ async function waitForImages(container) {
  * its drawer slot.
  *
  * The drawer's photo fills essentially the whole page, and every tool already pinpointed on it
- * (the shadow-board map, see renderPositionMap()) gets its own small card -- scan code, name,
- * ID -- floated directly over its exact spot in the photo, white-on-transparent so it stays
- * legible against whatever's behind it. A real infographic: glance at the photo, read the tool
- * right off it, scan it right there. The large tabloid page is what makes this practical where
- * it wasn't on a normal letter page -- the previous version of this sheet used numbered pins
- * pointing to a separate legend instead, specifically because a code small enough to sit inline
- * without overlapping its neighbors on a letter-sized photo would've been under a reliable scan
- * size. At 11x17 a 46px/~12mm code (still within this app's own validated 10-20mm scannable
- * range, see BARCODE_LABEL_MM in server.js) has real room to breathe for a typical drawer's
- * tool count and spacing -- an unusually dense drawer can still end up with overlapping cards,
- * since no page size removes an actual physical crowding problem, but that's now a real
- * exception rather than the normal case.
+ * (the shadow-board map, see renderPositionMap()) gets its own scan code floated directly over
+ * its exact spot in the photo -- the code's own opaque white background (see
+ * generatePngAtSize()'s backgroundColor, server.js) is legible on its own against whatever's
+ * behind it, no extra card needed. A real infographic: glance at the photo, scan the tool right
+ * there. Deliberately code-only, not code-plus-name-plus-ID -- an earlier version floated the
+ * full card and a real print showed it overlapping badly on drawers with several tools
+ * positioned close together, which no page size fully fixes (it's an actual physical-crowding
+ * problem, not a layout one); dropping the text down to just the ~13mm code (still within this
+ * app's own validated 10-20mm scannable range) shrinks each overlay to a much smaller footprint
+ * and keeps the one thing that actually matters here -- scanning it -- fully intact. The large
+ * tabloid page is still what makes floating anything directly on the photo practical at all
+ * (the previous letter-sized version used numbered pins pointing to a separate legend instead,
+ * since even a bare code shrunk to fit inline on that smaller photo would've been under a
+ * reliable scan size).
  *
  * Tools not yet pinpointed can't be floated on the photo at all (there's no position to use) --
  * they list instead in a narrow sidebar alongside it, so the sheet is always complete even
@@ -490,10 +492,11 @@ async function openToolboxPrintSheet(boxId) {
     // #toolbox-sheet-page-size below -- keep both in sync if either ever changes.
     const PAGE_SIZE = 'width:16.5in; height:10.5in;';
 
-    // Compact scan-code-plus-text card, reused for both the floated on-photo overlay and the
-    // not-yet-pinpointed sidebar at two different sizes -- 46px for the overlay (sized for the
-    // photo's own available room), 36px for the sidebar (a narrow fixed-width column, so every
-    // card there needs to be noticeably smaller to leave room for the name/ID text beside it).
+    // Compact scan-code-plus-text card, used for the not-yet-pinpointed sidebar and the no-photo
+    // grid fallback -- NOT the on-photo overlay, which is code-only (see `overlays` below) to
+    // avoid the text pushing neighboring tools' labels into each other on a busy photo. Neither
+    // of these two layouts has that overlap risk (a sidebar list and an auto-wrapping grid both
+    // just add rows as needed), so there's no reason to drop the name/ID text here too.
     const toolCard = (t, codeSizePx) => `
         <div style="display:flex; align-items:center; gap:4px; white-space:nowrap;">
             <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:${codeSizePx}px; height:${codeSizePx}px; object-fit:contain; flex-shrink:0;">
@@ -530,12 +533,18 @@ async function openToolboxPrintSheet(boxId) {
             .sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
         const unpositioned = tools.filter(t => t.position_x === null || t.position_y === null).sort(byName);
 
+        // Code only, no name/ID text -- an early real print showed text-plus-code cards
+        // overlapping on drawers with several tools positioned close together (expected for a
+        // physically tight drawer; not something any page size fully solves). Dropping the text
+        // shrinks each overlay down to just the code's own square footprint, which is already a
+        // solid white square with black modules (generatePngAtSize()'s backgroundColor:'FFFFFF',
+        // see server.js) -- legible on its own against the photo with no extra card/border
+        // needed. Scanning it is still the core purpose; the name/ID stays visible for the
+        // not-yet-pinpointed sidebar below, where list layout has no overlap risk at all.
         const overlays = positioned.map(t => `
-            <div style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
-                        background:rgba(255,255,255,0.95); border:1.5px solid #000; border-radius:5px; padding:3px 6px;
-                        box-shadow:0 1px 4px rgba(0,0,0,0.6);">
-                ${toolCard(t, 46)}
-            </div>`).join('');
+            <img src="/api/tools/${t.tool_id}/scan-code.png" style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%;
+                        transform:translate(-50%,-50%); width:50px; height:50px; object-fit:contain; box-shadow:0 1px 4px rgba(0,0,0,0.6);">
+        `).join('');
 
         const sidebar = unpositioned.length ? `
             <div style="flex:0 0 2.5in; min-width:0; overflow-y:auto; border-left:1px solid #ccc; padding-left:10px;">
