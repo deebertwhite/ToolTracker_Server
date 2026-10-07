@@ -308,7 +308,15 @@ function setupActionScreen() {
     } else {
         document.getElementById('panel-scanner').style.display = 'block';
         document.getElementById('action-title').innerHTML = pendingMode === 'OUT' ? `${icon('upload')} Scan Tools for Checkout` : `${icon('download')} Scan Tools for Check-in`;
-        document.getElementById('btn-submit-action').textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
+        // Also re-enable the button, not just reset its label -- submitTransaction() disables it
+        // the moment a submit attempt starts (to block double-clicks) and only re-enables it on
+        // a REJECTED attempt; a successful one never gets the chance to (resetToIdle() runs
+        // straight after). Without this, the very next workflow here would start with a
+        // permanently disabled submit button and no way to recover short of a page refresh --
+        // caught live while testing the audit-gate loop fix below, which had copied the same gap.
+        const submitBtn = document.getElementById('btn-submit-action');
+        submitBtn.textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
+        submitBtn.disabled = false;
         document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'block' : 'none';
         document.getElementById('kiosk-work-order').value = '';
         focusScanInput('kiosk-scan-input');
