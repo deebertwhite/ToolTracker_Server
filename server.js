@@ -402,80 +402,87 @@ async function resetFailedPinAttempts(badgeId) {
 
 const LOCKOUT_RESPONSE = { error: 'Account temporarily locked due to repeated failed attempts. Try again later.', code: 'LOCKED' };
 
-// Two mandatory audit windows per day: "morning" begins at 04:00 and runs until the
-// afternoon window begins at 14:00; "afternoon" begins at 14:00 and runs overnight until
-// the next morning window begins at 04:00 -- it spans midnight, which is why this is
-// plain JS date math rather than a SQL check against ::date. A naive calendar-day match
-// would incorrectly split the overnight portion of the afternoon window into "yesterday"
-// and "today", making it impossible to satisfy across the midnight boundary.
-const AUDIT_MORNING_START_HOUR = 4;
-const AUDIT_AFTERNOON_START_HOUR = 14;
+// Mandatory audit windows, now per-department-configurable (migrations/017_audit_schedules.sql)
+// rather than one hardcoded global schedule -- a department can set however many windows per
+// day it wants, starting whenever it wants. A department with no rows in audit_schedules falls
+// back to this default (the original hardcoded Morning/Afternoon split), so an uncustomized
+// department behaves byte-identical to before this feature existed, and deleting a department's
+// last custom window gracefully reverts it to this default rather than needing to be blocked.
+const DEFAULT_AUDIT_SCHEDULE = [
+    { label: 'Morning', start_minute: 4 * 60 },
+    { label: 'Afternoon', start_minute: 14 * 60 },
+];
+const MIN_AUDIT_WINDOW_SPACING_MINUTES = 30; // minimum gap enforced between any two windows (incl. the wrap gap), so no window is too short to realistically satisfy
+const MAX_AUDIT_WINDOWS_PER_DEPT = 12;
+
+/** Returns a department's configured audit windows (schedule_id/label/start_minute, sorted ascending), or DEFAULT_AUDIT_SCHEDULE if it has none. */
+async function getDeptAuditSchedule(client, deptId) {
+    const result = await client.query(
+        'SELECT schedule_id, label, start_minute FROM audit_schedules WHERE dept_id = $1 ORDER BY start_minute ASC',
+        [deptId]
+    );
+    return result.rows.length > 0 ? result.rows : DEFAULT_AUDIT_SCHEDULE;
+}
 
 /**
- * Returns the Date marking when the mandatory-audit window containing `asOf` began.
+ * Resolves which window in `schedule` (sorted ascending by start_minute, at least one entry)
+ * contains `asOf`, generalizing the old fixed morning/afternoon split to any number of same-day
+ * windows. Each window runs from its own start_minute until the next window's start_minute,
+ * wrapping past midnight for the last window of the day (or a full 24h if there's only one
+ * window) -- the same "spans midnight" shape the original two-window logic had, just generalized
+ * to N windows instead of exactly 2. Plain local-wall-clock Date math (not SQL date math) for the
+ * same reason as before: shifts reset at shop-local times, not UTC, and inherits the same known
+ * (pre-existing, not a regression) DST-transition edge case the original code already had.
+ * @param {Array<{label: string, start_minute: number}>} schedule - need not be pre-sorted; sorted defensively here (cheap at the capped size of a real schedule) so a caller can't silently mis-resolve by passing it out of order
  * @param {Date} [asOf] - defaults to right now
+ * @returns {{start: Date, end: Date, label: string, index: number}}
  */
-function getAuditWindowStart(asOf = new Date()) {
-    const hour = asOf.getHours();
-    const windowStart = new Date(asOf);
-    windowStart.setMinutes(0, 0, 0);
-    if (hour >= AUDIT_MORNING_START_HOUR && hour < AUDIT_AFTERNOON_START_HOUR) {
-        windowStart.setHours(AUDIT_MORNING_START_HOUR);
-    } else if (hour >= AUDIT_AFTERNOON_START_HOUR) {
-        windowStart.setHours(AUDIT_AFTERNOON_START_HOUR);
-    } else {
-        // hour < AUDIT_MORNING_START_HOUR -- still inside the afternoon window that began yesterday
-        windowStart.setDate(windowStart.getDate() - 1);
-        windowStart.setHours(AUDIT_AFTERNOON_START_HOUR);
+function resolveAuditWindow(schedule, asOf = new Date()) {
+    schedule = [...schedule].sort((a, b) => a.start_minute - b.start_minute);
+    const minuteOfDay = asOf.getHours() * 60 + asOf.getMinutes();
+    let index = -1;
+    for (let i = 0; i < schedule.length; i++) {
+        if (schedule[i].start_minute <= minuteOfDay) index = i;
     }
-    return windowStart;
+    const isYesterday = index === -1; // asOf is before the day's first window -- still inside the last window, which began yesterday
+    if (isYesterday) index = schedule.length - 1;
+
+    const entry = schedule[index];
+    const start = new Date(asOf);
+    start.setHours(Math.floor(entry.start_minute / 60), entry.start_minute % 60, 0, 0);
+    if (isYesterday) start.setDate(start.getDate() - 1);
+
+    const nextEntry = schedule[(index + 1) % schedule.length];
+    const end = new Date(start);
+    end.setHours(Math.floor(nextEntry.start_minute / 60), nextEntry.start_minute % 60, 0, 0);
+    if (nextEntry.start_minute <= entry.start_minute) end.setDate(end.getDate() + 1); // next window wraps to the following day (or, for a single-window schedule, wraps a full 24h)
+
+    return { start, end, label: entry.label, index };
 }
 
-/**
- * Returns the Date the given audit window (as returned by getAuditWindowStart) ends --
- * i.e. when the next window begins. Used to show "time remaining in this window" on the
- * dashboard/kiosk audit-status widgets; kept as one shared helper rather than duplicating
- * this date math in both client files.
- * @param {Date} windowStart - a value returned by getAuditWindowStart()
- */
-function getAuditWindowEnd(windowStart) {
-    const windowEnd = new Date(windowStart);
-    if (windowStart.getHours() === AUDIT_MORNING_START_HOUR) {
-        windowEnd.setHours(AUDIT_AFTERNOON_START_HOUR);
-    } else {
-        windowEnd.setDate(windowEnd.getDate() + 1);
-        windowEnd.setHours(AUDIT_MORNING_START_HOUR);
-    }
-    return windowEnd;
-}
-
-/**
- * Returns the Date marking when the shift window immediately BEFORE windowStart began --
- * the mirror image of getAuditWindowEnd(), stepping backward instead of forward. Used by the
- * dashboard's audit-compliance trend chart to walk back through the last N shift windows.
- * @param {Date} windowStart - a value returned by getAuditWindowStart()
- */
-function getPreviousAuditWindowStart(windowStart) {
-    const prev = new Date(windowStart);
-    if (windowStart.getHours() === AUDIT_MORNING_START_HOUR) {
-        prev.setDate(prev.getDate() - 1);
-        prev.setHours(AUDIT_AFTERNOON_START_HOUR);
-    } else {
-        prev.setHours(AUDIT_MORNING_START_HOUR);
-    }
-    return prev;
+/** Returns the window immediately BEFORE windowStart -- the mirror image of resolveAuditWindow's `end`, stepping backward instead of forward. Used by the dashboard's audit-compliance trend chart to walk back through the last N shift windows. */
+function getPreviousAuditWindow(schedule, windowStart) {
+    return resolveAuditWindow(schedule, new Date(windowStart.getTime() - 1));
 }
 
 /**
  * AUDIT GATE: returns the list of toolboxes in the given department that still
- * need an AUDIT since windowStart. A toolbox only counts if it currently has at
- * least one non-retired, non-transferred tool in it. Empty array => department passes.
+ * need an AUDIT since windowStart (and, if given, before windowEnd). A toolbox only counts if
+ * it currently has at least one non-retired, non-transferred tool in it. Empty array =>
+ * department passes.
  * @param {import('pg').PoolClient|import('pg').Pool} client - DB client/pool to query with
  * @param {number} deptId - department to check
- * @param {Date} [windowStart] - defaults to the start of the CURRENT mandatory-audit window (see getAuditWindowStart)
+ * @param {Date} [windowStart] - defaults to the start of deptId's CURRENT mandatory-audit window (its own configured schedule, see getDeptAuditSchedule/resolveAuditWindow)
+ * @param {Date} [windowEnd] - optional upper bound, only meaningful when checking a window that
+ *   isn't the current one (see describeAuditWindowStatus). Without it, an audit logged any time
+ *   after windowStart -- including one from a LATER window -- would satisfy an EARLIER window's
+ *   check; harmless for the live gate (which only ever checks the current window, so "now" is
+ *   already an implicit upper bound) but a real bug for a historical/past-window check, caught
+ *   in review: with N configurable windows/day, one late audit could retroactively mark every
+ *   earlier window of the day "Completed" in the daily log, hiding real compliance gaps.
  * @returns {Promise<Array<{box_id: number, name: string}>>} pending toolboxes (empty = audited since windowStart)
  * @note windowStart/windowEnd are computed with LOCAL-time Date methods (correct -- shifts
- *   reset at 4am/2pm shop time, not UTC), but audit_logs.timestamp is `timestamp without
+ *   reset at shop-local times, not UTC), but audit_logs.timestamp is `timestamp without
  *   time zone` written in UTC (DB session timezone is UTC). node-postgres serializes a bound
  *   Date parameter as local-time digits + offset (e.g. "04:00:00-07:00"); Postgres's literal
  *   parser for `timestamp without time zone` silently DISCARDS that offset and takes the
@@ -485,7 +492,13 @@ function getPreviousAuditWindowStart(windowStart) {
  *   timezone -- the correct absolute-instant comparison). Every query comparing one of these
  *   Date objects against audit_logs.timestamp must cast the parameter this way.
  */
-const getAuditGatePendingToolboxes = async (client, deptId, windowStart = getAuditWindowStart()) => {
+const getAuditGatePendingToolboxes = async (client, deptId, windowStart = null, windowEnd = null) => {
+    if (!windowStart) {
+        const schedule = await getDeptAuditSchedule(client, deptId);
+        const window = resolveAuditWindow(schedule);
+        windowStart = window.start;
+        windowEnd = window.end;
+    }
     const query = `
         WITH auditable_boxes AS (
           SELECT b.box_id, b.name FROM toolboxes b WHERE b.dept_id = $1
@@ -494,11 +507,12 @@ const getAuditGatePendingToolboxes = async (client, deptId, windowStart = getAud
         ), audited_in_window AS (
           SELECT DISTINCT b.box_id FROM audit_logs a
             JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
-            WHERE a.action='AUDIT' AND a.timestamp >= $2::timestamptz AND b.dept_id = $1
+            WHERE a.action='AUDIT' AND a.timestamp >= $2::timestamptz
+              AND ($3::timestamptz IS NULL OR a.timestamp < $3::timestamptz) AND b.dept_id = $1
         )
         SELECT ab.box_id, ab.name FROM auditable_boxes ab LEFT JOIN audited_in_window at ON ab.box_id = at.box_id WHERE at.box_id IS NULL;
     `;
-    const result = await client.query(query, [deptId, windowStart]);
+    const result = await client.query(query, [deptId, windowStart, windowEnd]);
     return result.rows;
 };
 
@@ -509,27 +523,31 @@ const getAuditGatePendingToolboxes = async (client, deptId, windowStart = getAud
  * shape from this single query pair instead of each re-running it independently.
  * @returns {Promise<{pending: Array<{box_id: number, name: string}>, completion: {timestamp: Date, full_name: string, badge_id: string}|null}>}
  */
-async function getAuditWindowCompletionInfo(deptId, windowStart) {
-    const pending = await getAuditGatePendingToolboxes(pool, deptId, windowStart);
+async function getAuditWindowCompletionInfo(deptId, windowStart, windowEnd = null) {
+    const pending = await getAuditGatePendingToolboxes(pool, deptId, windowStart, windowEnd);
     if (pending.length > 0) return { pending, completion: null };
     const completedRes = await pool.query(
         `SELECT a.timestamp, u.full_name, u.badge_id
          FROM audit_logs a JOIN users u ON a.user_id = u.user_id
          JOIN tools t ON a.tool_id = t.tool_id JOIN drawers dr ON t.drawer_id = dr.drawer_id JOIN toolboxes b ON dr.box_id = b.box_id
-         WHERE a.action = 'AUDIT' AND a.timestamp >= $2::timestamptz AND b.dept_id = $1
+         WHERE a.action = 'AUDIT' AND a.timestamp >= $2::timestamptz
+           AND ($3::timestamptz IS NULL OR a.timestamp < $3::timestamptz) AND b.dept_id = $1
          ORDER BY a.timestamp DESC LIMIT 1`,
-        [deptId, windowStart]
+        [deptId, windowStart, windowEnd]
     );
     return { pending, completion: completedRes.rows[0] || null };
 }
 
 /**
  * Describes a department's audit status for one specific window (used by the daily log to
- * report on both the morning and afternoon windows, not just whichever is active "now").
+ * report on every one of a department's configured windows, not just whichever is active
+ * "now"). Pass windowEnd when describing a window that isn't the current one (see
+ * getAuditGatePendingToolboxes's note on why) -- generateDailyLog gets both from
+ * resolveAuditWindow() directly rather than reconstructing them by hand.
  * @returns {Promise<string>} e.g. "Completed at 06:15 by Jane Doe (AVI001)" or "NOT audited"
  */
-async function describeAuditWindowStatus(deptId, windowStart) {
-    const { pending, completion } = await getAuditWindowCompletionInfo(deptId, windowStart);
+async function describeAuditWindowStatus(deptId, windowStart, windowEnd = null) {
+    const { pending, completion } = await getAuditWindowCompletionInfo(deptId, windowStart, windowEnd);
     if (pending.length > 0) return 'NOT audited';
     if (!completion) return 'Completed (no auditable toolboxes)';
     const completedTime = new Date(completion.timestamp).toTimeString().slice(0, 5);
@@ -2660,8 +2678,9 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
                 }
 
                 // C. AUDIT GATE (skip if the tool has no resolvable home department) --
-                // uses getAuditGatePendingToolboxes()'s default windowStart (the current
-                // morning-or-afternoon window, see getAuditWindowStart), not a calendar day.
+                // uses getAuditGatePendingToolboxes()'s default windowStart (the department's
+                // own current audit window, see getDeptAuditSchedule/resolveAuditWindow), not a
+                // calendar day.
                 if (tool.tool_dept_id != null) {
                     if (!(tool.tool_dept_id in auditGateCache)) {
                         auditGateCache[tool.tool_dept_id] = await getAuditGatePendingToolboxes(client, tool.tool_dept_id);
@@ -2787,28 +2806,274 @@ app.post('/api/audits/submit', async (req, res) => {
 
 // Admin-panel-facing: current-audit-window status for every department, reusing the same
 // AUDIT GATE helper the checkout flow relies on (empty pending-toolbox list => audited
-// since the current window began -- see getAuditWindowStart for the morning/afternoon split).
+// since the current window began -- see resolveAuditWindow for how each department's own
+// window is resolved from its configured schedule).
 app.get('/api/audits/today-status', async (req, res) => {
     try {
         const depts = await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC');
-        const windowStart = getAuditWindowStart();
-        const windowEnd = getAuditWindowEnd(windowStart);
 
+        // Each department resolves its OWN current window from its own schedule now (see
+        // getDeptAuditSchedule/resolveAuditWindow) -- no longer one shared window for every
+        // department, since schedules can now differ in count and timing per department.
         const departments = await Promise.all(depts.rows.map(async (dept) => {
-            const { pending, completion } = await getAuditWindowCompletionInfo(dept.dept_id, windowStart);
+            const schedule = await getDeptAuditSchedule(pool, dept.dept_id);
+            const window = resolveAuditWindow(schedule);
+            const { pending, completion } = await getAuditWindowCompletionInfo(dept.dept_id, window.start, window.end);
             return {
                 dept_id: dept.dept_id,
                 name: dept.name,
                 audit_completed: pending.length === 0,
                 completed_at: completion ? completion.timestamp : null,
-                window_start: windowStart,
+                window_start: window.start,
+                window_end: window.end,
+                window_label: window.label,
             };
         }));
 
-        res.json({ success: true, departments, window_start: windowStart, window_end: windowEnd });
+        res.json({ success: true, departments });
     } catch (err) {
         console.error("Audit Today-Status Error:", err);
         res.status(500).json({ error: 'Failed to fetch audit status.' });
+    }
+});
+
+/**
+ * Validates a proposed audit-schedule window against a department's OTHER existing windows
+ * (pass every window except the one being edited, if any) -- non-empty/reasonably-short label,
+ * start_minute in range, and at least MIN_AUDIT_WINDOW_SPACING_MINUTES from every other window
+ * (checked including the wrap-around gap back to the earliest window), so no window ends up too
+ * short to realistically satisfy. Throws an Error with a user-facing message on failure; returns
+ * the trimmed label on success. The DB's UNIQUE(dept_id, start_minute) is a final backstop
+ * against an exact-duplicate start time slipping through a race between two concurrent edits.
+ */
+function validateAuditWindowInput(label, start_minute, otherWindows) {
+    const trimmedLabel = (label || '').trim();
+    if (!trimmedLabel) throw new Error('A label is required for each audit window.');
+    if (trimmedLabel.length > 40) throw new Error('Audit window labels must be 40 characters or fewer.');
+    if (!Number.isInteger(start_minute) || start_minute < 0 || start_minute >= 1440) {
+        throw new Error('Audit window start time is invalid.');
+    }
+    const sorted = [...otherWindows.map(w => w.start_minute), start_minute].sort((a, b) => a - b);
+    if (sorted.length > 1) {
+        for (let i = 0; i < sorted.length; i++) {
+            const next = sorted[(i + 1) % sorted.length];
+            const gap = next > sorted[i] ? next - sorted[i] : (1440 - sorted[i] + next);
+            if (gap < MIN_AUDIT_WINDOW_SPACING_MINUTES) {
+                throw new Error(`Audit windows must be at least ${MIN_AUDIT_WINDOW_SPACING_MINUTES} minutes apart.`);
+            }
+        }
+    }
+    return trimmedLabel;
+}
+
+/**
+ * True if the user may act on deptId: super_admin (any department) or anyone whose
+ * accessibleDeptIds includes it. Generalized from an audit-schedule-only check (named
+ * canManageAuditSchedule originally) after review noted the same `role === 'super_admin' ||
+ * accessibleDeptIds.includes(deptId)` test was already inlined at a couple of other
+ * department-scoped call sites in this file -- this is now the one shared version.
+ */
+function canAccessDept(authUser, deptId) {
+    return authUser.role === 'super_admin' || authUser.accessibleDeptIds.includes(deptId);
+}
+
+/**
+ * Inserts DEFAULT_AUDIT_SCHEDULE as real rows for deptId -- used both by the explicit
+ * "Customize This Schedule" endpoint and as a safety net inside the regular add-window
+ * endpoint (see its own comment for why materializing matters). Takes a client already
+ * inside the caller's transaction, not the pool, so this participates in the same
+ * BEGIN/COMMIT the caller wraps it in.
+ */
+async function materializeDefaultSchedule(client, deptId) {
+    for (const w of DEFAULT_AUDIT_SCHEDULE) {
+        await client.query('INSERT INTO audit_schedules (dept_id, label, start_minute) VALUES ($1, $2, $3)', [deptId, w.label, w.start_minute]);
+    }
+}
+
+// ==========================================
+// 7.3.1 AUDIT SCHEDULES (migrations/017_audit_schedules.sql) -- lets a dept_admin+ configure
+// how many mandatory audit windows their department has per day and when each one starts,
+// rather than every department sharing one hardcoded global schedule. See
+// DEFAULT_AUDIT_SCHEDULE/getDeptAuditSchedule/resolveAuditWindow above for the resolution logic
+// this configures.
+//
+// Every write endpoint below runs inside a transaction that opens with
+// `pg_advisory_xact_lock(deptId)` -- a transaction-scoped lock, held only for this request and
+// released automatically on COMMIT/ROLLBACK, keyed per department. Two reasons: (1) it makes the
+// write and its AUDIT_SCHEDULE_CHANGED log entry atomic (previously two independent pool.query
+// calls -- a failure after the write but before the log would silently break this feature's own
+// "every change is logged" guarantee), and (2) it serializes two concurrent writes to the SAME
+// department's schedule, closing a race review caught: two concurrent adds each validating the
+// MIN_AUDIT_WINDOW_SPACING_MINUTES gap against a snapshot read before the other's write could
+// both pass validation and leave two windows closer together than the rule allows. The lock is
+// per-department (not global), so concurrent edits to two different departments never block
+// each other.
+// ==========================================
+
+// One call powers the whole admin-panel Audit Schedule section: every department this user can
+// manage, each with its current window list and whether it's still on the default (zero custom
+// rows) or has been actively customized. Reuses getDeptAuditSchedule() (the one correct
+// rows-or-default abstraction) instead of re-deriving "is this department on default" by hand.
+app.get('/api/audit-schedules', requireRole(3), async (req, res) => {
+    try {
+        const deptsRes = req.authUser.role === 'super_admin'
+            ? await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC')
+            : await pool.query('SELECT dept_id, name FROM departments WHERE dept_id = ANY($1::int[]) ORDER BY name ASC', [req.authUser.accessibleDeptIds]);
+
+        const departments = await Promise.all(deptsRes.rows.map(async (dept) => {
+            const schedule = await getDeptAuditSchedule(pool, dept.dept_id);
+            const isDefault = schedule === DEFAULT_AUDIT_SCHEDULE;
+            return {
+                dept_id: dept.dept_id,
+                name: dept.name,
+                is_default: isDefault,
+                windows: isDefault ? schedule.map(w => ({ ...w, schedule_id: null })) : schedule,
+            };
+        }));
+        res.json({ success: true, departments });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch audit schedules.' });
+    }
+});
+
+// Converts a department still running the implicit default schedule into real, editable rows
+// -- with NO functional change (same windows, same times) -- so the admin UI can offer an
+// explicit "Customize This Schedule" action before any row becomes editable/addable/deletable.
+// Idempotent: a no-op success if the department already has custom rows, so the UI never has to
+// special-case "already customized" as an error.
+app.post('/api/departments/:dept_id/audit-schedule/customize', requireFetchHeader, requireRole(3), async (req, res) => {
+    const deptId = parseInt(req.params.dept_id, 10);
+    if (!canAccessDept(req.authUser, deptId)) return res.status(403).json({ error: 'You do not have access to that department.' });
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [deptId]);
+
+        const existing = await client.query('SELECT schedule_id FROM audit_schedules WHERE dept_id = $1', [deptId]);
+        if (existing.rows.length === 0) {
+            await materializeDefaultSchedule(client, deptId);
+            await client.query(
+                "INSERT INTO audit_logs (user_id, action, notes) VALUES ($1, 'AUDIT_SCHEDULE_CHANGED', $2)",
+                [req.authUser.user_id, `Customized audit schedule from default (dept ${deptId})`]
+            );
+        }
+        const rowsRes = await client.query('SELECT schedule_id, label, start_minute FROM audit_schedules WHERE dept_id = $1 ORDER BY start_minute ASC', [deptId]);
+        await client.query('COMMIT');
+        res.json({ success: true, windows: rowsRes.rows });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: 'Failed to customize audit schedule.' });
+    } finally {
+        client.release();
+    }
+});
+
+// Adds one audit window to a department's schedule. requireFetchHeader/requireRole(3) match the
+// other department-scoped admin-write endpoints in this file. Defensive safety net: if this
+// department is STILL on the implicit default (the admin UI should have already called
+// .../customize first, but this guards against any other caller), the other default window(s)
+// are materialized into real rows alongside the new one -- otherwise adding just one custom
+// window would silently drop the rest, since getDeptAuditSchedule() stops falling back to the
+// default the moment ANY custom row exists.
+app.post('/api/departments/:dept_id/audit-schedule', requireFetchHeader, requireRole(3), async (req, res) => {
+    const deptId = parseInt(req.params.dept_id, 10);
+    if (!canAccessDept(req.authUser, deptId)) return res.status(403).json({ error: 'You do not have access to that department.' });
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [deptId]);
+
+        const effectiveExisting = await getDeptAuditSchedule(client, deptId);
+        const wasOnDefault = effectiveExisting === DEFAULT_AUDIT_SCHEDULE;
+
+        if (effectiveExisting.length >= MAX_AUDIT_WINDOWS_PER_DEPT) {
+            throw Object.assign(new Error(`A department can have at most ${MAX_AUDIT_WINDOWS_PER_DEPT} audit windows.`), { statusCode: 400 });
+        }
+        const startMinute = parseInt(req.body.start_minute, 10);
+        const label = validateAuditWindowInput(req.body.label, startMinute, effectiveExisting);
+
+        if (wasOnDefault) await materializeDefaultSchedule(client, deptId);
+
+        const result = await client.query(
+            'INSERT INTO audit_schedules (dept_id, label, start_minute) VALUES ($1, $2, $3) RETURNING schedule_id, label, start_minute',
+            [deptId, label, startMinute]
+        );
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, notes) VALUES ($1, 'AUDIT_SCHEDULE_CHANGED', $2)",
+            [req.authUser.user_id, `Added audit window "${label}" (dept ${deptId})`]
+        );
+        await client.query('COMMIT');
+        res.json({ success: true, window: result.rows[0] });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        if (err.code === '23505') return res.status(400).json({ error: 'A window at that start time already exists for this department.' });
+        res.status(err.statusCode || 400).json({ error: err.message || 'Failed to add audit window.' });
+    } finally {
+        client.release();
+    }
+});
+
+// Edits an existing audit window's label/start time.
+app.put('/api/audit-schedule/:schedule_id', requireFetchHeader, requireRole(3), async (req, res) => {
+    const scheduleId = parseInt(req.params.schedule_id, 10);
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const current = await client.query('SELECT dept_id FROM audit_schedules WHERE schedule_id = $1', [scheduleId]);
+        if (current.rows.length === 0) throw Object.assign(new Error('Audit window not found.'), { statusCode: 404 });
+        const deptId = current.rows[0].dept_id;
+        if (!canAccessDept(req.authUser, deptId)) throw Object.assign(new Error('You do not have access to that department.'), { statusCode: 403 });
+        await client.query('SELECT pg_advisory_xact_lock($1)', [deptId]);
+
+        const others = await client.query('SELECT start_minute FROM audit_schedules WHERE dept_id = $1 AND schedule_id != $2', [deptId, scheduleId]);
+        const startMinute = parseInt(req.body.start_minute, 10);
+        const label = validateAuditWindowInput(req.body.label, startMinute, others.rows);
+
+        const result = await client.query(
+            'UPDATE audit_schedules SET label = $1, start_minute = $2 WHERE schedule_id = $3 RETURNING schedule_id, label, start_minute',
+            [label, startMinute, scheduleId]
+        );
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, notes) VALUES ($1, 'AUDIT_SCHEDULE_CHANGED', $2)",
+            [req.authUser.user_id, `Edited audit window "${label}" (dept ${deptId})`]
+        );
+        await client.query('COMMIT');
+        res.json({ success: true, window: result.rows[0] });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        if (err.code === '23505') return res.status(400).json({ error: 'A window at that start time already exists for this department.' });
+        res.status(err.statusCode || 400).json({ error: err.message || 'Failed to edit audit window.' });
+    } finally {
+        client.release();
+    }
+});
+
+// Removes an audit window. No "last window" guard -- a department with zero rows just falls
+// back to DEFAULT_AUDIT_SCHEDULE (see getDeptAuditSchedule), which is a graceful, intentional
+// behavior rather than something to block; the admin UI confirms this with the user first.
+app.delete('/api/audit-schedule/:schedule_id', requireFetchHeader, requireRole(3), async (req, res) => {
+    const scheduleId = parseInt(req.params.schedule_id, 10);
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const current = await client.query('SELECT dept_id, label FROM audit_schedules WHERE schedule_id = $1', [scheduleId]);
+        if (current.rows.length === 0) throw Object.assign(new Error('Audit window not found.'), { statusCode: 404 });
+        const { dept_id: deptId, label } = current.rows[0];
+        if (!canAccessDept(req.authUser, deptId)) throw Object.assign(new Error('You do not have access to that department.'), { statusCode: 403 });
+        await client.query('SELECT pg_advisory_xact_lock($1)', [deptId]);
+
+        await client.query('DELETE FROM audit_schedules WHERE schedule_id = $1', [scheduleId]);
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, notes) VALUES ($1, 'AUDIT_SCHEDULE_CHANGED', $2)",
+            [req.authUser.user_id, `Removed audit window "${label}" (dept ${deptId})`]
+        );
+        await client.query('COMMIT');
+        res.json({ success: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(err.statusCode || 500).json({ error: err.message || 'Failed to remove audit window.' });
+    } finally {
+        client.release();
     }
 });
 
@@ -3834,6 +4099,15 @@ app.get('/api/dashboard/activity-trend', async (req, res) => {
 // mistaken for satisfying an EARLIER one. "Auditable" is evaluated against tools' CURRENT
 // status, same simplification the live gate already makes -- this app doesn't track
 // historical tool status, so a window from a week ago is judged by today's inventory shape.
+//
+// Deliberately pinned to DEFAULT_AUDIT_SCHEDULE rather than each department's own configured
+// schedule (see migrations/017_audit_schedules.sql / getDeptAuditSchedule elsewhere in this
+// file) -- this chart plots ONE shared org-wide timeline of "the last N shift windows" across
+// every department at once, which only makes sense if every department shares the same window
+// boundaries. A department running a custom schedule will have ITS compliance numbers here
+// computed against the default 04:00/14:00 boundary, not its real one -- a known, accepted
+// limitation (the live checkout gate and the admin "today's status" view ARE fully per-schedule
+// correct; only this historical trend chart isn't), not something this change attempts to fix.
 app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
     const windowCount = Math.min(60, Math.max(1, parseInt(req.query.windows, 10) || 14));
     try {
@@ -3841,10 +4115,10 @@ app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
         const depts = deptsRes.rows;
 
         const windows = [];
-        let cursor = getAuditWindowStart();
+        let current = resolveAuditWindow(DEFAULT_AUDIT_SCHEDULE);
         for (let i = 0; i < windowCount; i++) {
-            windows.unshift({ start: new Date(cursor), end: getAuditWindowEnd(cursor) });
-            cursor = getPreviousAuditWindowStart(cursor);
+            windows.unshift(current);
+            current = getPreviousAuditWindow(DEFAULT_AUDIT_SCHEDULE, current.start);
         }
 
         const results = [];
@@ -3871,7 +4145,7 @@ app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
             const audited = perDept.reduce((sum, d) => sum + d.audited, 0);
             results.push({
                 window_start: w.start.toISOString(),
-                is_morning: w.start.getHours() === AUDIT_MORNING_START_HOUR,
+                is_morning: w.label === 'Morning',
                 total, audited,
                 compliance_pct: total === 0 ? null : Math.round((audited / total) * 100),
                 departments: perDept,
@@ -4295,20 +4569,30 @@ async function generateDailyLog() {
                 [deptId]
             );
 
-            // AUDIT STATUS -- report BOTH mandatory windows for the day being logged (morning
-            // 04:00-14:00, afternoon 14:00-04:00 overnight), not just whichever is active right
-            // now. Built from `now`'s own local date components (not the UTC-derived dateString
-            // string above) so this lines up exactly with getAuditWindowStart()'s local-time math.
-            // Note: since this job runs at midnight, the afternoon window (which continues until
-            // 04:00 the next day) is only partially elapsed at that point -- its status here is
-            // an honest snapshot of "as of midnight", not a final verdict on the whole window.
-            const morningWindowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), AUDIT_MORNING_START_HOUR, 0, 0, 0);
-            const afternoonWindowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), AUDIT_AFTERNOON_START_HOUR, 0, 0, 0);
-            const [morningStatus, afternoonStatus] = await Promise.all([
-                describeAuditWindowStatus(deptId, morningWindowStart),
-                describeAuditWindowStatus(deptId, afternoonWindowStart),
-            ]);
-            const auditStatusLine = `Morning (04:00-14:00): ${morningStatus} | Afternoon (14:00-04:00): ${afternoonStatus}`;
+            // AUDIT STATUS -- report every one of this department's configured mandatory windows
+            // for the day being logged (see getDeptAuditSchedule -- however many it has, not
+            // just a hardcoded morning/afternoon pair), not just whichever is active right now.
+            // Each window is resolved via resolveAuditWindow() itself (built from `now`'s own
+            // local date components, not the UTC-derived dateString string above) rather than
+            // hand-constructing just its start -- this is what supplies the windowEnd upper
+            // bound describeAuditWindowStatus needs. Without it, checking a PAST window with
+            // only ">= windowStart" and no end would let a LATER audit (including one from a
+            // later window today) retroactively satisfy an EARLIER window's check, silently
+            // reporting "Completed" on a window nobody actually audited -- caught in review,
+            // worse now that a department can have many windows/day instead of just 2. Note:
+            // since this job runs at midnight, a window still in progress at that point (e.g.
+            // an overnight one) is only partially elapsed -- its status here is an honest
+            // snapshot of "as of midnight", not a final verdict on the whole window.
+            const todaySchedule = await getDeptAuditSchedule(pool, deptId);
+            const windowStatusLines = await Promise.all(todaySchedule.map(async (entry) => {
+                const asOf = new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(entry.start_minute / 60), entry.start_minute % 60, 0, 0);
+                const window = resolveAuditWindow(todaySchedule, asOf);
+                const status = await describeAuditWindowStatus(deptId, window.start, window.end);
+                const hh = String(Math.floor(entry.start_minute / 60)).padStart(2, '0');
+                const mm = String(entry.start_minute % 60).padStart(2, '0');
+                return `${entry.label} (${hh}:${mm}): ${status}`;
+            }));
+            const auditStatusLine = windowStatusLines.join(' | ');
 
             // Build the log block
             let block = `\n[DAILY SNAPSHOT] ${dateString} -- DEPT=${prefix}\n`;

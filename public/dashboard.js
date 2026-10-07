@@ -34,18 +34,24 @@ async function bootDashboard() {
 // ==========================================
 // 2.5 SHIFT AUDIT STATUS WIDGET
 // ==========================================
-// Window end, cached from the last fetch so the on-screen countdown can tick every 30s
-// without re-fetching the department list each time -- only a fresh fetch (every 5 min, or
-// immediately once the cached window has actually elapsed) can learn about a newly
-// completed audit or a window changeover.
+// Window end (+ which department it belongs to), cached from the last fetch so the on-screen
+// countdown can tick every 30s without re-fetching the department list each time -- only a
+// fresh fetch (every 5 min, or immediately once the cached window has actually elapsed) can
+// learn about a newly completed audit or a window changeover. There's no single shared window
+// anymore -- each department resolves its own from its own configured schedule (see
+// getDeptAuditSchedule in server.js) -- so this tracks whichever department's window ends
+// soonest among those still pending (the most actionable deadline), falling back to the
+// soonest end overall once every department is already audited.
 let auditWidgetWindowEnd = null;
+let auditWidgetTrackedDeptName = null;
 
 /**
  * Fetches GET /api/audits/today-status and renders the dashboard's "Shift Audit Status"
- * card: the current window's end time (#audit-widget-window) and one chip per department
- * (#audit-widget-chips), matching the same visual language as the equivalent admin.js/
- * kiosk.js widgets. Caches window_end into auditWidgetWindowEnd for
- * updateAuditWindowCountdown() to tick between fetches.
+ * card: the soonest upcoming window deadline (#audit-widget-window) and one chip per
+ * department (#audit-widget-chips, each showing its own window via a title tooltip since
+ * schedules can now differ per department), matching the same visual language as the
+ * equivalent admin.js/kiosk.js widgets. Caches the tracked window's end into
+ * auditWidgetWindowEnd for updateAuditWindowCountdown() to tick between fetches.
  */
 async function loadAuditStatusWidget() {
     const chipsEl = document.getElementById('audit-widget-chips');
@@ -57,16 +63,22 @@ async function loadAuditStatusWidget() {
         const data = await res.json();
         if (!data.success) throw new Error('Failed to load audit status.');
 
-        auditWidgetWindowEnd = new Date(data.window_end);
+        const pending = data.departments.filter(d => !d.audit_completed);
+        const tracked = (pending.length > 0 ? pending : data.departments)
+            .reduce((soonest, d) => (!soonest || new Date(d.window_end) < new Date(soonest.window_end)) ? d : soonest, null);
+        auditWidgetWindowEnd = tracked ? new Date(tracked.window_end) : null;
+        auditWidgetTrackedDeptName = tracked && data.departments.length > 1 ? tracked.name : null;
         updateAuditWindowCountdown();
 
         // Same chip convention as loadAuditStatus() in admin.js -- flat background, only the
-        // text color and label change between the completed/pending states.
+        // text color and label change between the completed/pending states. Each chip's own
+        // window/time now shows via a title tooltip, same as admin.js's equivalent widget.
         chipsEl.innerHTML = data.departments.map(d => {
+            const since = d.window_start ? new Date(d.window_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
             if (d.audit_completed) {
-                return `<span style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--muted);">${d.name}</span>`;
+                return `<span title="${d.window_label} window, since ${since}" style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--muted);">${d.name}</span>`;
             }
-            return `<span style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--red);">${d.name} -- Audit Pending</span>`;
+            return `<span title="${d.window_label} window, since ${since}" style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--red);">${d.name} -- Audit Pending</span>`;
         }).join('');
     } catch (e) {
         windowEl.textContent = 'Unavailable';
@@ -91,7 +103,8 @@ function updateAuditWindowCountdown() {
     const hours = Math.floor(msRemaining / 3600000);
     const minutes = Math.floor((msRemaining % 3600000) / 60000);
     const endLabel = auditWidgetWindowEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    windowEl.textContent = `Window ends ${endLabel} (${hours}h ${minutes}m remaining)`;
+    const prefix = auditWidgetTrackedDeptName ? `${auditWidgetTrackedDeptName} window` : 'Window';
+    windowEl.textContent = `${prefix} ends ${endLabel} (${hours}h ${minutes}m remaining)`;
 }
 
 // ==========================================
@@ -694,8 +707,13 @@ function renderComplianceTrendChart(containerId, points) {
  * Fetches GET /api/dashboard/audit-compliance-trend and builds the last-7-days shift-audit
  * compliance chart -- one bar per shift window (14 = 7 days x 2 windows/day), colored by
  * how much of that window's auditable inventory actually got audited. Ties the mandatory
- * shift-audit gate (see getAuditWindowStart in server.js) to a visible trend instead of only
- * ever showing the CURRENT window's pass/fail on the audit-status widget above.
+ * shift-audit gate (see resolveAuditWindow in server.js) to a visible trend instead of only
+ * ever showing the CURRENT window's pass/fail on the audit-status widget above. This trend is
+ * computed against the app's DEFAULT audit schedule (Morning 04:00/Afternoon 14:00) for every
+ * department, not each department's own configured schedule (see the comment above
+ * GET /api/dashboard/audit-compliance-trend in server.js for why) -- a department running a
+ * custom schedule will see its trend numbers here against the wrong boundary, a known/accepted
+ * limitation of this one chart.
  */
 async function loadAuditComplianceTrendChart() {
     try {

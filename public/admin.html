@@ -86,7 +86,7 @@
                 <div class="hub-icon"><span class="icon" data-icon="users"></span></div><div class="hub-title">Personnel</div><div class="hub-desc">View roster and manage accounts.</div>
             </div>
             <!-- Card 3: Inventory (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
-            <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree(); loadAuditStatus();">
+            <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree(); loadAuditStatus(); loadAuditSchedules();">
                 <div class="hub-icon"><span class="icon" data-icon="package"></span></div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
             </div>
             <!-- Card 4: Reports (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
@@ -181,7 +181,7 @@
                     <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
                     <h3 style="margin-bottom: 20px;">Inventory Management</h3>
                     <div class="grid-container">
-                        <div class="hub-card" onclick="openSubPanel('panel-inv-tree'); renderEditableInfraTree(); loadAuditStatus();">
+                        <div class="hub-card" onclick="openSubPanel('panel-inv-tree'); renderEditableInfraTree(); loadAuditStatus(); loadAuditSchedules();">
                             <div class="hub-icon"><span class="icon" data-icon="archive"></span></div><div class="hub-title">Master Directory</div><div class="hub-desc">View and edit the complete global structure.</div>
                         </div>
                         <div class="hub-card" onclick="openSubPanel('panel-inv-build'); syncStorageHierarchyDropdowns();">
@@ -195,17 +195,23 @@
                     <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
                     <div class="card" id="audit-status-card">
                         <h3 style="margin-bottom: 4px;">Current Shift Audit Status</h3>
-                        <div id="audit-status-window" style="font-size:11px; color:var(--muted); margin-bottom: 10px;"></div>
+                        <div style="font-size:11px; color:var(--muted); margin-bottom: 10px;">Each department runs its own schedule -- hover a chip for its current window, or edit schedules below.</div>
                         <div id="audit-status-body" style="display:flex; gap:10px; flex-wrap:wrap;">
                             <div style="color:var(--muted); font-size:12px;">Loading...</div>
                         </div>
+                    </div>
+                    <!-- dept_admin+ only (hidden for weight<3 in bootstrapAdminUI, matching GET /api/audit-schedules' requireRole(3)) -->
+                    <div class="card no-print" id="audit-schedule-card">
+                        <h3 style="margin-bottom: 4px;">Audit Schedule</h3>
+                        <div style="font-size:11px; color:var(--muted); margin-bottom: 12px;">How many mandatory audit windows each department has per day, and when they start. A department with no custom windows uses the default (Morning 04:00 / Afternoon 14:00).</div>
+                        <div id="audit-schedule-list">Loading…</div>
                     </div>
                     <div class="card">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
                             <h3>Master Storage & Asset Tree</h3>
                             <div style="display:flex; gap:8px;">
                                 <button class="btn-icon" id="btn-batch-move-toggle" style="padding: 4px 10px; font-size: 12px;" onclick="toggleBatchMoveMode()"><span class="icon" data-icon="move"></span> Batch Select</button>
-                                <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree(); loadAuditStatus();"><span class="icon" data-icon="refresh-cw"></span> Refresh Data</button>
+                                <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree(); loadAuditStatus(); loadAuditSchedules();"><span class="icon" data-icon="refresh-cw"></span> Refresh Data</button>
                             </div>
                         </div>
                         <!-- Shown only while batch-select mode is on (see toggleBatchMoveMode() in

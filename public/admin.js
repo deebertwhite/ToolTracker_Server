@@ -164,7 +164,7 @@ function toggleTreeVisibility(containerId, headerElement) {
  *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
  *     #card-manage-users, #card-inventory-import (bulk CSV import), #card-trace-investigations,
- *     and #card-tool-groups.
+ *     #card-tool-groups, and #audit-schedule-card.
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Populates the Provision New User form's role dropdown with options capped at the viewer's
  * own weight (inclusive) -- matches POST /api/users, which now allows creating a peer, e.g. a
@@ -195,6 +195,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-inventory-import', 'none');
         safeSetDisplay('card-trace-investigations', 'none');
         safeSetDisplay('card-tool-groups', 'none');
+        safeSetDisplay('audit-schedule-card', 'none');
     }
 
     // Options capped at the viewer's own weight (inclusive) -- matches the server's
@@ -1237,7 +1238,7 @@ async function confirmBatchDelete() {
     }
 }
 
-/** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory audit for the CURRENT shift window (morning 04:00-14:00 or afternoon 14:00-04:00, see getAuditWindowStart in server.js) is already complete, or a red "-- Audit Pending" chip when it is not. Also shows which window is currently active in #audit-status-window. */
+/** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory audit for its own CURRENT shift window is already complete, or a red "-- Audit Pending" chip when it is not. Each department now resolves its OWN window from its OWN configured schedule (see the "Audit Schedule" card / getDeptAuditSchedule in server.js) -- schedules can differ per department, so the window label/time is shown inline per chip rather than as one shared line above them all. */
 async function loadAuditStatus() {
     const container = document.getElementById('audit-status-body');
     if (!container) return;
@@ -1248,20 +1249,158 @@ async function loadAuditStatus() {
             container.innerHTML = `<div style="color:var(--muted); font-size:12px;">No departments found.</div>`;
             return;
         }
-        const windowLabel = document.getElementById('audit-status-window');
-        if (windowLabel && data.departments[0] && data.departments[0].window_start) {
-            const windowStart = new Date(data.departments[0].window_start);
-            const isMorning = windowStart.getHours() === 4;
-            windowLabel.textContent = `Current window: ${isMorning ? 'Morning (04:00-14:00)' : 'Afternoon (14:00-04:00)'}, since ${windowStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-        }
         container.innerHTML = data.departments.map(d => {
+            const since = d.window_start ? new Date(d.window_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
             if (d.audit_completed) {
-                return `<span style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--muted);">${d.name}</span>`;
+                return `<span title="${d.window_label} window, since ${since}" style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--muted);">${d.name}</span>`;
             }
-            return `<span style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--red);">${d.name} -- Audit Pending</span>`;
+            return `<span title="${d.window_label} window, since ${since}" style="font-size:11px; font-weight:bold; padding:4px 10px; border-radius:12px; background: rgba(255,255,255,0.05); color: var(--red);">${d.name} -- Audit Pending (${d.window_label})</span>`;
         }).join('');
     } catch (e) {
         container.innerHTML = `<div style="color:var(--red); font-size:12px;">Failed to load audit status.</div>`;
+    }
+}
+
+/** Converts minutes-since-midnight (as stored in audit_schedules.start_minute) to an "HH:MM" string for an <input type="time">. */
+function auditMinutesToTimeString(minutes) {
+    return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+/** Converts an "HH:MM" <input type="time"> value back to minutes-since-midnight. Returns NaN for an empty/invalid value, left for the server to reject. */
+function auditTimeStringToMinutes(timeStr) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(timeStr || '');
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : NaN;
+}
+
+/**
+ * Fills #audit-schedule-list (dept_admin+ only, see bootstrapAdminUI) from GET /api/audit-schedules
+ * -- one section per department this user can manage. A department still on the implicit
+ * default schedule shows its (read-only) windows plus a "Customize This Schedule" button;
+ * once customized, every window is a real row with its own editable label/time and a delete
+ * button, plus an "+ Add Window" row. Modeled on the Tool Groups admin list (loadToolGroups()
+ * above) -- one delegated click handler routes every row action by data-action.
+ */
+async function loadAuditSchedules() {
+    const container = document.getElementById('audit-schedule-list');
+    if (!container || currentAdminWeight < 3) return;
+    try {
+        const res = await fetch('/api/audit-schedules');
+        const data = await res.json();
+        if (!res.ok || !data.success) { container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`; return; }
+
+        container.innerHTML = data.departments.map(dept => `
+            <div style="border-bottom:1px solid var(--border); padding:10px 0;" data-dept-section="${dept.dept_id}">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <div style="font-weight:bold; font-size:13px;">${dept.name}</div>
+                    ${dept.is_default ? `<span style="font-size:10px; color:var(--muted);">Using default schedule</span>` : ''}
+                </div>
+                <div style="display:flex; flex-direction:column; gap:6px;">
+                    ${dept.windows.map(w => dept.is_default ? `
+                        <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted);">
+                            <span style="flex:1;">${w.label}</span>
+                            <span>${auditMinutesToTimeString(w.start_minute)}</span>
+                        </div>
+                    ` : `
+                        <div style="display:flex; align-items:center; gap:6px;" data-schedule-id="${w.schedule_id}">
+                            <input class="form-input" style="flex:1; min-width:100px;" value="${w.label}" data-field="label">
+                            <input class="form-input" type="time" style="width:110px;" value="${auditMinutesToTimeString(w.start_minute)}" data-field="start_minute">
+                            <button type="button" class="btn-icon" title="Save" data-action="save-window">${icon('save')}</button>
+                            <button type="button" class="btn-icon" title="Remove" data-action="delete-window">${icon('x')}</button>
+                        </div>
+                    `).join('')}
+                    ${dept.is_default
+                        ? `<button type="button" class="btn btn-secondary" style="width:auto; align-self:flex-start; margin-top:4px;" data-action="customize" data-dept-id="${dept.dept_id}">Customize This Schedule</button>`
+                        : `<div style="display:flex; align-items:center; gap:6px; margin-top:4px;" data-add-row data-dept-id="${dept.dept_id}">
+                               <input class="form-input" style="flex:1; min-width:100px;" placeholder="Label (e.g. Night Shift)" data-field="label">
+                               <input class="form-input" type="time" style="width:110px;" data-field="start_minute">
+                               <button type="button" class="btn-icon" title="Add Window" data-action="add-window">${icon('plus')}</button>
+                           </div>`}
+                </div>
+            </div>`).join('');
+
+        if (!container.dataset.delegated) {
+            container.dataset.delegated = 'true';
+            container.addEventListener('click', onAuditScheduleListClick);
+        }
+    } catch (e) {
+        container.innerHTML = `<span style="color:var(--muted);">Could not load.</span>`;
+    }
+}
+
+/** Single delegated click handler for #audit-schedule-list -- routes by data-action on the clicked element. */
+function onAuditScheduleListClick(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    if (el.dataset.action === 'customize') customizeAuditSchedule(el.dataset.deptId);
+    else if (el.dataset.action === 'add-window') {
+        const rowEl = el.closest('[data-add-row]');
+        addAuditWindow(rowEl.dataset.deptId, rowEl);
+    }
+    else if (el.dataset.action === 'save-window') saveAuditWindow(el.closest('[data-schedule-id]'));
+    else if (el.dataset.action === 'delete-window') deleteAuditWindow(el.closest('[data-schedule-id]').dataset.scheduleId, el.closest('[data-dept-section]'));
+}
+
+/** Materializes a still-on-default department's schedule into real, editable rows (no functional change) via POST .../customize, then refreshes the list. */
+async function customizeAuditSchedule(deptId) {
+    try {
+        const res = await fetch(`/api/departments/${deptId}/audit-schedule/customize`, { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' } });
+        const data = await res.json();
+        if (!res.ok) return alert('❌ ' + (data.error || 'Failed to customize schedule.'));
+        loadAuditSchedules();
+    } catch (e) {
+        alert('❌ Network error.');
+    }
+}
+
+/**
+ * Shared by addAuditWindow/saveAuditWindow: reads the label/time inputs out of `rowEl`,
+ * validates, sends the given method/url, and on success refreshes both the schedule list and
+ * the live status chips (the edit can change a window's label/time, which the status view
+ * also shows). The two callers differ only in HTTP method/URL/error fallback text.
+ */
+async function submitAuditWindow(method, url, rowEl, fallbackMsg) {
+    const label = rowEl.querySelector('[data-field="label"]').value;
+    const startMinute = auditTimeStringToMinutes(rowEl.querySelector('[data-field="start_minute"]').value);
+    if (Number.isNaN(startMinute)) return alert('⚠️ A start time is required.');
+    try {
+        const res = await fetch(url, {
+            method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ label, start_minute: startMinute }),
+        });
+        const data = await res.json();
+        if (!res.ok) return alert('❌ ' + (data.error || fallbackMsg));
+        loadAuditSchedules();
+        loadAuditStatus();
+    } catch (e) {
+        alert('❌ Network error.');
+    }
+}
+
+/** Reads the label/time inputs out of an "+ Add Window" row and POSTs a new window for that department. */
+function addAuditWindow(deptId, rowEl) {
+    return submitAuditWindow('POST', `/api/departments/${deptId}/audit-schedule`, rowEl, 'Failed to add audit window.');
+}
+
+/** Reads the label/time inputs out of an existing window row and PUTs the update. */
+function saveAuditWindow(rowEl) {
+    return submitAuditWindow('PUT', `/api/audit-schedule/${rowEl.dataset.scheduleId}`, rowEl, 'Failed to save audit window.');
+}
+
+/** Deletes one audit window, confirming first -- with an extra warning if it's the department's last one, since that reverts it to the default schedule (see server.js's getDeptAuditSchedule). `deptSectionEl` scopes the "is this the last one" check to just this department's rows, not every department shown in the list. */
+async function deleteAuditWindow(scheduleId, deptSectionEl) {
+    const isLast = (deptSectionEl ? deptSectionEl.querySelectorAll('[data-schedule-id]').length : 2) <= 1;
+    const msg = isLast
+        ? 'This is the last custom window for this department -- removing it will revert the department to the default schedule (Morning 04:00 / Afternoon 14:00). Continue?'
+        : 'Remove this audit window?';
+    if (!confirm(msg)) return;
+    try {
+        const res = await fetch(`/api/audit-schedule/${scheduleId}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
+        const data = await res.json();
+        if (!res.ok) return alert('❌ ' + (data.error || 'Failed to remove audit window.'));
+        loadAuditSchedules();
+        loadAuditStatus();
+    } catch (e) {
+        alert('❌ Network error.');
     }
 }
 
@@ -2280,7 +2419,7 @@ async function unplaceToolPosition(qrCode) {
  * compact map stay in sync without re-rendering twice.
  */
 let positionEditorDrawerId = null;
-const POSITION_GRID_STEP = 0.05;
+const POSITION_GRID_STEP = 0.02; // 50x50 grid -- finer than the original 0.05 (20x20) per James's feedback, for easier precise pinpointing
 
 /** Snaps a fractional (0-1) coordinate to POSITION_GRID_STEP when #pe-snap-toggle is checked, and always clamps to [0,1]. */
 function snapPositionCoord(v) {

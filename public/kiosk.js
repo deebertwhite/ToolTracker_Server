@@ -223,12 +223,14 @@ async function loadKioskAuditStatus() {
 }
 
 /**
- * Populates #idle-audit-status on the idle screen (#screen-idle) with the current shift
- * audit window and one pass/fail chip per department -- visible to anyone walking up to
- * the kiosk, before logging in, unlike #kiosk-audit-banner above (which only shows the
- * logged-in tech's own department, after auth). Called once on page load and re-run
- * periodically (see the setInterval near the bottom of this file) since the idle screen
- * is often left on-screen unattended for a long time.
+ * Populates #idle-audit-status on the idle screen (#screen-idle) with one pass/fail chip per
+ * department -- visible to anyone walking up to the kiosk, before logging in, unlike
+ * #kiosk-audit-banner above (which only shows the logged-in tech's own department, after
+ * auth). Called once on page load and re-run periodically (see the setInterval near the
+ * bottom of this file) since the idle screen is often left on-screen unattended for a long
+ * time. Each department's own window/label is shown inline in its chip (not a shared banner
+ * line, and not a hover tooltip -- this is a touchscreen with no hover) since departments can
+ * now run different schedules (see getDeptAuditSchedule in server.js).
  */
 async function loadIdleAuditStatus() {
     const windowEl = document.getElementById('idle-audit-window');
@@ -240,15 +242,15 @@ async function loadIdleAuditStatus() {
         const data = await res.json();
         if (!data.success) throw new Error('failed');
 
-        const windowStart = new Date(data.window_start);
-        const isMorning = windowStart.getHours() === 4;
-        windowEl.textContent = `${isMorning ? 'Morning' : 'Afternoon'} audit window (since ${windowStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+        windowEl.textContent = 'Shift Audit Status';
 
         // Same flat-background chip convention as loadAuditStatus() in admin.js, plus an
         // icon since this is meant to be glanceable from a few steps away on the kiosk.
         chipsEl.innerHTML = data.departments.map(d => {
             const color = d.audit_completed ? 'var(--muted)' : 'var(--red)';
-            const label = d.audit_completed ? `${icon('circle-check')} ${d.name}` : `${icon('triangle-alert')} ${d.name}`;
+            const label = d.audit_completed
+                ? `${icon('circle-check')} ${d.name} (${d.window_label})`
+                : `${icon('triangle-alert')} ${d.name} audit pending (${d.window_label})`;
             return `<span style="font-size:12px; font-weight:bold; padding:5px 12px; border-radius:14px; background: rgba(255,255,255,0.05); color: ${color};">${label}</span>`;
         }).join('');
     } catch (err) {
