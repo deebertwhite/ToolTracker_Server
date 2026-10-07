@@ -341,17 +341,22 @@
          Hidden by default; shown when a checkout is rejected with
          code AUDIT_REQUIRED. Lets the tech jump directly into the
          Audit workflow for one of the pending toolboxes without
-         losing the in-progress checkout batch.
+         losing the in-progress checkout batch. Re-shown by
+         showAuditGateModal() after each box is cleared (see
+         submitAudit() in kiosk.js) until every pending toolbox from
+         the original rejection is audited, so "Complete Checkout"
+         only needs to be pressed again once, not once per toolbox.
     ============================================================= -->
     <div id="audit-gate-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div class="card" style="width: 100%; max-width: 420px; border-top: 3px solid var(--orange); text-align: center;">
             <div style="font-size: 40px; margin-bottom: 10px;"><span class="icon" data-icon="clipboard-list"></span></div>
             <h3 style="margin-bottom: 10px;">Shift Audit Required</h3>
-            <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">The following toolbox(es) have not been audited yet this shift (morning 04:00-14:00 or afternoon 14:00-04:00). A checkout cannot be completed until this shift's audit is logged.</p>
+            <p style="font-size: 13px; color: var(--muted); margin-bottom: 8px;">The following toolbox(es) have not been audited yet this shift. A checkout cannot be completed until each one's audit is logged.</p>
+            <p id="audit-gate-count" style="font-size: 12px; color: var(--orange); font-weight: bold; margin-bottom: 14px;"></p>
 
             <div id="audit-gate-box-list" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;"></div>
 
-            <button class="btn btn-secondary" style="width: 100%;" onclick="document.getElementById('audit-gate-modal').style.display='none'">Cancel</button>
+            <button class="btn btn-secondary" style="width: 100%;" onclick="cancelAuditGate()">Cancel</button>
         </div>
     </div>
 

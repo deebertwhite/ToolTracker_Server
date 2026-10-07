@@ -5,6 +5,9 @@ let activeUser = null;
 let pendingMode = null; // 'OUT', 'IN', 'REPORT', 'AUDIT', or 'TRANSFERS'
 let batchQueue = [];
 let html5QrScannerInstance = null;
+// Tool name lookup by qr_code, for showing "CUT-0001 -- Wire Cutter" in the checkout/check-in
+// queue instead of just the bare code -- see loadKioskToolNames()/renderQueue().
+let kioskToolNameByQr = {};
 
 // Specific Audit State Variables
 let auditTools = []; // tools currently 'In' this box -- what the attestation actually confirms
@@ -15,6 +18,17 @@ let auditBoxName = '';
 // submitAudit()'s success path so the tech is returned to their
 // still-populated checkout batch instead of the idle screen.
 let auditGateReturnPending = false;
+// The full set of toolbox names still needing an audit before the checkout that triggered
+// AUDIT_REQUIRED can be retried -- populated from the rejection's pending_toolboxes the first
+// time it fires, then shrunk as each one is audited (see submitAudit()'s gate-return branch).
+// Lets the tech clear every pending box in one continuous loop instead of being bounced back to
+// the scanner panel (and rejected again for the NEXT box) after each individual audit.
+let auditGatePendingList = [];
+// box_id of the toolbox currently being audited via the gate (see jumpToAuditFromGate()) --
+// tracked separately from auditBoxName (which the pre-existing toolbox-select dropdown keys by
+// name, not id) so auditGatePendingList can be filtered unambiguously even if two toolboxes in
+// the same department happen to share a name.
+let auditGateBoxId = null;
 
 // ==========================================
 // 2. WORKFLOW NAVIGATION
@@ -69,6 +83,8 @@ function resetToIdle() {
     auditTools = [];
     auditExcludedCount = 0;
     auditGateReturnPending = false;
+    auditGatePendingList = []; // defensive -- every real read is already gated/overwritten fresh, but a kiosk is shared across technicians all shift, so don't leave anything behind on logout
+    auditGateBoxId = null;
 
     document.getElementById('auth-login-card-input').value = '';
     document.getElementById('auth-badge-input').value = '';
@@ -296,6 +312,27 @@ function setupActionScreen() {
         document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'block' : 'none';
         document.getElementById('kiosk-work-order').value = '';
         focusScanInput('kiosk-scan-input');
+        loadKioskToolNames();
+    }
+}
+
+/**
+ * Fetches every tool's name keyed by qr_code (GET /api/tools, same endpoint the Audit workflow
+ * already uses) so the checkout/check-in queue can show "CUT-0001 -- Wire Cutter" instead of
+ * just the bare code. Fetched once per entering the scanner panel, not per scan -- a per-scan
+ * round trip would undercut the "scanning stays instant" design this file is otherwise careful
+ * about (see isToolboxCode()'s own comment). Best-effort: if this fails, the queue just falls
+ * back to bare codes, exactly like before this existed -- never blocks scanning itself.
+ */
+async function loadKioskToolNames() {
+    try {
+        const res = await fetch('/api/tools');
+        const data = await res.json();
+        kioskToolNameByQr = {};
+        (data.tools || []).forEach(t => { kioskToolNameByQr[t.qr_code] = t.name; });
+        renderQueue(); // refresh any rows already drawn before this resolved
+    } catch (e) {
+        // Best-effort -- see doc comment above.
     }
 }
 
@@ -378,7 +415,7 @@ function handleToolScan() {
     input.value = '';
     showToast(isBox
         ? `${icon('plus')} Added Toolbox ${qr} -- every tool currently in it will be checked out.`
-        : `${icon('plus')} Added: ${qr}`);
+        : `${icon('plus')} Added: ${qr}${kioskToolNameByQr[qr] ? ' -- ' + kioskToolNameByQr[qr] : ''}`);
 }
 
 /**
@@ -386,6 +423,9 @@ function handleToolScan() {
  * batchQueue array, including each item's remove (x icon) control.
  * Also updates #queue-count-live, the same count shown on the
  * "Done Scanning" button while a continuous scan session is open.
+ * Each tool's name (from kioskToolNameByQr, see loadKioskToolNames()) shows alongside its code
+ * when known, so the operator can confirm by name, not just a bare ID -- falls back to the code
+ * alone if the name lookup hasn't resolved yet or the tool isn't in it for some reason.
  */
 function renderQueue() {
     document.getElementById('queue-count').textContent = batchQueue.length;
@@ -395,7 +435,7 @@ function renderQueue() {
         <div class="batch-item">
             <div>${isToolboxCode(qr)
                 ? `${icon('package')} <strong>${qr}</strong> <span style="color:var(--accent); font-size:11px;">(whole toolbox)</span>`
-                : `${icon('wrench')} <strong>${qr}</strong>`}</div>
+                : `${icon('wrench')} <strong>${qr}</strong>${kioskToolNameByQr[qr] ? ` <span style="color:var(--muted); font-size:12px;">${kioskToolNameByQr[qr]}</span>` : ''}`}</div>
             <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;" onclick="removeItem(${index})">${icon('x')}</div>
         </div>
     `).join('');
@@ -562,15 +602,31 @@ async function submitAudit() {
 
         if (auditGateReturnPending) {
             auditGateReturnPending = false;
-            pendingMode = 'OUT';
             auditTools = [];
             auditExcludedCount = 0;
+
+            // Clear this box from the full list tracked since the original AUDIT_REQUIRED
+            // rejection (see auditGatePendingList) -- if any others are still pending, loop
+            // straight back into the gate modal instead of returning to the scanner panel,
+            // where hitting "Complete Checkout" would just be rejected again for the next one.
+            // Filtered by box_id, not name -- toolbox names have no uniqueness constraint, and
+            // filtering by name alone would remove EVERY same-named entry in one shot if a
+            // department ever has two boxes sharing a name, under-counting what's actually left.
+            auditGatePendingList = auditGatePendingList.filter(box => box.box_id !== auditGateBoxId);
+            if (auditGatePendingList.length > 0) {
+                document.getElementById('panel-audit').style.display = 'none';
+                showToast(`${icon('circle-check', 'icon-success')} ${auditBoxName} audited.`);
+                showAuditGateModal(auditGatePendingList);
+                return;
+            }
+
+            pendingMode = 'OUT';
             document.getElementById('panel-audit').style.display = 'none';
             document.getElementById('panel-scanner').style.display = 'block';
             document.getElementById('action-title').innerHTML = `${icon('upload')} Scan Tools for Checkout`;
             document.getElementById('btn-submit-action').textContent = '✓ Complete Checkout';
             renderQueue();
-            showToast(`${icon('circle-check', 'icon-success')} Audit logged — you can now finalize your checkout.`);
+            showToast(`${icon('circle-check', 'icon-success')} All required audits complete — you can now finalize your checkout.`);
             return;
         }
 
@@ -599,11 +655,15 @@ async function submitAudit() {
  * startAudit() — skipping the manual dropdown-pick-and-click-Begin
  * step. Sets auditGateReturnPending so submitAudit() knows to return
  * to the scanner panel (with batchQueue intact) instead of resetting
- * to idle once this audit is logged.
+ * to idle once this audit is logged. boxId is stored in auditGateBoxId
+ * purely so submitAudit() can remove the right entry from
+ * auditGatePendingList afterward -- the dropdown selection itself still
+ * goes by name (its own pre-existing mechanism, unchanged here).
  */
-async function jumpToAuditFromGate(boxName) {
+async function jumpToAuditFromGate(boxName, boxId) {
     document.getElementById('audit-gate-modal').style.display = 'none';
     auditGateReturnPending = true;
+    auditGateBoxId = boxId;
 
     document.getElementById('panel-scanner').style.display = 'none';
     document.getElementById('panel-audit').style.display = 'block';
@@ -918,7 +978,13 @@ async function submitTransaction(managerCredential = null) {
             }
             else if (data.code === 'AUDIT_REQUIRED') {
                 document.getElementById('override-modal').style.display = 'none';
-                showAuditGateModal(data.pending_toolboxes || []);
+                // Track the full pending list from this rejection -- submitAudit()'s gate-return
+                // branch shrinks it as each box gets audited and only returns here to the
+                // scanner panel once it's empty, so hitting "Complete Checkout" again (which
+                // would just get rejected for the NEXT box) is only ever needed once, not once
+                // per pending toolbox.
+                auditGatePendingList = data.pending_toolboxes || [];
+                showAuditGateModal(auditGatePendingList);
                 return;
             }
             return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Transaction failed.'));
@@ -968,16 +1034,31 @@ function submitTransactionWithOverrideToken(token) {
 /**
  * Audit-gate rejection UX: renders one "Audit <name> Now" button per
  * toolbox in pendingToolboxes into #audit-gate-box-list and shows
- * #audit-gate-modal. Each button calls jumpToAuditFromGate(name) so
- * the tech can log today's audit without losing the in-progress
- * checkout batch. The Cancel button (static markup in kiosk.html)
- * just hides the modal, leaving batchQueue untouched for a retry.
+ * #audit-gate-modal, plus a running "X toolbox(es) remaining" count so
+ * progress through a multi-box gate is visible. Each button calls
+ * jumpToAuditFromGate(name) so the tech can log today's audit without
+ * losing the in-progress checkout batch. Re-called by submitAudit()'s
+ * gate-return branch with the shrinking remainder of auditGatePendingList
+ * after each box is cleared, so the tech works through all of them in one
+ * continuous loop. The Cancel button clears auditGatePendingList too (see
+ * cancelAuditGate()), so an abandoned gate doesn't leave stale state behind
+ * for the next rejection.
  */
 function showAuditGateModal(pendingToolboxes) {
+    document.getElementById('audit-gate-count').textContent = pendingToolboxes.length > 1
+        ? `${pendingToolboxes.length} toolboxes still need this shift's audit.`
+        : '';
     document.getElementById('audit-gate-box-list').innerHTML = pendingToolboxes.map(box => `
-        <button class="btn btn-primary" onclick="jumpToAuditFromGate('${(box.name || '').replace(/'/g, "\\'")}')">Audit ${box.name} Now</button>
+        <button class="btn btn-primary" onclick="jumpToAuditFromGate('${(box.name || '').replace(/'/g, "\\'")}', ${box.box_id})">Audit ${box.name} Now</button>
     `).join('') || '<div style="color: var(--muted); font-size: 13px;">No specific toolboxes were listed.</div>';
     document.getElementById('audit-gate-modal').style.display = 'flex';
+}
+
+/** Cancels the audit gate -- hides the modal and clears auditGatePendingList, so a later AUDIT_REQUIRED rejection starts its tracked list fresh rather than carrying over a stale/abandoned one. batchQueue itself is untouched, same as before. */
+function cancelAuditGate() {
+    auditGatePendingList = [];
+    auditGateBoxId = null;
+    document.getElementById('audit-gate-modal').style.display = 'none';
 }
 
 /**
