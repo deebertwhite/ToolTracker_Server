@@ -267,6 +267,12 @@
                             <div class="form-group" style="margin: 0;"><label class="form-label">Tool Name</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Detailed Description</label><input class="form-input" id="add-tool-desc" placeholder="e.g. Snap-on 72-tooth flex head"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Serial Number</label><input class="form-input" id="add-tool-serial" placeholder="Optional -- mainly for calibrated tools"></div>
+                            <!-- Quantity > 1 ingests that many identical tools in one pass (same name/
+                                 description/part number/location), each getting its own unique
+                                 sequential barcode ID exactly as if entered one at a time -- see
+                                 addNewTool()'s batch loop in admin.js. Defaults to 1, where every field
+                                 and the save flow behave exactly as before this existed. -->
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Quantity</label><input type="number" class="form-input" id="add-tool-quantity" value="1" min="1" max="50" onchange="onAddToolQuantityChange()"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="add-tool-partnum" placeholder="Optional -- mfr/catalog part #"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Replacement URL</label><input class="form-input" id="add-tool-url" placeholder="https://mcmaster.com/..."></div>
 
@@ -282,8 +288,13 @@
                                 <label class="form-label">Barcode ID</label>
                                 <div style="display: flex; gap: 8px;">
                                     <input class="form-input" id="add-tool-id" placeholder="Select a department..." style="font-family: monospace; color: var(--accent);" readonly>
-                                    <button class="btn-icon" onclick="startAdminAssetCamera('admin-reader-add', 'add-tool-id')"><span class="icon" data-icon="camera"></span></button>
+                                    <!-- Scanning a pre-printed barcode to override the auto-generated one
+                                         only makes sense for a single tool -- hidden at quantity > 1, where
+                                         every ID in the batch is always auto-assigned (see
+                                         onAddToolQuantityChange()). -->
+                                    <button class="btn-icon" id="btn-add-tool-scan" onclick="startAdminAssetCamera('admin-reader-add', 'add-tool-id')"><span class="icon" data-icon="camera"></span></button>
                                 </div>
+                                <div id="add-tool-id-range-note" style="display:none; font-size:11px; color:var(--muted); margin-top:4px;"></div>
                             </div>
 
                             <!-- Optional: uploaded right along with the rest of the form via
@@ -310,7 +321,16 @@
                                 <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Calibration Due Date</label><input type="date" class="form-input" id="add-tool-cal-due"></div>
                             </div>
                         </div>
-                        <button class="btn btn-secondary" style="width: auto; margin-top: 15px;" onclick="addNewTool()">+ Save Asset to Database</button>
+                        <button class="btn btn-secondary" style="width: auto; margin-top: 15px;" id="btn-save-asset" onclick="addNewTool()">+ Save Asset to Database</button>
+
+                        <!-- Per-tool save results, shown after addNewTool() -- see renderAddToolResults()
+                             in admin.js. Always has at least one row (quantity-1 ingests behave exactly
+                             as before this feature existed, just now with this one-row summary). Each
+                             successful row opens that tool's own entity card (same "+ Log Calibration"
+                             form and Photo button every tool already has) so a calibrated batch can be
+                             filled in individually right away, or left for later -- the tools already
+                             exist and work fully either way. -->
+                        <div id="add-tool-results" style="display:none; margin-top:15px; background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; border: 1px solid var(--border);"></div>
                     </div>
 
                     <div class="card">

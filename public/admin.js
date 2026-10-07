@@ -1237,35 +1237,80 @@ function onMoveToolBoxChange() {
 }
 
 /**
- * Requests the next sequential tool barcode from GET /api/tools/next-id, using the prefix
- * carried on the selected #add-tool-dept option's data-prefix attribute (see
- * syncStorageHierarchyDropdowns), and writes the FULL id (prefix + sequence) into the
- * read-only #add-tool-id field. Deriving the prefix from the department selection directly
- * -- rather than a second, independent prefix dropdown -- is what guarantees the barcode id
- * and the drawer assignment always agree on department; that mismatch was the root cause of
- * tools ending up filed under the wrong department's boxes.
+ * Looks up the next sequential barcode id for a prefix via GET /api/tools/next-id -- pure
+ * fetch, no DOM side effects. Reused by fetchNextToolId() below (writes the result into
+ * #add-tool-id as a live preview) and by addNewTool()'s batch-ingest loop (calls this fresh
+ * once per tool actually being saved, since each save changes what the next lowest-unused
+ * number is -- the authoritative id for tool N+1 of a batch can only be known once tool N has
+ * actually been committed).
+ */
+async function fetchNextSequentialId(prefix) {
+    const res = await fetch(`/api/tools/next-id?prefix=${prefix}-`);
+    const data = await res.json();
+    if (!data.success) throw new Error('Failed to generate the next barcode ID.');
+    return `${prefix}-${data.next_sequence}`;
+}
+
+/**
+ * Requests the next sequential tool barcode and writes the FULL id (prefix + sequence) into
+ * the read-only #add-tool-id field, using the prefix carried on the selected #add-tool-dept
+ * option's data-prefix attribute (see syncStorageHierarchyDropdowns). Deriving the prefix from
+ * the department selection directly -- rather than a second, independent prefix dropdown -- is
+ * what guarantees the barcode id and the drawer assignment always agree on department; that
+ * mismatch was the root cause of tools ending up filed under the wrong department's boxes.
+ *
+ * At quantity > 1 (batch ingest, see onAddToolQuantityChange()) this id is only a PREVIEW of
+ * where the batch will start -- #add-tool-id-range-note shows the full range it would currently
+ * produce, but the real ids are each freshly fetched at save time (addNewTool()'s loop), so
+ * this preview can't go stale/collide even if another tool gets created elsewhere in between.
  */
 async function fetchNextToolId() {
     const deptSelect = document.getElementById('add-tool-dept');
     const idField = document.getElementById('add-tool-id');
+    const rangeNote = document.getElementById('add-tool-id-range-note');
     const prefix = deptSelect.selectedOptions[0]?.dataset.prefix;
-    if (!prefix) { idField.value = ''; idField.placeholder = 'Select a department first...'; return; }
+    const quantity = Math.max(1, parseInt(document.getElementById('add-tool-quantity').value, 10) || 1);
+    if (!prefix) { idField.value = ''; idField.placeholder = 'Select a department first...'; rangeNote.style.display = 'none'; return; }
 
     idField.value = 'Generating...';
     try {
-        const res = await fetch(`/api/tools/next-id?prefix=${prefix}-`); const data = await res.json();
-        idField.value = data.success ? `${prefix}-${data.next_sequence}` : 'Error';
-    } catch (err) { idField.value = 'Error'; }
+        idField.value = await fetchNextSequentialId(prefix);
+        if (quantity > 1) {
+            const firstNum = parseInt(idField.value.split('-').pop(), 10);
+            const lastId = `${prefix}-${String(firstNum + quantity - 1).padStart(4, '0')}`;
+            rangeNote.textContent = `Will assign ${quantity} sequential IDs: ${idField.value} through ${lastId}`;
+            rangeNote.style.display = 'block';
+        } else {
+            rangeNote.style.display = 'none';
+        }
+    } catch (err) {
+        idField.value = 'Error';
+        rangeNote.style.display = 'none';
+    }
 }
 
 /**
- * Validates and submits the "Ingest New Asset" form to POST /api/tools. Department, toolbox,
- * and drawer are all required now (previously drawer alone was optional and unscoped, which
- * is how tools ended up filed under the wrong department -- see fetchNextToolId). The
- * barcode id in #add-tool-id is used as-is, whether auto-generated or overwritten by a
- * camera scan (see startAdminAssetCamera). On success, resets the form and refreshes the
- * infrastructure tree.
+ * Change handler for #add-tool-quantity -- toggles the Ingest form between single-tool and
+ * batch-ingest modes. At quantity > 1: the serial number field is cleared and disabled (a
+ * shared serial would collide on the second tool via the duplicate-serial guard -- set
+ * individual serials afterward via each tool's edit form if needed), the barcode scan-override
+ * button is hidden (every id in a batch is always auto-assigned, never scanned off an existing
+ * physical label), and the barcode field becomes a range preview instead of a single id (see
+ * fetchNextToolId()).
  */
+function onAddToolQuantityChange() {
+    const quantityInput = document.getElementById('add-tool-quantity');
+    const quantity = Math.max(1, parseInt(quantityInput.value, 10) || 1);
+    quantityInput.value = quantity;
+
+    const serialField = document.getElementById('add-tool-serial');
+    serialField.disabled = quantity > 1;
+    if (quantity > 1) serialField.value = '';
+
+    document.getElementById('btn-add-tool-scan').style.display = quantity > 1 ? 'none' : '';
+    fetchNextToolId();
+}
+
 /** Change handler for #add-tool-photo -- swaps the placeholder camera icon for a thumbnail of the chosen file, purely client-side (nothing uploaded yet, see addNewTool()). */
 function previewAddToolPhoto() {
     const file = document.getElementById('add-tool-photo').files[0];
@@ -1274,49 +1319,122 @@ function previewAddToolPhoto() {
     preview.innerHTML = `<img src="${URL.createObjectURL(file)}" style="width:100%;height:100%;object-fit:cover;">`;
 }
 
+/**
+ * Validates and submits the "Ingest New Asset" form to POST /api/tools. Department, toolbox,
+ * and drawer are all required (previously drawer alone was optional and unscoped, which is how
+ * tools ended up filed under the wrong department -- see fetchNextToolId).
+ *
+ * #add-tool-quantity > 1 ingests that many identical tools in one pass -- same name/
+ * description/part number/location/photo/calibration flag, each with its OWN barcode id
+ * (fetched fresh per tool via fetchNextSequentialId(), never computed client-side in advance,
+ * so it's correct even if something else creates a tool in the middle of a large batch) exactly
+ * as if entered one at a time. At the default quantity of 1 this is indistinguishable from the
+ * tool's original single-save behavior (same alert, same field reset) -- the loop below always
+ * runs at least once either way.
+ *
+ * is_calibrated/last_cal_date/cal_due_date are now actually sent (previously the checkbox and
+ * its date fields were visually present but never read here at all -- a real pre-existing gap,
+ * not something this batch feature introduced, just one it would have been wrong to build on
+ * top of unfixed). Checking "Requires Calibration Tracking" sets the flag on every tool in the
+ * batch; the two date fields, if filled in, are likewise shared across the whole batch as a
+ * starting point. That's bare dates only, not a real calibration_records row (provider,
+ * certificate, standard) -- for calibrated tools, the results list below links straight to
+ * each new tool's own card, where "+ Log Calibration" already exists for exactly that, same as
+ * it always has for a tool added one at a time.
+ */
 async function addNewTool() {
-    const payload = {
+    const quantity = Math.max(1, parseInt(document.getElementById('add-tool-quantity').value, 10) || 1);
+    const deptSelect = document.getElementById('add-tool-dept');
+    const prefix = deptSelect.selectedOptions[0]?.dataset.prefix;
+    const isCalibrated = document.getElementById('add-tool-is-cal').checked;
+
+    const sharedFields = {
         name: document.getElementById('add-tool-name').value,
         description: document.getElementById('add-tool-desc').value,
-        serial_number: document.getElementById('add-tool-serial').value || null,
         part_number: document.getElementById('add-tool-partnum').value || null,
         replacement_url: document.getElementById('add-tool-url').value,
-        qr_code: document.getElementById('add-tool-id').value,
-        drawer_id: document.getElementById('add-tool-drawer').value
+        drawer_id: document.getElementById('add-tool-drawer').value,
+        is_calibrated: isCalibrated,
+        last_cal_date: isCalibrated ? (document.getElementById('add-tool-last-cal').value || null) : null,
+        cal_due_date: isCalibrated ? (document.getElementById('add-tool-cal-due').value || null) : null
     };
-    if (!payload.name || !payload.qr_code) return alert('⚠️ Name and Barcode ID are required.');
-    if (!document.getElementById('add-tool-dept').value || !document.getElementById('add-tool-box').value || !payload.drawer_id) {
+    if (!sharedFields.name) return alert('⚠️ Name is required.');
+    if (!deptSelect.value || !document.getElementById('add-tool-box').value || !sharedFields.drawer_id) {
         return alert('⚠️ Select a department, toolbox, and drawer for this asset.');
     }
+    if (quantity === 1 && !document.getElementById('add-tool-id').value) return alert('⚠️ Barcode ID is required.');
+    if (quantity > 1 && !prefix) return alert('⚠️ Select a department first.');
 
-    const res = await fetch('/api/tools', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-    if (res.ok) {
-        // Best-effort, same reasoning as every other photo upload in this app -- a tool the
-        // admin just filled out an entire form for shouldn't be reported as "failed" over a
-        // photo that can just as easily be added afterward from its own card (the only way
-        // this worked before today). POST /api/upload is the exact same endpoint/entity_type
-        // the "Photo" button on an existing tool's card already uses -- there's no bespoke
-        // "attach a photo at creation time" path on the server, just this form sequencing the
-        // two existing requests back to back.
-        const photoFile = document.getElementById('add-tool-photo').files[0];
-        let photoMessage = '';
-        if (photoFile) {
-            const formData = new FormData();
-            formData.append('photo', photoFile);
-            formData.append('entity_type', 'tool');
-            formData.append('entity_id', payload.qr_code);
+    // Serial number is single-tool only -- disabled/cleared client-side by
+    // onAddToolQuantityChange() already, re-checked here since that's a UX nicety, not
+    // validation a request could bypass. A shared serial across a batch would just collide on
+    // the second tool anyway (the duplicate-serial guard), so this isn't a new restriction, just
+    // one surfaced clearly instead of as a confusing per-item save failure.
+    const serialNumber = quantity === 1 ? (document.getElementById('add-tool-serial').value || null) : null;
+    const photoFile = document.getElementById('add-tool-photo').files[0];
+    const saveBtn = document.getElementById('btn-save-asset');
+    const originalBtnText = saveBtn.textContent;
+    const results = [];
+
+    saveBtn.disabled = true;
+    try {
+        for (let i = 0; i < quantity; i++) {
+            if (quantity > 1) saveBtn.textContent = `Saving ${i + 1}/${quantity}...`;
+
+            let qrCode;
             try {
-                const photoRes = await fetch('/api/upload', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
-                if (!photoRes.ok) {
-                    const photoData = await photoRes.json().catch(() => ({}));
-                    photoMessage = `\n⚠️ Photo upload failed: ${photoData.error || 'unknown error'}. You can add it later from the tool's card.`;
-                }
+                qrCode = quantity === 1 ? document.getElementById('add-tool-id').value : await fetchNextSequentialId(prefix);
             } catch (err) {
-                photoMessage = `\n⚠️ Photo upload failed (network error). You can add it later from the tool's card.`;
+                results.push({ qr_code: '--', success: false, message: 'Failed to generate a barcode ID.' });
+                continue;
+            }
+
+            try {
+                const res = await fetch('/api/tools', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+                    body: JSON.stringify({ ...sharedFields, qr_code: qrCode, serial_number: serialNumber })
+                });
+                const data = await res.json();
+                if (!res.ok) { results.push({ qr_code: qrCode, success: false, message: data.error || 'Failed to save.' }); continue; }
+
+                // Best-effort, same reasoning as every other photo upload in this app -- a tool
+                // that was otherwise saved fine shouldn't be reported as failed over a photo
+                // that can just as easily be added later from its own card (the only way this
+                // worked before photo-at-ingest existed). POST /api/upload is the exact same
+                // endpoint/entity_type the "Photo" button on an existing tool's card already
+                // uses -- no bespoke "attach a photo at creation time" path on the server, just
+                // this form sequencing the two existing requests back to back, once per tool.
+                let message = 'Saved';
+                if (photoFile) {
+                    const formData = new FormData();
+                    formData.append('photo', photoFile);
+                    formData.append('entity_type', 'tool');
+                    formData.append('entity_id', qrCode);
+                    try {
+                        const photoRes = await fetch('/api/upload', { method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData });
+                        if (!photoRes.ok) message = 'Saved (photo upload failed)';
+                    } catch (err) {
+                        message = 'Saved (photo upload failed)';
+                    }
+                }
+                results.push({ qr_code: qrCode, success: true, message });
+            } catch (err) {
+                results.push({ qr_code: qrCode, success: false, message: 'Network error.' });
             }
         }
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalBtnText;
+    }
 
-        alert(`✅ Asset saved: ${payload.qr_code}${photoMessage}`);
+    if (quantity === 1) {
+        const r = results[0];
+        if (r.success) alert(`✅ Asset saved: ${r.qr_code}${r.message.includes('photo upload failed') ? '\n⚠️ Photo upload failed. You can add it later from the tool\'s card.' : ''}`);
+        else alert('❌ ' + r.message);
+    }
+
+    if (results.some(r => r.success)) {
         document.getElementById('add-tool-name').value = '';
         document.getElementById('add-tool-desc').value = '';
         document.getElementById('add-tool-serial').value = '';
@@ -1326,13 +1444,49 @@ async function addNewTool() {
         document.getElementById('add-tool-box').innerHTML = '<option value="">-- Select a department first --</option>';
         document.getElementById('add-tool-drawer').innerHTML = '<option value="">-- Select a toolbox first --</option>';
         document.getElementById('add-tool-id').value = '';
+        document.getElementById('add-tool-id-range-note').style.display = 'none';
         document.getElementById('add-tool-photo').value = '';
+        document.getElementById('add-tool-quantity').value = '1';
+        document.getElementById('add-tool-is-cal').checked = false;
+        document.getElementById('add-tool-cal-fields').style.display = 'none';
+        document.getElementById('add-tool-last-cal').value = '';
+        document.getElementById('add-tool-cal-due').value = '';
         previewAddToolPhoto();
-        renderEditableInfraTree();
-    } else {
-        const data = await res.json();
-        alert('❌ ' + (data.error || 'Failed to save asset.'));
+        onAddToolQuantityChange();
+        await renderEditableInfraTree(); // awaited so globalToolsCache already has the new tools by the time the results list below is clickable
     }
+
+    if (quantity > 1) renderAddToolResults(results, isCalibrated);
+}
+
+/**
+ * Renders the post-save summary for a batch ingest (#add-tool-quantity > 1 in addNewTool()) --
+ * one row per tool actually attempted, success or failure, so a partial failure (e.g. a
+ * mid-batch network hiccup) stays visible instead of being lumped into one pass/fail result the
+ * way a single alert() would be. Each successful row opens that tool's own entity card
+ * (openEntityModal(), same as clicking it in the Master Storage & Asset Tree) -- the existing
+ * "+ Log Calibration" form and Photo button there are how a calibrated batch gets its
+ * individual per-tool detail filled in, right away or later; nothing new needed for that, the
+ * tools are already fully real and usable the moment they're created either way.
+ */
+function renderAddToolResults(results, isCalibrated) {
+    const container = document.getElementById('add-tool-results');
+    const successCount = results.filter(r => r.success).length;
+    container.style.display = 'block';
+    container.innerHTML = `
+        <div style="font-size:13px; margin-bottom:8px;">
+            <strong>${successCount} of ${results.length} saved.</strong>
+            ${isCalibrated && successCount ? ' Click a tool below to log its calibration record now, or come back to it later from its own card.' : ''}
+        </div>
+        <div style="display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto;">
+            ${results.map(r => `
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; border-radius:6px; background: var(--surface2);${r.success ? ' cursor:pointer;' : ''}"${r.success ? ` onclick="openEntityModal('tool', '${r.qr_code}')"` : ''}>
+                    <span style="font-family:monospace; font-size:12px;">${r.qr_code}</span>
+                    <span style="font-size:12px; color: ${r.success ? 'var(--green)' : 'var(--red)'};">${r.success ? icon('circle-check') : icon('circle-x')} ${r.message}</span>
+                </div>
+            `).join('')}
+        </div>
+    `;
 }
 
 /**
