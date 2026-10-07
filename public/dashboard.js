@@ -246,11 +246,17 @@ async function renderDrawerMap(drawerId) {
     const unplacedCount = tools.length - placed.length;
     const statusColor = (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)');
 
+    // Bigger + a colored glow (not just a plain dark drop-shadow) so each marker reads clearly
+    // at a glance from across a room -- this view is meant to be left open on a shared/wall
+    // screen (see this function's own doc comment), where the original small, low-contrast dot
+    // was hard to pick out against a busy photo. The glow is tinted to the marker's own status
+    // color (not a generic shadow), reinforcing the color at a distance where the dot itself
+    // may be too small to read clearly.
     document.getElementById('map-drawer-markers').innerHTML = placed.map(t => `
         <div title="${t.name} (${t.status})"
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
-                    width:16px; height:16px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
-                    box-shadow:0 0 4px rgba(0,0,0,0.6);"></div>
+                    width:24px; height:24px; border-radius:50%; background:${statusColor(t.status)}; border:3px solid #fff;
+                    box-shadow:0 0 10px 3px ${statusColor(t.status)}, 0 2px 4px rgba(0,0,0,0.8);"></div>
     `).join('');
 
     document.getElementById('map-unplaced-note').textContent = unplacedCount > 0
