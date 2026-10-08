@@ -27,7 +27,6 @@
         <div class="sidebar-header">LTA Telemetry</div>
 
         <div class="nav-item active" id="nav-global" onclick="loadGlobalDashboard()"><span class="icon" data-icon="globe"></span> Global Overview</div>
-        <div class="nav-item" id="nav-drawer-map" onclick="showDrawerMapView()"><span class="icon" data-icon="image"></span> Shadow Board Map</div>
         <div class="nav-item" id="nav-cal-cockpit" onclick="loadCalCockpit()"><span class="icon" data-icon="lock"></span> Calibration Cockpit</div>
 
         <div style="padding: 20px 20px 10px 20px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;">Storage Directory</div>
@@ -191,10 +190,13 @@
              colored by its current live status -- what's missing is visible at a glance from
              any browser, not just standing at the box. Read-only here; markers are placed
              from the drawer's entity modal in the admin panel (renderPositionMap() in
-             admin.js). Opened directly from a drawer row in the sidebar tree
-             (loadDrawerMapFromTree() in dashboard.js) rather than a Department/Toolbox/Drawer
-             dropdown cascade -- every drawer already has its own row there, three levels deep,
-             each with an at-a-glance flagged-tool-count badge. -->
+             admin.js). Has no standalone top-level nav entry of its own -- opened directly from
+             a drawer row in the sidebar tree (loadDrawerMapFromTree() in dashboard.js), since
+             every drawer already has its own row there, three levels deep, each with an
+             at-a-glance flagged-tool-count badge. A standalone nav item used to sit here
+             alongside Global Overview/Calibration Cockpit (showDrawerMapView(), removed) but it
+             only ever led to an empty "pick a drawer" prompt once the tree could reach every
+             drawer directly -- a dead end with nothing useful of its own to land on. -->
         <div id="view-drawer-map" style="display: none;">
             <div style="margin-bottom: 20px;">
                 <h2 style="margin-bottom: 5px;">Shadow Board Map</h2>

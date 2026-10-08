@@ -215,25 +215,6 @@ function toggleDashboardTreeNode(containerId, rowEl) {
 // 3.5 SHADOW BOARD MAP VIEW
 // ==========================================
 /**
- * Switches to the Shadow Board Map view's empty state. Drawers are opened directly from the
- * sidebar tree now (see loadDrawerMapFromTree()/fetchStorageTree()) -- this top-level nav item
- * is just a landing point for when nothing's selected yet (e.g. navigating here before
- * expanding into a specific drawer), replacing what used to be a Department/Toolbox/Drawer
- * dropdown cascade.
- */
-function showDrawerMapView() {
-    document.getElementById('view-global').style.display = 'none';
-    document.getElementById('view-location').style.display = 'none';
-    document.getElementById('view-cal-cockpit').style.display = 'none';
-    document.getElementById('view-drawer-map').style.display = 'block';
-
-    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-    document.getElementById('nav-drawer-map').classList.add('active');
-
-    hideDrawerMapDisplay();
-}
-
-/**
  * Sidebar-tree drawer click: switches to the Shadow Board Map view and renders that drawer
  * directly (see renderDrawerMap()), marking the clicked tree row active instead of the
  * top-level "Shadow Board Map" nav item -- consistent with how department/toolbox rows already
@@ -249,12 +230,6 @@ function loadDrawerMapFromTree(drawerId, clickedEl) {
     if (clickedEl) clickedEl.classList.add('active');
 
     renderDrawerMap(drawerId);
-}
-
-function hideDrawerMapDisplay() {
-    document.getElementById('map-display-card').style.display = 'none';
-    document.getElementById('map-empty-card').style.display = 'block';
-    document.getElementById('map-empty-message').textContent = 'Select a drawer from the sidebar tree to view its map.';
 }
 
 // Tool lookup by qr_code for the currently-rendered drawer map, populated fresh by
