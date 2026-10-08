@@ -111,26 +111,62 @@ function updateAuditWindowCountdown() {
 // 3. STORAGE TREE SIDEBAR RENDERING
 // ==========================================
 /**
- * Fetches departments/toolboxes from /api/storage and renders the clickable
- * nav tree in the sidebar. Called by bootDashboard() on page load.
+ * Fetches departments/toolboxes/drawers from /api/storage plus a fresh /api/tools (to compute
+ * the flagged-tool badges below) and renders the clickable nav tree in the sidebar, now three
+ * levels deep (department -> toolbox -> drawer). Called by bootDashboard() on page load.
+ * Department/toolbox rows keep their existing behavior (loadLocationView()); drawer rows are
+ * new and open that drawer's Shadow Board Map directly (loadDrawerMapFromTree()) -- replacing
+ * the view's old standalone Department/Toolbox/Drawer dropdown picker, which is redundant now
+ * that every drawer is one click away here.
+ *
+ * Each row also shows a small red badge with the count of Missing/Broken/Worn tools inside it
+ * (rolled up from drawer -> toolbox -> department), so a problem is visible while just browsing
+ * the tree, before opening any specific map -- James: "make it easier to navigate and see what
+ * is missing... we can add at a glance as well."
  */
 async function fetchStorageTree() {
     try {
-        const res = await fetch('/api/storage');
-        const data = await res.json();
+        const [storageRes, toolsRes] = await Promise.all([fetch('/api/storage'), fetch('/api/tools')]);
+        const data = await storageRes.json();
+        const toolsData = await toolsRes.json();
+        const tools = toolsData.tools || [];
 
         globalStorageDepts = data.departments || [];
         globalStorageBoxes = data.toolboxes || [];
         globalStorageDrawers = data.drawers || [];
 
+        const flaggedByDrawer = {};
+        tools.forEach(t => {
+            if (['Missing', 'Broken', 'Worn'].includes(t.status)) {
+                flaggedByDrawer[t.drawer_id] = (flaggedByDrawer[t.drawer_id] || 0) + 1;
+            }
+        });
+        const flagBadge = (count) => count > 0
+            ? `<span class="nav-flag-badge" title="${count} flagged tool(s)">${count}</span>`
+            : '';
+
         let html = '';
         data.departments.forEach(dept => {
-            html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">${icon('building-2')} ${dept.name}</div>`;
-
             const boxes = data.toolboxes.filter(b => b.dept_id === dept.dept_id);
+            let deptFlagged = 0;
+            let boxesHtml = '';
+
             boxes.forEach(box => {
-                html += `<div class="nav-item nav-box" onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')">${icon('toolbox')} ${box.name}</div>`;
+                const drawers = data.drawers.filter(d => d.box_id === box.box_id);
+                let boxFlagged = 0;
+                let drawersHtml = '';
+
+                drawers.forEach(drawer => {
+                    const count = flaggedByDrawer[drawer.drawer_id] || 0;
+                    boxFlagged += count;
+                    drawersHtml += `<div class="nav-item nav-drawer" onclick="loadDrawerMapFromTree(${drawer.drawer_id}, this)">${icon('image')} ${drawer.name} ${flagBadge(count)}</div>`;
+                });
+
+                deptFlagged += boxFlagged;
+                boxesHtml += `<div class="nav-item nav-box" onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')">${icon('toolbox')} ${box.name} ${flagBadge(boxFlagged)}</div>${drawersHtml}`;
             });
+
+            html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">${icon('building-2')} ${dept.name} ${flagBadge(deptFlagged)}</div>${boxesHtml}`;
         });
         document.getElementById('tree-container').innerHTML = html;
     } catch (e) {
@@ -142,10 +178,11 @@ async function fetchStorageTree() {
 // 3.5 SHADOW BOARD MAP VIEW
 // ==========================================
 /**
- * Switches to the Shadow Board Map view (department -> toolbox -> drawer picker + the
- * selected drawer's photo/markers) and populates the Department select from the same
- * globalStorageDepts data fetchStorageTree() already fetched for the sidebar -- no second
- * request needed just to show this view.
+ * Switches to the Shadow Board Map view's empty state. Drawers are opened directly from the
+ * sidebar tree now (see loadDrawerMapFromTree()/fetchStorageTree()) -- this top-level nav item
+ * is just a landing point for when nothing's selected yet (e.g. navigating here before
+ * expanding into a specific drawer), replacing what used to be a Department/Toolbox/Drawer
+ * dropdown cascade.
  */
 function showDrawerMapView() {
     document.getElementById('view-global').style.display = 'none';
@@ -156,53 +193,37 @@ function showDrawerMapView() {
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     document.getElementById('nav-drawer-map').classList.add('active');
 
-    const deptSelect = document.getElementById('map-select-dept');
-    deptSelect.innerHTML = `<option value="">Select...</option>` +
-        globalStorageDepts.map(d => `<option value="${d.dept_id}">${d.name}</option>`).join('');
-}
-
-/** Department changed -- repopulate the Toolbox select, scoped to that department, and reset Drawer. */
-function onDrawerMapDeptChange() {
-    const deptId = document.getElementById('map-select-dept').value;
-    const boxSelect = document.getElementById('map-select-box');
-    const drawerSelect = document.getElementById('map-select-drawer');
-
-    drawerSelect.innerHTML = `<option value="">Select toolbox first...</option>`;
-    drawerSelect.disabled = true;
     hideDrawerMapDisplay();
-
-    if (!deptId) { boxSelect.innerHTML = `<option value="">Select department first...</option>`; boxSelect.disabled = true; return; }
-
-    const boxes = globalStorageBoxes.filter(b => b.dept_id == deptId);
-    boxSelect.innerHTML = `<option value="">Select...</option>` + boxes.map(b => `<option value="${b.box_id}">${b.name}</option>`).join('');
-    boxSelect.disabled = false;
 }
 
-/** Toolbox changed -- repopulate the Drawer select, scoped to that toolbox. */
-function onDrawerMapBoxChange() {
-    const boxId = document.getElementById('map-select-box').value;
-    const drawerSelect = document.getElementById('map-select-drawer');
-    hideDrawerMapDisplay();
+/**
+ * Sidebar-tree drawer click: switches to the Shadow Board Map view and renders that drawer
+ * directly (see renderDrawerMap()), marking the clicked tree row active instead of the
+ * top-level "Shadow Board Map" nav item -- consistent with how department/toolbox rows already
+ * mark themselves active via loadLocationView().
+ */
+function loadDrawerMapFromTree(drawerId, clickedEl) {
+    document.getElementById('view-global').style.display = 'none';
+    document.getElementById('view-location').style.display = 'none';
+    document.getElementById('view-cal-cockpit').style.display = 'none';
+    document.getElementById('view-drawer-map').style.display = 'block';
 
-    if (!boxId) { drawerSelect.innerHTML = `<option value="">Select toolbox first...</option>`; drawerSelect.disabled = true; return; }
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+    if (clickedEl) clickedEl.classList.add('active');
 
-    const drawers = globalStorageDrawers.filter(d => d.box_id == boxId);
-    drawerSelect.innerHTML = `<option value="">Select...</option>` + drawers.map(d => `<option value="${d.drawer_id}">${d.name}</option>`).join('');
-    drawerSelect.disabled = false;
-}
-
-/** Drawer changed -- render its map, or fall back to the empty-state card if none selected. */
-function onDrawerMapDrawerChange() {
-    const drawerId = document.getElementById('map-select-drawer').value;
-    if (!drawerId) { hideDrawerMapDisplay(); return; }
     renderDrawerMap(drawerId);
 }
 
 function hideDrawerMapDisplay() {
     document.getElementById('map-display-card').style.display = 'none';
     document.getElementById('map-empty-card').style.display = 'block';
-    document.getElementById('map-empty-message').textContent = 'Select a department, toolbox, and drawer above.';
+    document.getElementById('map-empty-message').textContent = 'Select a drawer from the sidebar tree to view its map.';
 }
+
+// Tool lookup by qr_code for the currently-rendered drawer map, populated fresh by
+// renderDrawerMap() each time -- lets showMarkerTooltip() pull full tool details for whichever
+// marker is hovered without re-fetching or threading the whole tool object through onmouseenter.
+let currentMapTools = {};
 
 /**
  * Renders the selected drawer's photo with a colored marker for every tool that has a saved
@@ -242,6 +263,9 @@ async function renderDrawerMap(drawerId) {
     document.getElementById('map-drawer-title').textContent = drawer.name;
     document.getElementById('map-drawer-img').src = drawer.photo_url;
 
+    currentMapTools = {};
+    tools.forEach(t => { currentMapTools[t.qr_code] = t; });
+
     const placed = tools.filter(t => t.position_x !== null && t.position_y !== null);
     const unplacedCount = tools.length - placed.length;
     const statusColor = (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)');
@@ -251,17 +275,53 @@ async function renderDrawerMap(drawerId) {
     // screen (see this function's own doc comment), where the original small, low-contrast dot
     // was hard to pick out against a busy photo. The glow is tinted to the marker's own status
     // color (not a generic shadow), reinforcing the color at a distance where the dot itself
-    // may be too small to read clearly.
+    // may be too small to read clearly. A custom tooltip (showMarkerTooltip(), styled and
+    // richer than the plain/slow native `title` attribute) replaces it on hover, showing the
+    // tool's full name/ID/status/cal-due-date.
     document.getElementById('map-drawer-markers').innerHTML = placed.map(t => `
-        <div title="${t.name} (${t.status})"
+        <div onmouseenter="showMarkerTooltip(event, '${t.qr_code}')" onmousemove="positionMarkerTooltip(event)" onmouseleave="hideMarkerTooltip()"
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
                     width:24px; height:24px; border-radius:50%; background:${statusColor(t.status)}; border:3px solid #fff;
-                    box-shadow:0 0 10px 3px ${statusColor(t.status)}, 0 2px 4px rgba(0,0,0,0.8);"></div>
+                    box-shadow:0 0 10px 3px ${statusColor(t.status)}, 0 2px 4px rgba(0,0,0,0.8); cursor:pointer;"></div>
     `).join('');
 
     document.getElementById('map-unplaced-note').textContent = unplacedCount > 0
         ? `${unplacedCount} tool(s) in this drawer don't have a marked position yet.`
         : (tools.length === 0 ? 'No tools assigned to this drawer.' : '');
+}
+
+/**
+ * Fills and shows #map-marker-tooltip for the hovered marker, looked up by qr_code from
+ * currentMapTools (populated by renderDrawerMap() for whichever drawer is currently shown).
+ * Positioned at the cursor (see positionMarkerTooltip()), not the marker itself, since markers
+ * can sit anywhere on a large photo and a fixed offset from the marker could run off-screen.
+ */
+function showMarkerTooltip(event, qrCode) {
+    const t = currentMapTools[qrCode];
+    const tooltip = document.getElementById('map-marker-tooltip');
+    if (!t || !tooltip) return;
+
+    const statusColor = t.status === 'In' ? 'var(--green)' : (t.status === 'Out' ? 'var(--accent)' : 'var(--red)');
+    tooltip.innerHTML = `
+        <div style="font-weight:bold; margin-bottom:2px;">${t.name}</div>
+        <div style="font-family:monospace; font-size:11px; color:var(--muted); margin-bottom:5px;">${t.qr_code}</div>
+        <div style="font-size:12px; display:flex; align-items:center;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor};margin-right:6px;flex-shrink:0;"></span>${t.status}</div>
+        ${t.is_calibrated && t.cal_due_date ? `<div style="font-size:11px; color:var(--muted); margin-top:4px;">Cal due: ${t.cal_due_date.split('T')[0]}</div>` : ''}
+    `;
+    tooltip.style.display = 'block';
+    positionMarkerTooltip(event);
+}
+
+/** Moves #map-marker-tooltip to follow the cursor while a marker is hovered -- a no-op if it's not currently shown. */
+function positionMarkerTooltip(event) {
+    const tooltip = document.getElementById('map-marker-tooltip');
+    if (!tooltip || tooltip.style.display !== 'block') return;
+    tooltip.style.left = (event.clientX + 16) + 'px';
+    tooltip.style.top = (event.clientY + 16) + 'px';
+}
+
+function hideMarkerTooltip() {
+    document.getElementById('map-marker-tooltip').style.display = 'none';
 }
 
 // ==========================================

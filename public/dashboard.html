@@ -191,29 +191,14 @@
              colored by its current live status -- what's missing is visible at a glance from
              any browser, not just standing at the box. Read-only here; markers are placed
              from the drawer's entity modal in the admin panel (renderPositionMap() in
-             admin.js). Department/Toolbox/Drawer selects cascade via onDrawerMapXChange(),
-             populated from the same /api/storage data as the sidebar tree. -->
+             admin.js). Opened directly from a drawer row in the sidebar tree
+             (loadDrawerMapFromTree() in dashboard.js) rather than a Department/Toolbox/Drawer
+             dropdown cascade -- every drawer already has its own row there, three levels deep,
+             each with an at-a-glance flagged-tool-count badge. -->
         <div id="view-drawer-map" style="display: none;">
             <div style="margin-bottom: 20px;">
                 <h2 style="margin-bottom: 5px;">Shadow Board Map</h2>
-                <div style="color: var(--muted);">Pick a drawer to see its tools' positions and current status.</div>
-            </div>
-
-            <div class="card" style="margin-bottom: 20px;">
-                <div style="display:flex; gap:12px; flex-wrap:wrap;">
-                    <div class="form-group" style="margin:0; flex:1; min-width:160px;">
-                        <label class="form-label">Department</label>
-                        <select class="form-select" id="map-select-dept" onchange="onDrawerMapDeptChange()"><option value="">Select...</option></select>
-                    </div>
-                    <div class="form-group" style="margin:0; flex:1; min-width:160px;">
-                        <label class="form-label">Toolbox</label>
-                        <select class="form-select" id="map-select-box" onchange="onDrawerMapBoxChange()" disabled><option value="">Select department first...</option></select>
-                    </div>
-                    <div class="form-group" style="margin:0; flex:1; min-width:160px;">
-                        <label class="form-label">Drawer</label>
-                        <select class="form-select" id="map-select-drawer" onchange="onDrawerMapDrawerChange()" disabled><option value="">Select toolbox first...</option></select>
-                    </div>
-                </div>
+                <div style="color: var(--muted);">Pick a drawer from the sidebar tree to see its tools' positions and current status.</div>
             </div>
 
             <div class="card" id="map-display-card" style="display:none;">
@@ -231,8 +216,14 @@
             </div>
 
             <div class="card" id="map-empty-card">
-                <div style="text-align:center; color:var(--muted); padding:20px 0;" id="map-empty-message">Select a department, toolbox, and drawer above.</div>
+                <div style="text-align:center; color:var(--muted); padding:20px 0;" id="map-empty-message">Select a drawer from the sidebar tree to view its map.</div>
             </div>
+
+            <!-- Custom hover tooltip for a marker (see showMarkerTooltip() in dashboard.js) --
+                 position:fixed + cursor-tracked, filled/shown/hidden entirely from JS. Replaces
+                 the plain native `title` attribute tooltip with a richer, faster-appearing,
+                 styled one showing name/ID/status/cal-due-date. -->
+            <div id="map-marker-tooltip" style="display:none; position:fixed; z-index:10000; pointer-events:none; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; box-shadow:0 4px 16px rgba(0,0,0,0.5); max-width:220px;"></div>
         </div>
 
         <!-- Calibration Cockpit: an isolated, read-only view of calibrated tools only,

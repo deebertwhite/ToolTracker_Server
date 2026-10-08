@@ -164,6 +164,9 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
 .nav-item.active { border-left: 4px solid var(--accent); background: rgba(203,96,21,0.1); font-weight: bold; }
 .nav-dept { font-weight: 600; color: var(--text); }
 .nav-box { padding-left: 40px; color: var(--muted); font-size: 13px; }
+.nav-drawer { padding-left: 60px; color: var(--muted); font-size: 12px; }
+/* Flagged (Missing/Broken/Worn) tool count badge on a sidebar tree row -- see fetchStorageTree() in dashboard.js. Omitted entirely (not rendered at 0) so a clean department/toolbox/drawer shows no badge at all. */
+.nav-flag-badge { display: inline-block; min-width: 16px; padding: 1px 6px; border-radius: 9px; background: var(--red); color: #fff; font-size: 10px; font-weight: bold; text-align: center; margin-left: 6px; }
 
 /* ==========================================
    8. MODULE SPECIFIC: KIOSK UI
