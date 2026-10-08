@@ -614,7 +614,7 @@ const checkToolStatusTransition = (currentStatus, requestedStatus) => {
  *   serial unchanged never collides with itself
  * @returns {Promise<{tool_id: number, qr_code: string, name: string, status: string}|null>}
  */
-async function findDuplicateSerial(client, serialNumber, excludeToolId) {
+async function findDuplicateSerial(client, serialNumber, excludeToolId, excludeSubId) {
     if (!serialNumber || !serialNumber.trim()) return null;
     const result = await client.query(
         `SELECT tool_id, qr_code, name, status FROM tools
@@ -622,12 +622,29 @@ async function findDuplicateSerial(client, serialNumber, excludeToolId) {
          LIMIT 1`,
         [serialNumber, excludeToolId || null]
     );
-    return result.rows[0] || null;
+    if (result.rows[0]) return result.rows[0];
+
+    // Also check tool_sub_assemblies (migrations/018) -- a serial number identifies one
+    // physical object whether it's tracked as a top-level tool or a sub-assembly. This half
+    // is application-level only (Postgres can't enforce a UNIQUE constraint across two
+    // tables); migrations/018's own partial unique index covers sub-vs-sub duplicates.
+    const subResult = await client.query(
+        `SELECT sa.sub_id, sa.name AS sub_name, t.name AS tool_name FROM tool_sub_assemblies sa
+         JOIN tools t ON t.tool_id = sa.tool_id
+         WHERE LOWER(TRIM(sa.serial_number)) = LOWER(TRIM($1)) AND ($2::int IS NULL OR sa.sub_id != $2)
+         LIMIT 1`,
+        [serialNumber, excludeSubId || null]
+    );
+    return subResult.rows[0] || null;
 }
 
-/** Friendly message for findDuplicateSerial()'s result -- names the existing tool and, if
- *  it's away for calibration, points at receiving it back instead of re-adding it. */
+/** Friendly message for findDuplicateSerial()'s result -- names the existing tool (or
+ *  sub-assembly + its parent tool) and, if a tool is away for calibration, points at
+ *  receiving it back instead of re-adding it. */
 function duplicateSerialErrorMessage(existing) {
+    if (existing.sub_id) {
+        return `Serial number is already registered to sub-assembly "${existing.sub_name}" on "${existing.tool_name}".`;
+    }
     const awayForCal = existing.status === 'Pending Transfer' || existing.status === 'In Calibration';
     const hint = awayForCal ? ' It is currently out for calibration -- receive it back instead of adding a new one.' : '';
     return `Serial number is already registered to "${existing.name}" (${existing.qr_code}).${hint}`;
@@ -867,12 +884,22 @@ app.get('/api/tools', async (req, res) => {
                    EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
                    EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation,
                    tg.name AS group_name,
-                   t.cal_due_date::text AS cal_due_date, t.last_cal_date::text AS last_cal_date
+                   t.cal_due_date::text AS cal_due_date, t.last_cal_date::text AS last_cal_date,
+                   subs.sub_assemblies
             FROM tools t
             LEFT JOIN tool_groups tg ON t.group_id = tg.group_id
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
             LEFT JOIN departments d ON b.dept_id = d.dept_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(json_agg(json_build_object(
+                    'sub_id', sa.sub_id, 'name', sa.name, 'part_number', sa.part_number,
+                    'serial_number', sa.serial_number, 'is_calibrated', sa.is_calibrated,
+                    'last_cal_date', sa.last_cal_date::text, 'cal_due_date', sa.cal_due_date::text,
+                    'notes', sa.notes
+                ) ORDER BY sa.created_at ASC) FILTER (WHERE sa.sub_id IS NOT NULL), '[]') AS sub_assemblies
+                FROM tool_sub_assemblies sa WHERE sa.tool_id = t.tool_id
+            ) subs ON true
             ORDER BY t.name ASC;
         `;
         const result = await pool.query(query); 
@@ -1987,6 +2014,74 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
     }
 });
 
+// ==========================================
+// 5.1 TOOL SUB-ASSEMBLIES (migrations/018_tool_sub_assemblies.sql)
+// ==========================================
+// A sub-assembly (e.g. the specific die on a crimper) is never independently scanned/checked
+// out -- it's an attached record on its parent tool's card with its own part number and its
+// own independent calibration status, which gates the PARENT tool's checkout (see the A1
+// block in POST /api/transactions). requireRole(2) matches PUT /api/tools/:id's threshold
+// (tool_rep+), since this is just another property of a specific tool, not a separate
+// cross-cutting admin construct like Tool Groups (requireRole(3)).
+
+app.post('/api/tools/:id/sub-assemblies', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { name, part_number, serial_number, is_calibrated, last_cal_date, cal_due_date, notes } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'A sub-assembly name is required.' });
+    if (is_calibrated && !cal_due_date) return res.status(400).json({ error: 'Calibration Due Date is required.' });
+
+    try {
+        const toolRes = await pool.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
+        if (toolRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+
+        const duplicateSerial = await findDuplicateSerial(pool, serial_number);
+        if (duplicateSerial) return res.status(409).json({ error: duplicateSerialErrorMessage(duplicateSerial) });
+
+        const result = await pool.query(
+            `INSERT INTO tool_sub_assemblies (tool_id, name, part_number, serial_number, is_calibrated, last_cal_date, cal_due_date, notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING sub_id`,
+            [req.params.id, name.trim(), part_number || null, serial_number || null, is_calibrated || false, last_cal_date || null, cal_due_date || null, notes || null]
+        );
+        res.json({ success: true, sub_id: result.rows[0].sub_id });
+    } catch (err) {
+        console.error('Sub-Assembly Create Error:', err);
+        res.status(500).json({ error: 'Failed to create sub-assembly.' });
+    }
+});
+
+app.put('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { name, part_number, serial_number, is_calibrated, last_cal_date, cal_due_date, notes } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'A sub-assembly name is required.' });
+    if (is_calibrated && !cal_due_date) return res.status(400).json({ error: 'Calibration Due Date is required.' });
+
+    try {
+        const duplicateSerial = await findDuplicateSerial(pool, serial_number, undefined, req.params.sub_id);
+        if (duplicateSerial) return res.status(409).json({ error: duplicateSerialErrorMessage(duplicateSerial) });
+
+        const result = await pool.query(
+            `UPDATE tool_sub_assemblies SET name = $1, part_number = $2, serial_number = $3,
+                 is_calibrated = $4, last_cal_date = $5, cal_due_date = $6, notes = $7
+             WHERE sub_id = $8 RETURNING sub_id`,
+            [name.trim(), part_number || null, serial_number || null, is_calibrated || false, last_cal_date || null, cal_due_date || null, notes || null, req.params.sub_id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Sub-assembly not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Sub-Assembly Update Error:', err);
+        res.status(500).json({ error: 'Failed to update sub-assembly.' });
+    }
+});
+
+app.delete('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query('DELETE FROM tool_sub_assemblies WHERE sub_id = $1 RETURNING sub_id', [req.params.sub_id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Sub-assembly not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Sub-Assembly Delete Error:', err);
+        res.status(500).json({ error: 'Failed to delete sub-assembly.' });
+    }
+});
+
 // Sets (or clears) where a tool sits on its drawer's photo, for the visual shadow-board map
 // (see migrations/009_tool_positions.sql). Deliberately separate from PUT /api/tools/:id --
 // dragging a marker on a photo is a distinct, frequent, low-stakes action that shouldn't
@@ -2674,6 +2769,29 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
                     if (!tool.has_cal_record) {
                         await client.query('ROLLBACK');
                         return res.status(403).json({ error: `Checkout Blocked: ${tool.name} has no calibration certificate on file!`, code: 'CAL_NO_CERTIFICATE' });
+                    }
+                }
+
+                // A1. SUB-ASSEMBLY CALIBRATION HARD-STOP (migrations/018) -- any sub-assembly
+                // that itself requires calibration gates the PARENT tool's checkout exactly
+                // like the parent's own calibration would (the kit as a whole must be in-cal
+                // to be issued). Deliberately a top-level sibling of the is_calibrated block
+                // above, NOT nested inside it -- a non-calibrated parent with a calibrated-
+                // but-expired sub-assembly must still block. Expiry is checked JS-side
+                // (matching the parent check above), not via SQL "<= NOW()", so it can't drift
+                // from the parent gate's own clock/timezone semantics.
+                const subsRes = await client.query(
+                    'SELECT name, cal_due_date FROM tool_sub_assemblies WHERE tool_id = $1 AND is_calibrated = true',
+                    [tool.tool_id]
+                );
+                for (const sub of subsRes.rows) {
+                    if (!sub.cal_due_date) {
+                        await client.query('ROLLBACK');
+                        return res.status(403).json({ error: `Checkout Blocked: ${tool.name}'s sub-assembly "${sub.name}" has no calibration due date on file!`, code: 'SUB_CAL_NO_DUE_DATE' });
+                    }
+                    if (new Date(sub.cal_due_date) <= new Date()) {
+                        await client.query('ROLLBACK');
+                        return res.status(403).json({ error: `Checkout Blocked: ${tool.name}'s sub-assembly "${sub.name}" calibration is expired!`, code: 'SUB_CAL_EXPIRED' });
                     }
                 }
 
@@ -3904,9 +4022,19 @@ app.post('/api/trace-investigations/:id/reopen', requireFetchHeader, requireRole
 // can't accidentally end up nested inside the calibrated-only clause again the way an earlier
 // version of this did -- that version reported a non-calibrated tool under investigation as
 // "OK" even though checkout would actually reject it.
+// Whether a tool has a sub-assembly (migrations/018) that itself needs calibration and is out
+// of cal -- shared between the roll-up below and the per-member detail list, which also names
+// the specific blocking sub-assembly. CURRENT_DATE (not NOW()) compares DATE to DATE with no
+// implicit timezone cast, matching the real checkout gate's own JS-side "today" comparison --
+// see the fix to GROUP_MEMBER_BLOCKED_SQL's own expiry check just below for why that matters.
+const SUB_ASSEMBLY_BLOCKED_EXISTS_SQL = `EXISTS (
+    SELECT 1 FROM tool_sub_assemblies sa WHERE sa.tool_id = t.tool_id
+    AND sa.is_calibrated AND (sa.cal_due_date IS NULL OR sa.cal_due_date <= CURRENT_DATE)
+)`;
 const GROUP_MEMBER_BLOCKED_SQL = `(
     calc.has_open_investigation
-    OR (t.is_calibrated AND (t.cal_due_date IS NULL OR t.cal_due_date <= NOW() OR NOT calc.has_cal_record))
+    OR (t.is_calibrated AND (t.cal_due_date IS NULL OR t.cal_due_date <= CURRENT_DATE OR NOT calc.has_cal_record))
+    OR ${SUB_ASSEMBLY_BLOCKED_EXISTS_SQL}
 )`;
 // The lateral subquery itself is identical either way; only the join keyword differs (a LEFT
 // JOIN is needed wherever the tools side can itself be a LEFT JOIN producing NULL rows for an
@@ -3958,6 +4086,9 @@ app.get('/api/tool-groups/:id', async (req, res) => {
             pool.query(
                 `SELECT t.tool_id, t.qr_code, t.name, t.status, t.is_calibrated, t.cal_due_date,
                         calc.has_cal_record, calc.has_open_investigation,
+                        (SELECT sa.name FROM tool_sub_assemblies sa WHERE sa.tool_id = t.tool_id
+                         AND sa.is_calibrated AND (sa.cal_due_date IS NULL OR sa.cal_due_date <= CURRENT_DATE)
+                         ORDER BY sa.created_at ASC LIMIT 1) AS blocked_sub_name,
                         ${GROUP_MEMBER_BLOCKED_SQL} AS is_blocked
                  FROM tools t
                  ${GROUP_MEMBER_CALC_INNER_LATERAL_SQL}

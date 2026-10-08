@@ -8,7 +8,6 @@
 let globalTools = [];
 let globalOutTools = [];
 let globalFlaggedTools = [];
-let globalCalTools = [];
 
 // Raw /api/storage rows, stashed here by fetchStorageTree() so the Shadow Board Map's
 // Department -> Toolbox -> Drawer selects can cascade without a second fetch.
@@ -368,33 +367,63 @@ async function loadCalCockpit() {
 }
 
 /**
+ * Mirrors the real checkout gate's full hard-stop logic (POST /api/transactions in server.js)
+ * client-side, so every dashboard surface that claims "this tool is/isn't checkout-eligible"
+ * agrees with the actual gate instead of each re-deriving its own plausible-looking subset --
+ * this codebase has shipped that exact drift bug twice before (see memory
+ * feedback_checkout_gate_drift). The one shared place for this logic; every surface below
+ * (Cockpit bands, the global/location calibration tables, the compliance donut, the tool
+ * detail modal) calls this instead of re-checking is_calibrated/cal_due_date/has_cal_record
+ * on its own. Order matters: open investigation applies to every tool regardless of
+ * calibration; a blocked sub-assembly (migrations/018) likewise applies regardless of the
+ * parent's own is_calibrated flag; only then do the parent's own calibration conditions apply,
+ * and only when it IS calibrated.
+ */
+function isToolBlocked(tool) {
+    if (tool.has_open_investigation) return { blocked: true, reason: 'Investigation open' };
+    const todayMidnight = new Date(new Date().toDateString());
+    const blockedSub = (tool.sub_assemblies || []).find(sa => sa.is_calibrated && (!sa.cal_due_date || new Date(sa.cal_due_date) <= todayMidnight));
+    if (blockedSub) return { blocked: true, reason: `Sub-assembly "${blockedSub.name}" needs cal` };
+    if (!tool.is_calibrated) return { blocked: false, reason: null };
+    if (!tool.cal_due_date) return { blocked: true, reason: 'No due date' };
+    if (!tool.has_cal_record) return { blocked: true, reason: 'No certificate' };
+    if (new Date(tool.cal_due_date) <= todayMidnight) return { blocked: true, reason: 'Cal expired' };
+    return { blocked: false, reason: null };
+}
+
+/** Whether a tool has anything (itself or a sub-assembly) that could ever need calibration attention -- used to decide which tools belong in a "needs attention" list at all, before isToolBlocked()/nextCalDueDate() look at their actual standing. */
+function hasCalExposure(tool) {
+    return tool.is_calibrated || (tool.sub_assemblies || []).some(sa => sa.is_calibrated);
+}
+
+/** Earliest upcoming calibration due date across a tool and its sub-assemblies (only those flagged is_calibrated), or null if none have one. Lets the global/location "needs attention" surfaces give advance warning on a sub-assembly's due date too, not just the parent's own. */
+function nextCalDueDate(tool) {
+    const dates = [];
+    if (tool.is_calibrated && tool.cal_due_date) dates.push(new Date(tool.cal_due_date));
+    (tool.sub_assemblies || []).forEach(sa => { if (sa.is_calibrated && sa.cal_due_date) dates.push(new Date(sa.cal_due_date)); });
+    return dates.length ? new Date(Math.min(...dates)) : null;
+}
+
+/**
  * Computes a tool's status band -- the exact same thresholds the reference prototype's own
- * regime logic uses (>60 days green, 30-60 yellow, 0-29 red, missing due date/certificate or
- * overdue = locked), extended with this app's own has_open_investigation signal (a concept
- * the reference prototype doesn't have) folded into "locked": an investigation-blocked tool
- * genuinely can't be checked out right now (see the CAL_INVESTIGATION_OPEN hard-stop in
- * POST /api/transactions), so it belongs in the same band as any other lock reason rather
- * than being invisible here. Returns null for a non-calibrated tool (no band applies).
+ * regime logic uses (>60 days green, 30-60 yellow, 0-29 red, anything isToolBlocked() flags =
+ * locked). Returns null for a non-calibrated tool (no band applies).
  *
- * Day count is calendar-day arithmetic anchored at LOCAL midnight today (matching the
- * existing calIsExpired convention in admin.js -- new Date(new Date().toDateString())),
- * not a raw millisecond diff against the current instant -- GET /api/tools now returns
- * cal_due_date as a plain 'YYYY-MM-DD' string (see server.js, cast to ::text) rather than the
- * ambiguous server-timezone-dependent Date serialization it used to, but even with a clean
- * date string, comparing against "right now" would still make the label tick down mid-day
- * and, worse, occasionally misclassify a tool by one day for hours around each boundary.
+ * Day count is calendar-day arithmetic anchored at LOCAL midnight today (matching
+ * isToolBlocked()'s own convention), not a raw millisecond diff against the current instant --
+ * GET /api/tools now returns cal_due_date as a plain 'YYYY-MM-DD' string (see server.js, cast
+ * to ::text) rather than the ambiguous server-timezone-dependent Date serialization it used
+ * to, but even with a clean date string, comparing against "right now" would still make the
+ * label tick down mid-day and, worse, occasionally misclassify a tool by one day for hours
+ * around each boundary.
  */
 function cockpitDteBand(tool) {
     if (!tool.is_calibrated) return null;
-    const lockedReason = tool.has_open_investigation ? 'Investigation open'
-        : !tool.cal_due_date ? 'No due date'
-        : !tool.has_cal_record ? 'No certificate'
-        : null;
-    if (lockedReason) return { band: 'locked', label: 'LOCKED', reason: lockedReason };
+    const status = isToolBlocked(tool);
+    if (status.blocked) return { band: 'locked', label: 'LOCKED', reason: status.reason };
 
     const todayMidnight = new Date(new Date().toDateString());
     const days = Math.round((new Date(tool.cal_due_date) - todayMidnight) / 86400000);
-    if (days < 0) return { band: 'locked', label: 'LOCKED', reason: 'Cal expired' };
     if (days <= 29) return { band: 'red', label: `${days}d`, reason: null };
     if (days <= 60) return { band: 'yellow', label: `${days}d`, reason: null };
     return { band: 'green', label: `${days}d`, reason: null };
@@ -504,22 +533,30 @@ async function loadGlobalDashboard() {
         globalTools = toolsData.tools || [];
         globalOutTools = data.out_tools || [];
         globalFlaggedTools = data.flagged_tools || [];
-        globalCalTools = data.cal_tools || [];
         const outTools = globalOutTools;
         const flaggedTools = globalFlaggedTools;
-        const calTools = globalCalTools;
+        // Derived from globalTools (GET /api/tools), not /api/dashboard's own cal_tools --
+        // that server-side query only checked is_calibrated+cal_due_date, silently missing
+        // locked-for-other-reasons tools (no certificate, open investigation, a blocked
+        // sub-assembly). isToolBlocked()/hasCalExposure() are the shared source of truth for
+        // that. hasCalExposure() (not a bare is_calibrated filter) so a non-calibrated parent
+        // with a calibrated sub-assembly -- the headline sub-assembly use case -- still shows
+        // up here instead of only being discoverable by opening its card or failing checkout.
+        const calTools = globalTools.filter(hasCalExposure);
         const stats = data.stats || { total_tools: 0, total_out: 0, total_flagged: 0 };
 
-        // 3. Calculate upcoming calibrations
+        // 3. Calculate upcoming calibrations -- a locked tool (no due date, no certificate,
+        // open investigation, or a blocked sub-assembly) counts as needing attention too, not
+        // just one that's within the 30-day window with a clean due date.
         let calAlertCount = 0;
         const today = new Date();
         const thirtyDaysFromNow = new Date(today.getTime() + (30 * 24 * 60 * 60 * 1000));
-        
+
         globalTools.forEach(t => {
-            if (t.is_calibrated && t.cal_due_date) {
-                const due = new Date(t.cal_due_date);
-                if (due <= thirtyDaysFromNow) calAlertCount++;
-            }
+            if (!hasCalExposure(t)) return;
+            if (isToolBlocked(t).blocked) { calAlertCount++; return; }
+            const next = nextCalDueDate(t);
+            if (next && next <= thirtyDaysFromNow) calAlertCount++;
         });
 
         // 4. Populate KPI Cards
@@ -575,26 +612,30 @@ async function loadGlobalDashboard() {
         const calBody = document.getElementById('dash-cal-body');
         if (!calBody) return; 
         
+        // "Needs attention" = either locked right now (per isToolBlocked -- no due date, no
+        // certificate, open investigation, or a blocked sub-assembly) or due within 30 days.
         const expiringCals = calTools.filter(t => {
-            if (!t.cal_due_date) return false;
-            return new Date(t.cal_due_date) <= thirtyDaysFromNow;
+            if (isToolBlocked(t).blocked) return true;
+            const next = nextCalDueDate(t);
+            return next && next <= thirtyDaysFromNow;
         });
 
-        if (expiringCals.length === 0) { 
-            calBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--muted);">All calibrations are up to date.</td></tr>`; 
+        if (expiringCals.length === 0) {
+            calBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--muted);">All calibrations are up to date.</td></tr>`;
         } else {
             calBody.innerHTML = expiringCals.map(t => {
-                const due = new Date(t.cal_due_date);
-                let badgeColor = due <= today ? 'var(--red)' : 'var(--orange)';
-                let displayStatus = due <= today ? 'OVERDUE' : 'DUE SOON';
-                let formattedDate = due.toISOString().split('T')[0];
+                const status = isToolBlocked(t);
+                const due = nextCalDueDate(t);
+                const badgeColor = status.blocked ? 'var(--red)' : 'var(--orange)';
+                const displayStatus = status.blocked ? 'LOCKED' : 'DUE SOON';
+                const formattedDate = due ? due.toISOString().split('T')[0] : '--';
 
                 return `<tr style="cursor:pointer;" onclick="openToolDetailModal('${t.qr_code}')">
                     <td style="font-family: monospace;">${t.qr_code}</td>
-                    <td><strong>${t.tool_name}</strong></td>
-                    <td><span style="background: ${badgeColor}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">${displayStatus}</span></td>
+                    <td><strong>${t.name}</strong></td>
+                    <td><span title="${status.reason || ''}" style="background: ${badgeColor}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">${displayStatus}</span></td>
                     <td style="font-size:12px; font-weight:bold; color:${badgeColor};">${formattedDate}</td>
-                    <td>${t.dept_name || '--'} / ${t.box_name || '--'}</td>
+                    <td>${t.department_name || '--'} / ${t.toolbox_name || '--'}</td>
                 </tr>`;
             }).join('');
         }
@@ -734,10 +775,14 @@ function renderCalComplianceChart() {
     const thirtyDaysFromNow = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
     let compliant = 0, dueSoon = 0, overdue = 0;
     globalTools.forEach(t => {
-        if (!t.is_calibrated || !t.cal_due_date) return;
+        if (!t.is_calibrated) return;
+        // Anything isToolBlocked() flags (no due date, no certificate, open investigation, a
+        // blocked sub-assembly, or an actually-expired due date) rolls into "Overdue" -- it's
+        // already hard-blocked at checkout, the same severity as a plain expired date, not a
+        // silently-uncounted gap.
+        if (isToolBlocked(t).blocked) { overdue++; return; }
         const due = new Date(t.cal_due_date);
-        if (due < today) overdue++;
-        else if (due <= thirtyDaysFromNow) dueSoon++;
+        if (due <= thirtyDaysFromNow) dueSoon++;
         else compliant++;
     });
     renderDonutChart('chart-cal-compliance', [
@@ -849,8 +894,8 @@ async function loadActivityTrendChart() {
  * Renders the detail view for a single department or toolbox. Mirrors
  * loadGlobalDashboard()'s structure exactly (4 KPI cards + 3 tables), but
  * scopes each of the module-level caches (globalOutTools, globalFlaggedTools,
- * globalCalTools, globalTools) to the selected location instead of re-fetching
- * from the server. Called via onclick from the nav items rendered in
+ * globalTools) to the selected location instead of re-fetching from the
+ * server. Called via onclick from the nav items rendered in
  * fetchStorageTree() (or any static nav item wired to it).
  */
 function loadLocationView(type, filterValue, title, subtitle) {
@@ -865,25 +910,27 @@ function loadLocationView(type, filterValue, title, subtitle) {
     if (event && event.currentTarget) event.currentTarget.classList.add('active');
 
     // 1. Scope the shared caches to this location
-    let scopedOut = [], scopedFlagged = [], scopedCal = [], scopedTotal = [];
+    let scopedOut = [], scopedFlagged = [], scopedTotal = [];
     if (type === 'dept') {
         scopedOut = globalOutTools.filter(t => t.dept_name === title);
         scopedFlagged = globalFlaggedTools.filter(t => t.dept_name === title);
-        scopedCal = globalCalTools.filter(t => t.dept_name === title);
         scopedTotal = globalTools.filter(t => t.department_name === title && t.status !== 'Retired');
     } else if (type === 'box') {
         scopedOut = globalOutTools.filter(t => t.box_name === title);
         scopedFlagged = globalFlaggedTools.filter(t => t.box_name === title);
-        scopedCal = globalCalTools.filter(t => t.box_name === title);
         scopedTotal = globalTools.filter(t => t.toolbox_name === title && t.status !== 'Retired');
     }
+    // Derived from scopedTotal (GET /api/tools), not /api/dashboard's cal_tools -- same
+    // isToolBlocked() fix as loadGlobalDashboard(), see its comment for why.
+    const scopedCal = scopedTotal.filter(hasCalExposure);
 
-    // 2. Calculate upcoming calibrations (same due<=+30d rule as loadGlobalDashboard())
+    // 2. Calculate upcoming calibrations (same rule as loadGlobalDashboard())
     const today = new Date();
     const thirtyDaysFromNow = new Date(today.getTime() + (30 * 24 * 60 * 60 * 1000));
     const expiringCals = scopedCal.filter(t => {
-        if (!t.cal_due_date) return false;
-        return new Date(t.cal_due_date) <= thirtyDaysFromNow;
+        if (isToolBlocked(t).blocked) return true;
+        const next = nextCalDueDate(t);
+        return next && next <= thirtyDaysFromNow;
     });
 
     // 3. Populate scoped KPI cards
@@ -932,17 +979,18 @@ function loadLocationView(type, filterValue, title, subtitle) {
         calBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--muted);">All calibrations are up to date.</td></tr>`;
     } else {
         calBody.innerHTML = expiringCals.map(t => {
-            const due = new Date(t.cal_due_date);
-            let badgeColor = due <= today ? 'var(--red)' : 'var(--orange)';
-            let displayStatus = due <= today ? 'OVERDUE' : 'DUE SOON';
-            let formattedDate = due.toISOString().split('T')[0];
+            const status = isToolBlocked(t);
+            const due = nextCalDueDate(t);
+            const badgeColor = status.blocked ? 'var(--red)' : 'var(--orange)';
+            const displayStatus = status.blocked ? 'LOCKED' : 'DUE SOON';
+            const formattedDate = due ? due.toISOString().split('T')[0] : '--';
 
             return `<tr style="cursor:pointer;" onclick="openToolDetailModal('${t.qr_code}')">
                 <td style="font-family: monospace;">${t.qr_code}</td>
-                <td><strong>${t.tool_name}</strong></td>
-                <td><span style="background: ${badgeColor}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">${displayStatus}</span></td>
+                <td><strong>${t.name}</strong></td>
+                <td><span title="${status.reason || ''}" style="background: ${badgeColor}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">${displayStatus}</span></td>
                 <td style="font-size:12px; font-weight:bold; color:${badgeColor};">${formattedDate}</td>
-                <td>${t.dept_name || '--'} / ${t.box_name || '--'}</td>
+                <td>${t.department_name || '--'} / ${t.toolbox_name || '--'}</td>
             </tr>`;
         }).join('');
     }
@@ -996,18 +1044,21 @@ function openToolDetailModal(qrCode) {
         const lastCal = entity.last_cal_date ? entity.last_cal_date.split('T')[0] : '--';
         const dueCal = entity.cal_due_date ? entity.cal_due_date.split('T')[0] : null;
 
+        // isToolBlocked() takes priority over a plain date comparison -- a tool can be LOCKED
+        // (no certificate, open investigation, blocked sub-assembly) even with a due date that
+        // looks fine on its own, and a missing due date is now flagged rather than just
+        // silently showing no badge at all.
+        const status = isToolBlocked(entity);
         let calBadge = '';
-        if (dueCal) {
+        if (status.blocked) {
+            calBadge = `<span title="${status.reason}" style="background: var(--red); color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">LOCKED</span>`;
+        } else if (dueCal) {
             const due = new Date(entity.cal_due_date);
             const today = new Date();
             const thirtyDaysFromNow = new Date(today.getTime() + (30 * 24 * 60 * 60 * 1000));
-            if (due <= today) {
-                calBadge = `<span style="background: var(--red); color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">OVERDUE</span>`;
-            } else if (due <= thirtyDaysFromNow) {
-                calBadge = `<span style="background: var(--orange); color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">DUE SOON</span>`;
-            } else {
-                calBadge = `<span style="background: var(--green); color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">CURRENT</span>`;
-            }
+            calBadge = due <= thirtyDaysFromNow
+                ? `<span style="background: var(--orange); color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">DUE SOON</span>`
+                : `<span style="background: var(--green); color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold;">CURRENT</span>`;
         }
 
         bodyHtml += `
@@ -1018,6 +1069,34 @@ function openToolDetailModal(qrCode) {
                     <div><div style="font-size:11px;color:var(--muted);">Due</div><div style="font-size:13px;font-weight:bold;">${dueCal || 'Unknown'}</div></div>
                     ${calBadge}
                 </div>
+            </div>
+        `;
+    }
+
+    // Sub-assemblies (migrations/018) -- read-only here; add/edit/delete lives in the admin
+    // panel's tool entity modal. Each row's own calibration standing (independent of the
+    // parent's) is shown with the same LOCKED/CURRENT vocabulary as the block above.
+    if (entity.sub_assemblies && entity.sub_assemblies.length > 0) {
+        const today = new Date(new Date().toDateString());
+        const subRows = entity.sub_assemblies.map(sa => {
+            let pill;
+            if (!sa.is_calibrated) {
+                pill = `<span style="color:var(--muted); font-style:italic; font-size:11px;">Not calibrated</span>`;
+            } else if (!sa.cal_due_date || new Date(sa.cal_due_date) <= today) {
+                pill = `<span style="background: var(--red); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">LOCKED</span>`;
+            } else {
+                pill = `<span style="background: var(--green); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">${sa.cal_due_date.split('T')[0]}</span>`;
+            }
+            const partLine = sa.part_number ? `<span style="color:var(--muted); font-size:11px;"> (${sa.part_number})</span>` : '';
+            return `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 0;">
+                <span style="font-size:13px;">${sa.name}${partLine}</span>
+                ${pill}
+            </div>`;
+        }).join('');
+        bodyHtml += `
+            <div style="margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div style="font-size:11px;color:var(--muted);text-transform:uppercase; margin-bottom:6px;">Sub-Assemblies</div>
+                ${subRows}
             </div>
         `;
     }

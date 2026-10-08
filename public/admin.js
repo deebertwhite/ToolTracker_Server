@@ -13,6 +13,11 @@ let globalDrawersCache = [];
 let globalToolsCache = [];
 let globalUsersCache = [];
 let globalToolGroupsCache = [];
+// Sub-assemblies (migrations/018) of whichever tool's entity modal is currently open --
+// populated by openEntityModal() from entity.sub_assemblies (already embedded on every
+// GET /api/tools row), so openEditSubAssemblyForm()/deleteSubAssembly() can look a row up by
+// sub_id without inlining its data into an onclick attribute.
+let currentEntitySubAssemblies = [];
 
 // Which dept-content-/box-content-/drawer-content- nodes of the Master Storage & Asset Tree
 // are currently expanded, keyed by that content div's id -- see toggleTreeVisibility() and
@@ -1084,8 +1089,16 @@ async function renderEditableInfraTree() {
                                 // checkout hard-stop's own rule (see PUT /api/transactions), so
                                 // what blocks a checkout is visible here before anyone scans it.
                                 const calIsExpired = tool.cal_due_date && new Date(tool.cal_due_date) <= new Date(new Date().toDateString());
+                                // A sub-assembly (migrations/018) that itself needs calibration and is out
+                                // of cal blocks the PARENT's checkout regardless of the parent's own
+                                // is_calibrated flag -- checked before that flag below, same ordering
+                                // reason open-investigation is checked first (see blockedReason() in the
+                                // Tool Groups section for the identical rule, mirrored here).
+                                const blockedSub = (tool.sub_assemblies || []).find(sa => sa.is_calibrated && (!sa.cal_due_date || new Date(sa.cal_due_date) <= new Date(new Date().toDateString())));
                                 const calDueDisplay = tool.has_open_investigation
                                     ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Investigation open</span>`
+                                    : blockedSub
+                                    ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Sub-assembly "${blockedSub.name}" needs cal</span>`
                                     : !tool.is_calibrated
                                     ? `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`
                                     : !tool.cal_due_date
@@ -2196,6 +2209,70 @@ function openEntityModal(type, id) {
                 </div>
             </div>
         `;
+        // Sub-assemblies (migrations/018) -- e.g. the specific die on a crimper. Unlike
+        // calibration history/incidents/investigations above, this data is already embedded
+        // on `entity` (see GET /api/tools' sub_assemblies lateral join), so it's rendered
+        // directly here instead of needing its own async loader. currentEntitySubAssemblies
+        // backs openEditSubAssemblyForm()'s by-id lookup. Any sub that itself needs
+        // calibration and is out of cal blocks THIS tool's checkout -- see the A1 hard-stop in
+        // POST /api/transactions -- so its status pill uses the same red/expired treatment as
+        // the parent's own calibration block above.
+        currentEntitySubAssemblies = entity.sub_assemblies || [];
+        const today = new Date(new Date().toDateString());
+        const subRows = currentEntitySubAssemblies.length === 0
+            ? `<span style="color:var(--muted); font-style:italic; font-size:12px;">No sub-assemblies.</span>`
+            : currentEntitySubAssemblies.map(sa => {
+                let pill;
+                if (!sa.is_calibrated) {
+                    pill = `<span style="color:var(--muted); font-style:italic;">Not calibrated</span>`;
+                } else if (!sa.cal_due_date) {
+                    pill = `<span style="color:var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No due date</span>`;
+                } else if (new Date(sa.cal_due_date) <= today) {
+                    pill = `<span style="color:var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Cal expired</span>`;
+                } else {
+                    pill = `<span>Cal Due: ${sa.cal_due_date.split('T')[0]}</span>`;
+                }
+                const partLine = sa.part_number ? ` <span style="color:var(--muted); font-family:monospace; font-size:11px;">(${sa.part_number})</span>` : '';
+                const controls = canEditTools ? `
+                    <span style="cursor:pointer; color:var(--muted);" onclick="openEditSubAssemblyForm(${sa.sub_id})" title="Edit">${icon('pencil')}</span>
+                    <span style="cursor:pointer; color:var(--red);" onclick="deleteSubAssembly(${sa.sub_id}, '${entity.qr_code}')" title="Delete">${icon('x')}</span>` : '';
+                return `<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.02); font-size:12px;">
+                    <span>${sa.name}${partLine}</span>
+                    <span style="display:flex; align-items:center; gap:10px;">${pill}${controls}</span>
+                </div>`;
+            }).join('');
+        readHtml += `
+            <div id="em-sub-assemblies-container" style="margin-top:15px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Sub-Assemblies</div>
+                    ${canEditTools ? `<button type="button" class="btn-icon" style="width:auto; padding:4px 10px; font-size:11px;" onclick="toggleSubAssemblyForm(true)">${icon('plus')} Add Sub-Assembly</button>` : ''}
+                </div>
+                <div id="em-sub-assemblies-list" style="margin-top:4px;">${subRows}</div>
+
+                <div id="em-sub-assembly-form" style="display:none; margin-top:10px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
+                    <input type="hidden" id="em-sub-edit-id" value="">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Name</label><input class="form-input" id="em-sub-name" placeholder="e.g. 10 AWG Die"></div>
+                    <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom:10px;">
+                        <div class="form-group" style="margin:0;"><label class="form-label">Part Number</label><input class="form-input" id="em-sub-part-number"></div>
+                        <div class="form-group" style="margin:0;"><label class="form-label">Serial Number</label><input class="form-input" id="em-sub-serial"></div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:13px;"><input type="checkbox" id="em-sub-is-calibrated" onchange="toggleSubCalFields()"> Requires Calibration Tracking</label>
+                    </div>
+                    <div id="em-sub-cal-fields" style="display:none; margin-bottom:10px;">
+                        <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr;">
+                            <div class="form-group" style="margin:0;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="em-sub-last-cal"></div>
+                            <div class="form-group" style="margin:0;"><label class="form-label">Calibration Due</label><input type="date" class="form-input" id="em-sub-cal-due"></div>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-sub-notes"></div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-secondary" style="width:auto;" onclick="toggleSubAssemblyForm(false)">Cancel</button>
+                        <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitSubAssemblyForm('${entity.tool_id}', '${entity.qr_code}')">Save Sub-Assembly</button>
+                    </div>
+                </div>
+            </div>
+        `;
         // #em-incident-history-list is populated asynchronously by loadIncidentHistory()
         // below -- every reported Missing/Broken/Worn cycle (see tool_incidents /
         // migrations/007), not just the tool's current status, and -- critically -- how/
@@ -2764,6 +2841,90 @@ async function submitCalLogForm(toolId, qrCode) {
             body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, notes: notes || null, result })
         });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to log calibration record.')); }
+        await renderEditableInfraTree();
+        openEntityModal('tool', qrCode);
+    } catch (e) {
+        alert('Network Error.');
+    }
+}
+
+/** Shows/hides #em-sub-assembly-form, clearing it back to a blank "add" state when hidden (so the next open -- whether Add or Edit -- never shows stale leftover values from whatever was being edited before). */
+function toggleSubAssemblyForm(show) {
+    const form = document.getElementById('em-sub-assembly-form');
+    if (!form) return;
+    form.style.display = show ? 'block' : 'none';
+    if (!show) {
+        document.getElementById('em-sub-edit-id').value = '';
+        document.getElementById('em-sub-name').value = '';
+        document.getElementById('em-sub-part-number').value = '';
+        document.getElementById('em-sub-serial').value = '';
+        document.getElementById('em-sub-is-calibrated').checked = false;
+        document.getElementById('em-sub-last-cal').value = '';
+        document.getElementById('em-sub-cal-due').value = '';
+        document.getElementById('em-sub-notes').value = '';
+        toggleSubCalFields();
+    }
+}
+
+/** Shows/hides the sub-assembly form's calibration date fields based on its "Requires Calibration Tracking" checkbox -- same show-on-check convention as the main ingest form. */
+function toggleSubCalFields() {
+    const checked = document.getElementById('em-sub-is-calibrated').checked;
+    document.getElementById('em-sub-cal-fields').style.display = checked ? 'block' : 'none';
+}
+
+/** Opens #em-sub-assembly-form pre-filled for editing -- looks the sub-assembly up in currentEntitySubAssemblies (set by openEntityModal()) rather than needing a fetch, since that list is already the full, current data for this tool's modal. */
+function openEditSubAssemblyForm(subId) {
+    const sa = currentEntitySubAssemblies.find(s => s.sub_id === subId);
+    if (!sa) return;
+    toggleSubAssemblyForm(true);
+    document.getElementById('em-sub-edit-id').value = sa.sub_id;
+    document.getElementById('em-sub-name').value = sa.name;
+    document.getElementById('em-sub-part-number').value = sa.part_number || '';
+    document.getElementById('em-sub-serial').value = sa.serial_number || '';
+    document.getElementById('em-sub-is-calibrated').checked = sa.is_calibrated;
+    document.getElementById('em-sub-last-cal').value = sa.last_cal_date ? sa.last_cal_date.split('T')[0] : '';
+    document.getElementById('em-sub-cal-due').value = sa.cal_due_date ? sa.cal_due_date.split('T')[0] : '';
+    document.getElementById('em-sub-notes').value = sa.notes || '';
+    toggleSubCalFields();
+}
+
+/** Saves #em-sub-assembly-form -- POSTs a new sub-assembly, or PUTs an edit when #em-sub-edit-id is set. Refreshes the tree (globalToolsCache doesn't otherwise know about sub-assembly changes) and reopens this same tool's modal fresh, same pattern as submitCalLogForm() above. */
+async function submitSubAssemblyForm(toolId, qrCode) {
+    const subId = document.getElementById('em-sub-edit-id').value;
+    const name = document.getElementById('em-sub-name').value.trim();
+    const partNumber = document.getElementById('em-sub-part-number').value.trim();
+    const serialNumber = document.getElementById('em-sub-serial').value.trim();
+    const isCalibrated = document.getElementById('em-sub-is-calibrated').checked;
+    const lastCal = document.getElementById('em-sub-last-cal').value;
+    const calDue = document.getElementById('em-sub-cal-due').value;
+    const notes = document.getElementById('em-sub-notes').value.trim();
+
+    if (!name) return alert('⚠️ A sub-assembly name is required.');
+    if (isCalibrated && !calDue) return alert('⚠️ Calibration Due Date is required.');
+
+    const url = subId ? `/api/sub-assemblies/${subId}` : `/api/tools/${toolId}/sub-assemblies`;
+    const method = subId ? 'PUT' : 'POST';
+
+    try {
+        const res = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ name, part_number: partNumber || null, serial_number: serialNumber || null, is_calibrated: isCalibrated, last_cal_date: lastCal || null, cal_due_date: calDue || null, notes: notes || null })
+        });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to save sub-assembly.')); }
+        await renderEditableInfraTree();
+        openEntityModal('tool', qrCode);
+    } catch (e) {
+        alert('Network Error.');
+    }
+}
+
+/** Deletes a sub-assembly after confirmation, then refreshes/reopens the tool's modal, same pattern as the other tool-detail mutations above. */
+async function deleteSubAssembly(subId, qrCode) {
+    if (!confirm('Delete this sub-assembly? This cannot be undone.')) return;
+    try {
+        const res = await fetch(`/api/sub-assemblies/${subId}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to delete sub-assembly.')); }
         await renderEditableInfraTree();
         openEntityModal('tool', qrCode);
     } catch (e) {
@@ -3448,6 +3609,7 @@ async function toggleToolGroupDetail(id) {
  */
 function blockedReason(m) {
     if (m.has_open_investigation) return 'Investigation open';
+    if (m.blocked_sub_name) return `Sub-assembly "${m.blocked_sub_name}" needs cal`;
     if (!m.cal_due_date) return 'No due date';
     if (!m.has_cal_record) return 'No certificate';
     return 'Cal expired';
