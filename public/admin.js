@@ -1148,9 +1148,11 @@ function toggleBatchMoveMode() {
     batchMoveMode = !batchMoveMode;
     const btn = document.getElementById('btn-batch-move-toggle');
     const bar = document.getElementById('batch-move-bar');
+    const resultsEl = document.getElementById('batch-tool-results');
     if (btn) btn.classList.toggle('active', batchMoveMode);
     if (!batchMoveMode) selectedToolIds.clear();
     if (bar) bar.style.display = batchMoveMode ? 'flex' : 'none';
+    if (resultsEl) resultsEl.style.display = 'none'; // don't carry a stale results list into/out of a fresh batch-select session
     updateBatchMoveCount();
     renderEditableInfraTree();
 }
@@ -1164,6 +1166,8 @@ function toggleToolSelection(toolId, checked) {
 /** Clears the selection (e.g. "Clear Selection" button) without leaving Batch Move mode, and re-renders so every checkbox unchecks. */
 function clearBatchMoveSelection() {
     selectedToolIds.clear();
+    const resultsEl = document.getElementById('batch-tool-results');
+    if (resultsEl) resultsEl.style.display = 'none';
     updateBatchMoveCount();
     renderEditableInfraTree();
 }
@@ -1191,16 +1195,36 @@ function closeBatchMoveModal() {
     document.getElementById('batch-move-modal-overlay').style.display = 'none';
 }
 
-/** Submits the batch move to PUT /api/tools/batch-move, then closes the modal, clears the selection (but stays in Batch Move mode -- ready for another round), and refreshes the tree. */
+/**
+ * Builds the before-the-request lookup of each selected tool's qr_code/name from
+ * globalToolsCache, so confirmBatchMove()/confirmBatchDelete() can still show a meaningful
+ * label for a tool that the server reports as NOT affected (rare -- e.g. deleted/moved by
+ * someone else between selecting it and submitting) rather than just a bare numeric id.
+ * Captured before the request fires and before the post-action renderEditableInfraTree()
+ * refresh replaces the cache, since a failed tool may no longer be in the fresh one at all.
+ */
+function captureBatchToolInfo(toolIds) {
+    const info = {};
+    toolIds.forEach(id => {
+        const t = globalToolsCache.find(t => t.tool_id === id);
+        info[id] = t ? { qr_code: t.qr_code, name: t.name } : { qr_code: `#${id}`, name: '' };
+    });
+    return info;
+}
+
+/** Submits the batch move to PUT /api/tools/batch-move, then closes the modal, clears the selection (but stays in Batch Move mode -- ready for another round), refreshes the tree, and shows a per-tool results list (renderBatchToolResults()) instead of one alert(). */
 async function confirmBatchMove() {
     const drawerId = document.getElementById('batch-move-drawer').value;
     if (!drawerId) return alert('⚠️ Select a destination drawer.');
+
+    const requestedIds = Array.from(selectedToolIds);
+    const requestedInfo = captureBatchToolInfo(requestedIds);
 
     try {
         const res = await fetch('/api/tools/batch-move', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
-            body: JSON.stringify({ tool_ids: Array.from(selectedToolIds), drawer_id: drawerId })
+            body: JSON.stringify({ tool_ids: requestedIds, drawer_id: drawerId })
         });
         const data = await res.json();
         if (!res.ok) return alert('❌ ' + (data.error || 'Failed to move tools.'));
@@ -1209,22 +1233,32 @@ async function confirmBatchMove() {
         selectedToolIds.clear();
         updateBatchMoveCount();
         await renderEditableInfraTree();
-        alert(`✅ Moved ${data.moved} tool(s).`);
+
+        const succeededIds = new Set((data.results || []).map(r => r.tool_id));
+        const results = requestedIds.map(id => ({
+            ...requestedInfo[id],
+            success: succeededIds.has(id),
+            message: succeededIds.has(id) ? 'Moved' : 'Not found (already moved or deleted?)',
+        }));
+        renderBatchToolResults('batch-tool-results', results, { clickable: true });
     } catch (e) {
         alert('❌ Network error while moving tools.');
     }
 }
 
-/** Permanently deletes every selected tool (DELETE /api/tools/batch-delete) after a confirm() prompt -- there's no undo, unlike a move. Stays in Batch Select mode afterward, same as confirmBatchMove(). */
+/** Permanently deletes every selected tool (DELETE /api/tools/batch-delete) after a confirm() prompt -- there's no undo, unlike a move. Stays in Batch Select mode afterward, same as confirmBatchMove(), and shows the same per-tool results list (not clickable here -- a deleted tool no longer exists to open). */
 async function confirmBatchDelete() {
     if (selectedToolIds.size === 0) return alert('⚠️ Select at least one tool first.');
     if (!confirm(`Permanently delete ${selectedToolIds.size} tool(s)? This cannot be undone.`)) return;
+
+    const requestedIds = Array.from(selectedToolIds);
+    const requestedInfo = captureBatchToolInfo(requestedIds);
 
     try {
         const res = await fetch('/api/tools/batch-delete', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
-            body: JSON.stringify({ tool_ids: Array.from(selectedToolIds) })
+            body: JSON.stringify({ tool_ids: requestedIds })
         });
         const data = await res.json();
         if (!res.ok) return alert('❌ ' + (data.error || 'Failed to delete tools.'));
@@ -1232,10 +1266,45 @@ async function confirmBatchDelete() {
         selectedToolIds.clear();
         updateBatchMoveCount();
         await renderEditableInfraTree();
-        alert(`✅ Deleted ${data.deleted} tool(s).`);
+
+        const succeededIds = new Set((data.results || []).map(r => r.tool_id));
+        const results = requestedIds.map(id => ({
+            ...requestedInfo[id],
+            success: succeededIds.has(id),
+            message: succeededIds.has(id) ? 'Deleted' : 'Not found (already deleted?)',
+        }));
+        renderBatchToolResults('batch-tool-results', results, { clickable: false });
     } catch (e) {
         alert('❌ Network error while deleting tools.');
     }
+}
+
+/**
+ * Generic post-batch-action results list for the Master Storage & Asset Tree's Batch Select bar
+ * -- one row per tool, success or failure, in a persistent panel instead of a single alert()
+ * that only reported a count. Modeled on the ingest form's own renderAddToolResults() (same
+ * idea -- a partial/mixed outcome, or here simply which exact tools were affected, stays
+ * visible); kept as a separate function rather than shared since that one has its own
+ * calibration-specific hint text this doesn't need. `clickable` opens a successful row's tool
+ * entity card on click -- pass false for an action like delete, where there's nothing left to
+ * open.
+ */
+function renderBatchToolResults(containerId, results, { clickable = false } = {}) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const successCount = results.filter(r => r.success).length;
+    container.style.display = 'block';
+    container.innerHTML = `
+        <div style="font-size:13px; margin-bottom:8px;"><strong>${successCount} of ${results.length} succeeded.</strong></div>
+        <div style="display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto;">
+            ${results.map(r => `
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; border-radius:6px; background: var(--surface2);${r.success && clickable ? ' cursor:pointer;' : ''}"${r.success && clickable ? ` onclick="openEntityModal('tool', '${r.qr_code}')"` : ''}>
+                    <span style="font-size:12px;">${r.name ? `${r.name} ` : ''}<span style="font-family:monospace; font-size:11px; color:var(--muted);">${r.qr_code}</span></span>
+                    <span style="font-size:12px; color: ${r.success ? 'var(--green)' : 'var(--red)'};">${r.success ? icon('circle-check') : icon('circle-x')} ${r.message}</span>
+                </div>
+            `).join('')}
+        </div>
+    `;
 }
 
 /** Fetches GET /api/audits/today-status and renders one chip per department into #audit-status-body: muted styling when that department's mandatory audit for its own CURRENT shift window is already complete, or a red "-- Audit Pending" chip when it is not. Each department now resolves its OWN window from its OWN configured schedule (see the "Audit Schedule" card / getDeptAuditSchedule in server.js) -- schedules can differ per department, so the window label/time is shown inline per chip rather than as one shared line above them all. */

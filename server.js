@@ -1777,12 +1777,14 @@ app.delete('/api/tools/batch-delete', requireFetchHeader, requireRole(2), async 
             await client.query('BEGIN');
             await client.query('DELETE FROM audit_logs WHERE tool_id = ANY($1::int[])', [tool_ids]);
             const result = await client.query(
-                `DELETE FROM tools WHERE tool_id = ANY($1::int[]) RETURNING photo_url, barcode_image_url_small`,
+                `DELETE FROM tools WHERE tool_id = ANY($1::int[]) RETURNING tool_id, qr_code, name, photo_url, barcode_image_url_small`,
                 [tool_ids]
             );
             await client.query('COMMIT');
             result.rows.forEach(deleteToolFiles);
-            res.json({ success: true, deleted: result.rows.length });
+            // results (not just the count) lets the admin panel show which specific tools were
+            // deleted -- see renderBatchToolResults() in admin.js -- rather than just a number.
+            res.json({ success: true, deleted: result.rows.length, results: result.rows.map(r => ({ tool_id: r.tool_id, qr_code: r.qr_code, name: r.name })) });
         } catch (err) {
             await client.query('ROLLBACK'); throw err;
         } finally {
@@ -1864,10 +1866,14 @@ app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req,
         if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid destination drawer.' });
 
         const result = await pool.query(
-            'UPDATE tools SET drawer_id = $1 WHERE tool_id = ANY($2::int[]) RETURNING tool_id',
+            'UPDATE tools SET drawer_id = $1 WHERE tool_id = ANY($2::int[]) RETURNING tool_id, qr_code, name',
             [drawer_id, tool_ids]
         );
-        res.json({ success: true, moved: result.rows.length });
+        // results (not just the count) lets the admin panel show which specific tools moved --
+        // see renderBatchToolResults() in admin.js -- rather than just a number. A requested
+        // tool_id missing from here (not reported as an error, just silently excluded by the
+        // WHERE clause) means it no longer existed at the moment of the update.
+        res.json({ success: true, moved: result.rows.length, results: result.rows });
     } catch (err) {
         console.error('Batch Move Error:', err);
         res.status(500).json({ error: 'Failed to move tools.' });

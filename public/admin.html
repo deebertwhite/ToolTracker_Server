@@ -226,6 +226,10 @@
                                 <button class="btn btn-secondary" style="width:auto;" onclick="toggleBatchMoveMode()">Exit Batch Mode</button>
                             </div>
                         </div>
+                        <!-- Per-tool results from the last batch move/delete (renderBatchToolResults()
+                             in admin.js) -- a persistent list instead of a single alert(), same pattern
+                             as the ingest form's #add-tool-results. -->
+                        <div id="batch-tool-results" style="display:none; margin-bottom:14px; background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; border: 1px solid var(--border);"></div>
                         <div id="editable-infra-tree-container">
                             <div style="text-align: center; color: var(--muted); padding: 20px;">Fetching structural data...</div>
                         </div>
