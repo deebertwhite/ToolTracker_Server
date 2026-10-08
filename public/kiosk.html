@@ -112,7 +112,7 @@
             </div>
 
             <div class="form-group">
-                <input class="form-input" type="password" id="auth-pin-input" style="font-size: 18px; padding: 12px; text-align: center; letter-spacing: 4px;" placeholder="Enter Your PIN" onkeydown="if(event.key==='Enter')authenticateUser()">
+                <input class="form-input" type="password" inputmode="numeric" pattern="[0-9]*" id="auth-pin-input" style="font-size: 18px; padding: 12px; text-align: center; letter-spacing: 4px;" placeholder="Enter Your PIN" onkeydown="if(event.key==='Enter')authenticateUser()">
             </div>
 
             <div style="display: flex; gap: 10px; margin-top: 20px;">
@@ -326,7 +326,7 @@
             </div>
 
             <div class="form-group">
-                <input class="form-input" type="password" id="override-pin-input" placeholder="Or enter buddy's PIN" style="text-align: center; font-size: 20px; letter-spacing: 5px;">
+                <input class="form-input" type="password" inputmode="numeric" pattern="[0-9]*" id="override-pin-input" placeholder="Or enter buddy's PIN" style="text-align: center; font-size: 20px; letter-spacing: 5px;">
             </div>
 
             <div style="display: flex; gap: 10px; margin-top: 10px;">

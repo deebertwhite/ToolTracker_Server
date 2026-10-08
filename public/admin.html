@@ -59,7 +59,7 @@
         </div>
         <div class="form-group">
             <label class="form-label">Secure PIN</label>
-            <input class="form-input" type="password" id="admin-pin" placeholder="••••" onkeydown="if(event.key==='Enter')loginAdmin()">
+            <input class="form-input" type="password" inputmode="numeric" pattern="[0-9]*" id="admin-pin" placeholder="••••" onkeydown="if(event.key==='Enter')loginAdmin()">
         </div>
         <button class="btn" onclick="loginAdmin()">Secure Login →</button>
     </div>
@@ -103,7 +103,7 @@
                 <div class="card" style="max-width: 500px;">
                     <h3 style="margin-bottom: 16px;">Security Settings</h3>
                     <div class="form-group"><label class="form-label">New Username</label><input class="form-input" id="my-new-username" placeholder="Leave blank to keep current"></div>
-                    <div class="form-group"><label class="form-label">New PIN Code</label><input class="form-input" id="my-new-pin" type="password" placeholder="Leave blank to keep current"></div>
+                    <div class="form-group"><label class="form-label">New PIN Code</label><input class="form-input" id="my-new-pin" type="password" inputmode="numeric" pattern="[0-9]*" placeholder="Leave blank to keep current"></div>
                     <button class="btn" onclick="updateMyAccount()">Save Security Updates</button>
                 </div>
                 <div class="card" style="max-width: 500px;">
@@ -277,14 +277,14 @@
                         <div class="flex-grid-3">
                             <div class="form-group" style="margin: 0;"><label class="form-label">Tool Name</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Detailed Description</label><input class="form-input" id="add-tool-desc" placeholder="e.g. Snap-on 72-tooth flex head"></div>
-                            <div class="form-group" style="margin: 0;"><label class="form-label">Serial Number</label><input class="form-input" id="add-tool-serial" placeholder="Optional -- mainly for calibrated tools"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Serial Number</label><input class="form-input" id="add-tool-serial" style="text-transform:uppercase;" oninput="uppercaseInput(this)" placeholder="Optional -- mainly for calibrated tools"></div>
                             <!-- Quantity > 1 ingests that many identical tools in one pass (same name/
                                  description/part number/location), each getting its own unique
                                  sequential barcode ID exactly as if entered one at a time -- see
                                  addNewTool()'s batch loop in admin.js. Defaults to 1, where every field
                                  and the save flow behave exactly as before this existed. -->
                             <div class="form-group" style="margin: 0;"><label class="form-label">Quantity</label><input type="number" class="form-input" id="add-tool-quantity" value="1" min="1" max="50" onchange="onAddToolQuantityChange()"></div>
-                            <div class="form-group" style="margin: 0;"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="add-tool-partnum" placeholder="Optional -- mfr/catalog part #"></div>
+                            <div class="form-group" style="margin: 0;"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="add-tool-partnum" style="text-transform:uppercase;" oninput="uppercaseInput(this)" placeholder="Optional -- mfr/catalog part #"></div>
                             <div class="form-group" style="margin: 0;"><label class="form-label">Replacement URL</label><input class="form-input" id="add-tool-url" placeholder="https://mcmaster.com/..."></div>
 
                             <!-- Department drives both the toolbox/drawer cascade below AND the barcode

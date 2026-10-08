@@ -50,6 +50,11 @@ let treeRenderToken = 0;
 // 2. UTILITIES & VIEW TOGGLES
 // ==========================================
 
+/** Live-uppercases a part/serial number field as the tech types -- shop-floor convention is that these are always read/written in caps off a physical stamp or label. Wired via oninput on every part-number/serial-number input; server.js normalizes the same way on every write path as a backstop (CSV import included), so the stored value is always uppercase regardless of entry path. */
+function uppercaseInput(el) {
+    el.value = el.value.toUpperCase();
+}
+
 /**
  * Toggles the universal entity modal (#entity-modal-overlay) between its read-only view
  * and its edit view. isEditing=false (the default when the modal opens) shows #em-read-fields
@@ -2253,8 +2258,8 @@ function openEntityModal(type, id) {
                     <input type="hidden" id="em-sub-edit-id" value="">
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Name</label><input class="form-input" id="em-sub-name" placeholder="e.g. 10 AWG Die"></div>
                     <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom:10px;">
-                        <div class="form-group" style="margin:0;"><label class="form-label">Part Number</label><input class="form-input" id="em-sub-part-number"></div>
-                        <div class="form-group" style="margin:0;"><label class="form-label">Serial Number</label><input class="form-input" id="em-sub-serial"></div>
+                        <div class="form-group" style="margin:0;"><label class="form-label">Part Number</label><input class="form-input" id="em-sub-part-number" style="text-transform:uppercase;" oninput="uppercaseInput(this)"></div>
+                        <div class="form-group" style="margin:0;"><label class="form-label">Serial Number</label><input class="form-input" id="em-sub-serial" style="text-transform:uppercase;" oninput="uppercaseInput(this)"></div>
                     </div>
                     <div class="form-group" style="margin-bottom:10px;">
                         <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:13px;"><input type="checkbox" id="em-sub-is-calibrated" onchange="toggleSubCalFields()"> Requires Calibration Tracking</label>
@@ -2394,8 +2399,8 @@ function openEntityModal(type, id) {
                 </div>
             </div>
             <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
-                <div class="form-group"><label class="form-label">Serial Number</label><input class="form-input" id="em-input-serial" value="${entity.serial_number || ''}" placeholder="Optional"></div>
-                <div class="form-group"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="em-input-partnum" value="${entity.part_number || ''}" placeholder="Optional"></div>
+                <div class="form-group"><label class="form-label">Serial Number</label><input class="form-input" id="em-input-serial" style="text-transform:uppercase;" oninput="uppercaseInput(this)" value="${entity.serial_number || ''}" placeholder="Optional"></div>
+                <div class="form-group"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="em-input-partnum" style="text-transform:uppercase;" oninput="uppercaseInput(this)" value="${entity.part_number || ''}" placeholder="Optional"></div>
             </div>
             <div class="form-group"><label class="form-label">Group <span style="color:var(--muted);text-transform:none;">(optional -- part of a tracked kit/assembly)</span></label><select class="form-select" id="em-input-group">${groupOptions}</select></div>
             <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">

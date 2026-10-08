@@ -601,6 +601,20 @@ const checkToolStatusTransition = (currentStatus, requestedStatus) => {
 };
 
 /**
+ * Normalizes a part/serial number for storage -- trimmed and uppercased, matching the
+ * shop-floor convention that these are always read/written in caps off a physical stamp or
+ * label. Applied on every write path (single-tool create/edit, sub-assembly create/edit, CSV
+ * import) so the stored value is always uppercase regardless of entry point, backing up the
+ * client-side live-uppercase inputs (uppercaseInput() in admin.js) which only cover the admin
+ * UI. Returns null for empty/whitespace-only input, matching every call site's existing
+ * `|| null` convention.
+ */
+function normalizeCode(value) {
+    if (!value || !value.trim()) return null;
+    return value.trim().toUpperCase();
+}
+
+/**
  * Checks whether `serialNumber` (normalized for case and surrounding whitespace, so "SN-1"
  * and "sn-1 " collide) already belongs to a DIFFERENT tool, for a friendly rejection message
  * before the write is attempted. Mirrors the database-level guard in
@@ -1731,7 +1745,9 @@ app.delete('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, r
 // ==========================================
 // Create a new tool, optionally retiring/replacing an existing tool_id. Requires tool_rep+ (getRoleWeight >= 2).
 app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number } = req.body;
+    const { qr_code, name, description, replacement_url, drawer_id, replaced_tool_id, is_calibrated, last_cal_date, cal_due_date } = req.body;
+    const serial_number = normalizeCode(req.body.serial_number);
+    const part_number = normalizeCode(req.body.part_number);
     try {
         const duplicate = await findDuplicateSerial(pool, serial_number);
         if (duplicate) {
@@ -1747,7 +1763,7 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
 
             // Updated to include description, replacement_url, serial_number, and part_number
             const insertQuery = `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING tool_id`;
-            const insertRes = await client.query(insertQuery, [qr_code, name, description || null, replacement_url || null, drawer_id || null, 'In', is_calibrated || false, last_cal_date || null, cal_due_date || null, serial_number || null, part_number || null]);
+            const insertRes = await client.query(insertQuery, [qr_code, name, description || null, replacement_url || null, drawer_id || null, 'In', is_calibrated || false, last_cal_date || null, cal_due_date || null, serial_number, part_number]);
             newToolId = insertRes.rows[0].tool_id;
 
             if (replaced_tool_id) {
@@ -1909,7 +1925,9 @@ app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req,
 
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
 app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number, drawer_id, group_id } = req.body;
+    const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, drawer_id, group_id } = req.body;
+    const serial_number = normalizeCode(req.body.serial_number);
+    const part_number = normalizeCode(req.body.part_number);
 
     // If they checked the box but didn't provide a due date, throw an error
     if (is_calibrated && !cal_due_date) {
@@ -1962,7 +1980,7 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
              WHERE tool_id = $12`,
             [name, description || null, replacement_url || null, status,
              is_calibrated || false, last_cal_date || null, cal_due_date || null,
-             serial_number || null, part_number || null, drawer_id, group_id || null, toolId]
+             serial_number, part_number, drawer_id, group_id || null, toolId]
         );
 
         // If this save just moved the tool OUT of a flagged state (Missing/Broken/Worn),
@@ -2025,7 +2043,9 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
 // cross-cutting admin construct like Tool Groups (requireRole(3)).
 
 app.post('/api/tools/:id/sub-assemblies', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { name, part_number, serial_number, is_calibrated, last_cal_date, cal_due_date, notes } = req.body;
+    const { name, is_calibrated, last_cal_date, cal_due_date, notes } = req.body;
+    const part_number = normalizeCode(req.body.part_number);
+    const serial_number = normalizeCode(req.body.serial_number);
     if (!name || !name.trim()) return res.status(400).json({ error: 'A sub-assembly name is required.' });
     if (is_calibrated && !cal_due_date) return res.status(400).json({ error: 'Calibration Due Date is required.' });
 
@@ -2039,7 +2059,7 @@ app.post('/api/tools/:id/sub-assemblies', requireFetchHeader, requireRole(2), as
         const result = await pool.query(
             `INSERT INTO tool_sub_assemblies (tool_id, name, part_number, serial_number, is_calibrated, last_cal_date, cal_due_date, notes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING sub_id`,
-            [req.params.id, name.trim(), part_number || null, serial_number || null, is_calibrated || false, last_cal_date || null, cal_due_date || null, notes || null]
+            [req.params.id, name.trim(), part_number, serial_number, is_calibrated || false, last_cal_date || null, cal_due_date || null, notes || null]
         );
         res.json({ success: true, sub_id: result.rows[0].sub_id });
     } catch (err) {
@@ -2049,7 +2069,9 @@ app.post('/api/tools/:id/sub-assemblies', requireFetchHeader, requireRole(2), as
 });
 
 app.put('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { name, part_number, serial_number, is_calibrated, last_cal_date, cal_due_date, notes } = req.body;
+    const { name, is_calibrated, last_cal_date, cal_due_date, notes } = req.body;
+    const part_number = normalizeCode(req.body.part_number);
+    const serial_number = normalizeCode(req.body.serial_number);
     if (!name || !name.trim()) return res.status(400).json({ error: 'A sub-assembly name is required.' });
     if (is_calibrated && !cal_due_date) return res.status(400).json({ error: 'Calibration Due Date is required.' });
 
@@ -2061,7 +2083,7 @@ app.put('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async
             `UPDATE tool_sub_assemblies SET name = $1, part_number = $2, serial_number = $3,
                  is_calibrated = $4, last_cal_date = $5, cal_due_date = $6, notes = $7
              WHERE sub_id = $8 RETURNING sub_id`,
-            [name.trim(), part_number || null, serial_number || null, is_calibrated || false, last_cal_date || null, cal_due_date || null, notes || null, req.params.sub_id]
+            [name.trim(), part_number, serial_number, is_calibrated || false, last_cal_date || null, cal_due_date || null, notes || null, req.params.sub_id]
         );
         if (result.rows.length === 0) return res.status(404).json({ error: 'Sub-assembly not found.' });
         res.json({ success: true });
@@ -2402,8 +2424,8 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
             const fields = {
                 name: row['Tool Name'].trim(),
                 description: row['Description']?.trim() || null,
-                serial_number: row['Serial Number']?.trim() || null,
-                part_number: row['Part Number']?.trim() || null,
+                serial_number: normalizeCode(row['Serial Number']),
+                part_number: normalizeCode(row['Part Number']),
                 replacement_url: row['Replacement URL']?.trim() || null,
                 is_calibrated,
                 last_cal_date: row['Last Calibrated']?.trim() || null,
