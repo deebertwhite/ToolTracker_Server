@@ -123,6 +123,13 @@ function updateAuditWindowCountdown() {
  * (rolled up from drawer -> toolbox -> department), so a problem is visible while just browsing
  * the tree, before opening any specific map -- James: "make it easier to navigate and see what
  * is missing... we can add at a glance as well."
+ *
+ * Department and toolbox rows also get a collapse/expand chevron (toggleDashboardTreeNode()),
+ * same pattern as admin.js's Master Storage & Asset Tree -- adding drawers as a 3rd level made
+ * a shop with several toolboxes produce a long, all-expanded scroll; departments default open
+ * (just names + counts, not where the clutter is) and toolboxes default collapsed (drawers are
+ * the level that actually piles up), matching that tree's own established convention. Drawers
+ * are leaf rows here (no further nesting in this tree), so they don't get a chevron.
  */
 async function fetchStorageTree() {
     try {
@@ -163,15 +170,45 @@ async function fetchStorageTree() {
                 });
 
                 deptFlagged += boxFlagged;
-                boxesHtml += `<div class="nav-item nav-box" onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')">${icon('toolbox')} ${box.name} ${flagBadge(boxFlagged)}</div>${drawersHtml}`;
+                const boxContentId = `dash-box-content-${box.box_id}`;
+                boxesHtml += `
+                    <div class="nav-item nav-box" style="display:flex; align-items:center; gap:6px;">
+                        <span class="tree-toggle-tap" style="cursor:pointer;" onclick="toggleDashboardTreeNode('${boxContentId}', this.parentElement)"><span class="icon toggle-icon">${ICONS['chevron-right']}</span></span>
+                        <span onclick="loadLocationView('box', '${box.name}', '${box.name}', 'Toolbox')" style="cursor:pointer; flex:1;">${icon('toolbox')} ${box.name} ${flagBadge(boxFlagged)}</span>
+                    </div>
+                    <div id="${boxContentId}" style="display:none;">${drawersHtml}</div>`;
             });
 
-            html += `<div class="nav-item nav-dept" onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')">${icon('building-2')} ${dept.name} ${flagBadge(deptFlagged)}</div>${boxesHtml}`;
+            const deptContentId = `dash-dept-content-${dept.dept_id}`;
+            html += `
+                <div class="nav-item nav-dept" style="display:flex; align-items:center; gap:6px;">
+                    <span class="tree-toggle-tap" style="cursor:pointer;" onclick="toggleDashboardTreeNode('${deptContentId}', this.parentElement)"><span class="icon toggle-icon">${ICONS['chevron-down']}</span></span>
+                    <span onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')" style="cursor:pointer; flex:1;">${icon('building-2')} ${dept.name} ${flagBadge(deptFlagged)}</span>
+                </div>
+                <div id="${deptContentId}" style="display:block;">${boxesHtml}</div>`;
         });
         document.getElementById('tree-container').innerHTML = html;
     } catch (e) {
         document.getElementById('tree-container').innerHTML = `<div style="color:var(--red); padding:20px;">Failed to load tree.</div>`;
     }
+}
+
+/**
+ * Expands/collapses one department or toolbox node in the sidebar tree -- same chevron-flip
+ * pattern as admin.js's Master Storage & Asset Tree (toggleTreeVisibility()): flips the
+ * referenced container between display:block/none and its row's .toggle-icon between
+ * chevron-down (expanded) and chevron-right (collapsed). No persisted expand-state map needed
+ * here (unlike admin.js's tree) since this tree is built once at boot and never rebuilt
+ * mid-session, so there's nothing to restore after a re-render.
+ */
+function toggleDashboardTreeNode(containerId, rowEl) {
+    const container = document.getElementById(containerId);
+    const toggleIcon = rowEl.querySelector('.toggle-icon');
+    if (!container) return;
+
+    const expanding = container.style.display === 'none';
+    container.style.display = expanding ? 'block' : 'none';
+    if (toggleIcon) toggleIcon.innerHTML = expanding ? ICONS['chevron-down'] : ICONS['chevron-right'];
 }
 
 // ==========================================

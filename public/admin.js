@@ -1042,7 +1042,7 @@ async function renderEditableInfraTree() {
                 html += `<div class="tree-node" style="padding: 10px;">
                             <div style="display: flex; align-items: center; gap: 10px; user-select: none;">
                                 ${thumb}
-                                <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)"><span class="icon toggle-icon" style="font-size: 12px; color: var(--muted);">${boxExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
+                                <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${boxContentId}', this.parentElement)"><span class="icon toggle-icon" style="color: var(--muted);">${boxExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
                                 <span onclick="openEntityModal('toolbox', '${box.box_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                     <strong>${box.name}</strong>
                                     <span style="background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 10px; color: var(--accent); font-family: monospace;">${box.qr_code || 'NO-ID'}</span>
@@ -1063,7 +1063,7 @@ async function renderEditableInfraTree() {
                         html += `<div class="tree-child" style="padding: 6px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
                                     <div style="display: flex; align-items: center; gap: 8px; user-select: none;">
                                         ${drThumb}
-                                        <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)"><span class="icon toggle-icon" style="font-size: 10px; color: var(--muted);">${drawerExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
+                                        <span class="tree-toggle-tap" style="cursor: pointer;" onclick="toggleTreeVisibility('${drawerContentId}', this.parentElement)"><span class="icon toggle-icon" style="color: var(--muted);">${drawerExpanded ? ICONS['chevron-down'] : ICONS['chevron-right']}</span></span>
                                         <span onclick="openEntityModal('drawer', '${dr.drawer_id}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
                                             <span style="font-weight: bold;">${dr.name}</span>
                                             <span style="font-size:11px; color:var(--muted); margin-left: 5px;">(${drToolsList.length} tools)</span>
