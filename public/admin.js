@@ -1103,8 +1103,9 @@ async function renderEditableInfraTree() {
                                 const batchCheckbox = batchMoveMode
                                     ? `<input type="checkbox" onclick="event.stopPropagation();" onchange="toggleToolSelection(${tool.tool_id}, this.checked)" ${selectedToolIds.has(tool.tool_id) ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; flex-shrink:0;">`
                                     : '';
+                                const searchKey = [tool.name, tool.qr_code, tool.serial_number, tool.part_number].filter(Boolean).join(' ').toUpperCase();
                                 html += `
-                                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02); cursor: pointer;" onclick="openEntityModal('tool', '${tool.qr_code}')">
+                                    <div class="tool-tree-row" data-search="${searchKey.replace(/"/g, '&quot;')}" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02); cursor: pointer;" onclick="openEntityModal('tool', '${tool.qr_code}')">
                                         ${batchCheckbox}
                                         <span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: ${statusColor};">${tool.status}</span>
                                         <span style="font-size: 13px; font-weight:bold;">${tool.name}</span>
@@ -1127,6 +1128,10 @@ async function renderEditableInfraTree() {
         });
         container.innerHTML = html;
         requestAnimationFrame(() => window.scrollTo(0, savedScrollY));
+        // A rebuild (every create/edit/delete) wipes the filtered-down DOM state, so re-apply
+        // whatever search is still active instead of silently dropping back to the full tree.
+        const searchInput = document.getElementById('inv-tree-search');
+        if (searchInput && searchInput.value.trim()) filterInventoryTree();
     } catch (e) {
         // Logged, not just swallowed -- a silent catch here previously made a real bug (a
         // ReferenceError from an incomplete feature, accidentally shipped) look like a generic
@@ -1134,6 +1139,65 @@ async function renderEditableInfraTree() {
         console.error('renderEditableInfraTree failed:', e);
         container.innerHTML = `<div style="color: var(--red); padding: 20px;">Error rendering map.</div>`;
     }
+}
+
+/**
+ * Live-filters the Master Storage & Asset Tree down to tools matching #inv-tree-search
+ * (substring match against name/QR code/serial/part number), bubbling visibility up through
+ * drawer -> box -> department and force-expanding any ancestor a match is buried under --
+ * otherwise a hit three collapsed levels down would be filtered to "visible" in the DOM but
+ * still invisible behind closed chevrons. Clearing the search restores every level back to
+ * treeExpandState's own collapsed/expanded state rather than leaving everything forced open.
+ */
+function filterInventoryTree() {
+    const query = document.getElementById('inv-tree-search').value.trim().toUpperCase();
+    if (!query) { restoreTreeExpandState(); return; }
+
+    document.querySelectorAll('.tool-tree-row').forEach(row => {
+        row.style.display = row.dataset.search.includes(query) ? '' : 'none';
+    });
+
+    const forceOpenIfHasMatch = (containerSelector) => {
+        document.querySelectorAll(containerSelector).forEach(el => {
+            const hasVisible = Array.from(el.querySelectorAll('.tool-tree-row')).some(r => r.style.display !== 'none');
+            el.style.display = hasVisible ? '' : 'none';
+            if (hasVisible) {
+                const content = el.querySelector(':scope > [id^="drawer-content-"], :scope > [id^="box-content-"]');
+                const toggleIcon = el.querySelector(':scope > div > .tree-toggle-tap > .toggle-icon');
+                if (content) content.style.display = 'block';
+                if (toggleIcon) toggleIcon.innerHTML = ICONS['chevron-down'];
+            }
+        });
+    };
+    // Drawers first, then boxes (whose "has a match" check now sees the drawers' updated
+    // display), then department content divs, same bottom-up order.
+    forceOpenIfHasMatch('.tree-child');
+    forceOpenIfHasMatch('.tree-node');
+    document.querySelectorAll('[id^="dept-content-"]').forEach(el => {
+        const hasVisible = Array.from(el.querySelectorAll('.tool-tree-row')).some(r => r.style.display !== 'none');
+        el.style.display = hasVisible ? 'block' : 'none';
+        if (hasVisible) {
+            const toggleIcon = el.previousElementSibling ? el.previousElementSibling.querySelector('.toggle-icon') : null;
+            if (toggleIcon) toggleIcon.innerHTML = ICONS['chevron-down'];
+        }
+    });
+}
+
+/** Un-hides every tree wrapper a search may have hidden and resets each collapsible level back to its treeExpandState-tracked open/closed state (mirrors the same defaults renderEditableInfraTree() itself applies). */
+function restoreTreeExpandState() {
+    document.querySelectorAll('.tool-tree-row, .tree-child, .tree-node').forEach(el => { el.style.display = ''; });
+    document.querySelectorAll('[id^="box-content-"], [id^="drawer-content-"]').forEach(el => {
+        const expanded = treeExpandState[el.id] === true;
+        el.style.display = expanded ? 'block' : 'none';
+        const toggleIcon = el.previousElementSibling ? el.previousElementSibling.querySelector('.toggle-icon') : null;
+        if (toggleIcon) toggleIcon.innerHTML = expanded ? ICONS['chevron-down'] : ICONS['chevron-right'];
+    });
+    document.querySelectorAll('[id^="dept-content-"]').forEach(el => {
+        const expanded = treeExpandState[el.id] !== false;
+        el.style.display = expanded ? 'block' : 'none';
+        const toggleIcon = el.previousElementSibling ? el.previousElementSibling.querySelector('.toggle-icon') : null;
+        if (toggleIcon) toggleIcon.innerHTML = expanded ? ICONS['chevron-down'] : ICONS['chevron-right'];
+    });
 }
 
 // ==========================================
