@@ -207,14 +207,14 @@
                         <div id="audit-schedule-list">Loading…</div>
                     </div>
                     <div class="card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
                             <h3>Master Storage & Asset Tree</h3>
-                            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                                <input type="text" class="form-input" id="inv-tree-search" placeholder="Search tools by name, QR code, serial, or part #..." style="max-width: 280px;" oninput="filterInventoryTree()">
+                            <div style="display:flex; gap:8px; flex-wrap:wrap;">
                                 <button class="btn-icon" id="btn-batch-move-toggle" style="padding: 4px 10px; font-size: 12px;" onclick="toggleBatchMoveMode()"><span class="icon" data-icon="move"></span> Batch Select</button>
                                 <button class="btn-icon" style="padding: 4px 10px; font-size: 12px;" onclick="renderEditableInfraTree(); loadAuditStatus(); loadAuditSchedules();"><span class="icon" data-icon="refresh-cw"></span> Refresh Data</button>
                             </div>
                         </div>
+                        <input type="text" class="form-input" id="inv-tree-search" placeholder="Search tools by name, QR code, serial, or part #..." style="margin-bottom: 16px;" oninput="filterInventoryTree()">
                         <!-- Shown only while batch-select mode is on (see toggleBatchMoveMode() in
                              admin.js) -- a checkbox then appears on every tool row in the tree
                              below, and this bar tracks the running selection. -->

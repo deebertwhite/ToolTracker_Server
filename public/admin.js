@@ -414,7 +414,22 @@ async function handlePhotoUpload(event) {
         alert('✅ Photo uploaded successfully!');
         if (uploadTarget.type === 'user') { loadUsers(); loadRosterDirectory(); }
         else if (uploadTarget.type === 'calibration') { loadCalibrationHistory(uploadTarget.toolId); }
-        else { renderEditableInfraTree(); }
+        else {
+            // Rebuild the tree first so globalDrawersCache/globalBoxesCache/globalToolsCache
+            // reflect the new photo_url, THEN -- if this entity's own card is the one still
+            // open (the only way to have reached the Photo button in the first place) --
+            // re-open it fresh. Without this, the modal kept showing its OLD <img src>, which
+            // the upload endpoint may have just deleted from disk (see deletePhotoFile() in
+            // POST /api/upload), and for a drawer specifically its tool-position markers
+            // (tools.position_x/position_y -- entirely separate columns, never touched by a
+            // photo upload) stayed rendered against the stale image instead of the new one,
+            // making already-placed tools look "lost" even though nothing was actually
+            // deleted. Re-opening re-renders renderPositionMap() against the fresh photo with
+            // that same unchanged position data.
+            await renderEditableInfraTree();
+            const modalOpen = document.getElementById('entity-modal-overlay').style.display === 'flex';
+            if (modalOpen) openEntityModal(uploadTarget.type, uploadTarget.id);
+        }
     } else {
         alert('❌ ' + (data.error || 'Upload failed.'));
     }
@@ -1796,12 +1811,6 @@ async function addNewTool() {
         saveBtn.textContent = originalBtnText;
     }
 
-    if (quantity === 1) {
-        const r = results[0];
-        if (r.success) alert(`✅ Asset saved: ${r.qr_code}${r.message.includes('photo upload failed') ? '\n⚠️ Photo upload failed. You can add it later from the tool\'s card.' : ''}`);
-        else alert('❌ ' + r.message);
-    }
-
     if (results.some(r => r.success)) {
         document.getElementById('add-tool-name').value = '';
         document.getElementById('add-tool-desc').value = '';
@@ -1824,27 +1833,29 @@ async function addNewTool() {
         await renderEditableInfraTree(); // awaited so globalToolsCache already has the new tools by the time the results list below is clickable
     }
 
-    if (quantity > 1) renderAddToolResults(results, isCalibrated);
+    renderAddToolResults(results);
 }
 
 /**
- * Renders the post-save summary for a batch ingest (#add-tool-quantity > 1 in addNewTool()) --
- * one row per tool actually attempted, success or failure, so a partial failure (e.g. a
- * mid-batch network hiccup) stays visible instead of being lumped into one pass/fail result the
- * way a single alert() would be. Each successful row opens that tool's own entity card
- * (openEntityModal(), same as clicking it in the Master Storage & Asset Tree) -- the existing
- * "+ Log Calibration" form and Photo button there are how a calibrated batch gets its
- * individual per-tool detail filled in, right away or later; nothing new needed for that, the
- * tools are already fully real and usable the moment they're created either way.
+ * Renders the post-save summary for addNewTool() -- one row per tool actually attempted,
+ * success or failure, for both a single save and a batch (#add-tool-quantity > 1) alike. A
+ * partial batch failure (e.g. a mid-batch network hiccup) stays visible instead of being
+ * lumped into one pass/fail result the way a single alert() would be -- and a plain single-
+ * tool save gets the same immediate path onward instead of a dead-end alert(). Each successful
+ * row opens that tool's own entity card (openEntityModal(), same as clicking it in the Master
+ * Storage & Asset Tree) -- the existing "+ Log Calibration" form, Sub-Assemblies section, and
+ * Photo button there are how a tool's individual detail gets filled in, right away or later;
+ * nothing new needed for that, the tool is already fully real and usable the moment it's
+ * created either way.
  */
-function renderAddToolResults(results, isCalibrated) {
+function renderAddToolResults(results) {
     const container = document.getElementById('add-tool-results');
     const successCount = results.filter(r => r.success).length;
     container.style.display = 'block';
     container.innerHTML = `
         <div style="font-size:13px; margin-bottom:8px;">
             <strong>${successCount} of ${results.length} saved.</strong>
-            ${isCalibrated && successCount ? ' Click a tool below to log its calibration record now, or come back to it later from its own card.' : ''}
+            ${successCount ? ' Click a tool below to open its card -- log calibration, add sub-assemblies, attach a photo, etc. -- or come back to it later.' : ''}
         </div>
         <div style="display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto;">
             ${results.map(r => `
