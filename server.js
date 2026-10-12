@@ -899,7 +899,7 @@ app.get('/api/tools', async (req, res) => {
                    EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation,
                    tg.name AS group_name,
                    t.cal_due_date::text AS cal_due_date, t.last_cal_date::text AS last_cal_date,
-                   subs.sub_assemblies
+                   subs.sub_assemblies, alts.alt_part_numbers
             FROM tools t
             LEFT JOIN tool_groups tg ON t.group_id = tg.group_id
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
@@ -914,6 +914,12 @@ app.get('/api/tools', async (req, res) => {
                 ) ORDER BY sa.created_at ASC) FILTER (WHERE sa.sub_id IS NOT NULL), '[]') AS sub_assemblies
                 FROM tool_sub_assemblies sa WHERE sa.tool_id = t.tool_id
             ) subs ON true
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(json_agg(json_build_object(
+                    'alt_id', ap.alt_id, 'part_number', ap.part_number
+                ) ORDER BY ap.created_at ASC) FILTER (WHERE ap.alt_id IS NOT NULL), '[]') AS alt_part_numbers
+                FROM tool_alt_part_numbers ap WHERE ap.tool_id = t.tool_id
+            ) alts ON true
             ORDER BY t.name ASC;
         `;
         const result = await pool.query(query); 
@@ -2104,6 +2110,45 @@ app.delete('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), as
     }
 });
 
+// ==========================================
+// 5.2 ALTERNATE PART NUMBERS (migrations/019_tool_alt_part_numbers.sql)
+// ==========================================
+// Some tools have more than one valid part number (e.g. a commercial/OEM number alongside a
+// MIL-SPEC equivalent). tools.part_number stays the one primary number; this is any additional
+// ones. No edit endpoint -- a single string value is simpler to delete and re-add than to
+// build a whole edit form for, same reasoning Tool Groups' member list has no per-tool edit
+// form either. requireRole(2) matches PUT /api/tools/:id's threshold.
+
+app.post('/api/tools/:id/alt-part-numbers', requireFetchHeader, requireRole(2), async (req, res) => {
+    const part_number = normalizeCode(req.body.part_number);
+    if (!part_number) return res.status(400).json({ error: 'A part number is required.' });
+
+    try {
+        const toolRes = await pool.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
+        if (toolRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+
+        const result = await pool.query(
+            'INSERT INTO tool_alt_part_numbers (tool_id, part_number) VALUES ($1, $2) RETURNING alt_id',
+            [req.params.id, part_number]
+        );
+        res.json({ success: true, alt_id: result.rows[0].alt_id });
+    } catch (err) {
+        console.error('Alt Part Number Create Error:', err);
+        res.status(500).json({ error: 'Failed to add alternate part number.' });
+    }
+});
+
+app.delete('/api/alt-part-numbers/:alt_id', requireFetchHeader, requireRole(2), async (req, res) => {
+    try {
+        const result = await pool.query('DELETE FROM tool_alt_part_numbers WHERE alt_id = $1 RETURNING alt_id', [req.params.alt_id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Alternate part number not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Alt Part Number Delete Error:', err);
+        res.status(500).json({ error: 'Failed to delete alternate part number.' });
+    }
+});
+
 // Sets (or clears) where a tool sits on its drawer's photo, for the visual shadow-board map
 // (see migrations/009_tool_positions.sql). Deliberately separate from PUT /api/tools/:id --
 // dragging a marker on a photo is a distinct, frequent, low-stakes action that shouldn't
@@ -2220,7 +2265,32 @@ app.post('/api/tools/:id/incidents/:incident_id/resolve', requireFetchHeader, re
 // through this CSV never touches a field the normal edit screen wouldn't. Department/
 // Toolbox/Drawer are flattened into columns rather than raw ids so the file is directly
 // Excel-editable; Barcode ID is the natural key tying a row back to a specific tool.
-const TOOLS_CSV_COLUMNS = ['Department', 'Toolbox', 'Drawer', 'Barcode ID', 'Tool Name', 'Description', 'Serial Number', 'Part Number', 'Status', 'Requires Calibration', 'Last Calibrated', 'Calibration Due', 'Replacement URL'];
+const TOOLS_CSV_COLUMNS = ['Department', 'Toolbox', 'Drawer', 'Barcode ID', 'Tool Name', 'Description', 'Serial Number', 'Part Number', 'Alt Part Numbers', 'Status', 'Requires Calibration', 'Last Calibrated', 'Calibration Due', 'Replacement URL'];
+
+// Multiple alternate part numbers round-trip through one CSV cell as a single "; "-joined
+// list (see TOOLS_CSV_COLUMNS' 'Alt Part Numbers' column) -- simpler than a second sheet/file,
+// and a spreadsheet person can read/edit a short list in one cell easily enough. Import treats
+// the cell as the tool's COMPLETE alternate set, replacing whatever was there before, same
+// "this cell is the current truth" model every other CSV column already uses.
+const ALT_PART_NUMBER_DELIMITER = '; ';
+
+/** Parses one CSV cell's "; "-delimited alternate part numbers into a clean, normalized, deduplicated array (empty string / blank cell -> []). */
+function parseAltPartNumbersCell(cellValue) {
+    const seen = new Set();
+    return (cellValue || '')
+        .split(';')
+        .map(s => normalizeCode(s))
+        .filter(Boolean)
+        .filter(pn => (seen.has(pn) ? false : (seen.add(pn), true)));
+}
+
+/** Replaces a tool's complete alternate-part-number set -- used by CSV import, where one cell describes the tool's full current list rather than an incremental add/remove. */
+async function replaceAltPartNumbers(client, toolId, partNumbers) {
+    await client.query('DELETE FROM tool_alt_part_numbers WHERE tool_id = $1', [toolId]);
+    for (const pn of partNumbers) {
+        await client.query('INSERT INTO tool_alt_part_numbers (tool_id, part_number) VALUES ($1, $2)', [toolId, pn]);
+    }
+}
 
 /** Formats a DATE column (returned by pg as a JS Date or null) as YYYY-MM-DD for CSV, or '' if null. */
 const formatCsvDate = (d) => d ? d.toISOString().split('T')[0] : '';
@@ -2233,11 +2303,16 @@ app.get('/api/tools/export', requireRole(2), async (req, res) => {
         const result = await pool.query(`
             SELECT d.name AS department, b.name AS toolbox, dr.name AS drawer,
                    t.qr_code, t.name, t.description, t.serial_number, t.part_number, t.status,
-                   t.is_calibrated, t.last_cal_date, t.cal_due_date, t.replacement_url
+                   t.is_calibrated, t.last_cal_date, t.cal_due_date, t.replacement_url,
+                   alts.alt_part_numbers
             FROM tools t
             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
             LEFT JOIN departments d ON b.dept_id = d.dept_id
+            LEFT JOIN LATERAL (
+                SELECT string_agg(ap.part_number, '${ALT_PART_NUMBER_DELIMITER}' ORDER BY ap.created_at ASC) AS alt_part_numbers
+                FROM tool_alt_part_numbers ap WHERE ap.tool_id = t.tool_id
+            ) alts ON true
             ORDER BY d.name ASC, b.name ASC, dr.name ASC, t.name ASC
         `);
 
@@ -2250,6 +2325,7 @@ app.get('/api/tools/export', requireRole(2), async (req, res) => {
             'Description': t.description || '',
             'Serial Number': t.serial_number || '',
             'Part Number': t.part_number || '',
+            'Alt Part Numbers': t.alt_part_numbers || '',
             'Status': t.status,
             'Requires Calibration': t.is_calibrated ? 'TRUE' : 'FALSE',
             'Last Calibrated': formatCsvDate(t.last_cal_date),
@@ -2431,6 +2507,7 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 last_cal_date: row['Last Calibrated']?.trim() || null,
                 cal_due_date,
             };
+            const altPartNumbers = parseAltPartNumbersCell(row['Alt Part Numbers']);
             const requestedStatus = row['Status']?.trim() || 'In';
 
             const existingRes = await pool.query('SELECT tool_id, status, name FROM tools WHERE qr_code = $1', [qr_code]);
@@ -2456,6 +2533,7 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                      fields.is_calibrated, fields.last_cal_date, fields.cal_due_date,
                      fields.serial_number, fields.part_number, drawerId, existing.tool_id]
                 );
+                await replaceAltPartNumbers(pool, existing.tool_id, altPartNumbers);
                 updated++;
 
                 // Same reasoning as PUT /api/tools/:id -- a renamed tool's label is stale
@@ -2478,12 +2556,13 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
                 const duplicateSerial = await findDuplicateSerial(pool, fields.serial_number);
                 if (duplicateSerial) throw new Error(duplicateSerialErrorMessage(duplicateSerial));
 
-                await pool.query(
+                const insertRes = await pool.query(
                     `INSERT INTO tools (qr_code, name, description, replacement_url, drawer_id, status, is_calibrated, last_cal_date, cal_due_date, serial_number, part_number)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING tool_id`,
                     [qr_code, fields.name, fields.description, fields.replacement_url, drawerId, 'In',
                      fields.is_calibrated, fields.last_cal_date, fields.cal_due_date, fields.serial_number, fields.part_number]
                 );
+                await replaceAltPartNumbers(pool, insertRes.rows[0].tool_id, altPartNumbers);
                 created++;
 
                 // Best-effort, same reasoning as POST /api/tools -- a label-generation

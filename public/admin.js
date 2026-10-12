@@ -1136,7 +1136,8 @@ async function renderEditableInfraTree() {
                                 const batchCheckbox = batchMoveMode
                                     ? `<input type="checkbox" onclick="event.stopPropagation();" onchange="toggleToolSelection(${tool.tool_id}, this.checked)" ${selectedToolIds.has(tool.tool_id) ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; flex-shrink:0;">`
                                     : '';
-                                const searchKey = [tool.name, tool.qr_code, tool.serial_number, tool.part_number].filter(Boolean).join(' ').toUpperCase();
+                                const altPartNumberList = (tool.alt_part_numbers || []).map(ap => ap.part_number);
+                                const searchKey = [tool.name, tool.qr_code, tool.serial_number, tool.part_number, ...altPartNumberList].filter(Boolean).join(' ').toUpperCase();
                                 html += `
                                     <div class="tool-tree-row" data-search="${searchKey.replace(/"/g, '&quot;')}" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02); cursor: pointer;" onclick="openEntityModal('tool', '${tool.qr_code}')">
                                         ${batchCheckbox}
@@ -2166,6 +2167,25 @@ function openEntityModal(type, id) {
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Serial Number</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.serial_number || '--'}</div></div>
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Part Number</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.part_number || '--'}</div></div>
             </div>
+            <div style="margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
+                <div style="font-size:11px;color:var(--muted);text-transform:uppercase; margin-bottom:8px;">Alt Part Numbers</div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;${canEditTools ? ' margin-bottom:8px;' : ''}">
+                    ${(entity.alt_part_numbers || []).length === 0
+                        ? `<span style="color:var(--muted); font-style:italic; font-size:12px;">None</span>`
+                        : entity.alt_part_numbers.map(ap => `
+                            <span style="display:inline-flex; align-items:center; gap:6px; background:var(--surface); padding:3px 8px; border-radius:4px; font-size:12px; font-family:monospace;">
+                                ${ap.part_number}
+                                ${canEditTools ? `<span style="cursor:pointer; color:var(--red); display:inline-flex;" onclick="deleteAltPartNumber(${ap.alt_id}, '${entity.qr_code}')" title="Remove">${icon('x')}</span>` : ''}
+                            </span>
+                        `).join('')}
+                </div>
+                ${canEditTools ? `
+                    <div style="display:flex; gap:6px;">
+                        <input class="form-input" id="em-new-alt-partnum" style="text-transform:uppercase; font-size:12px; padding:6px 10px;" placeholder="e.g. MS35206-262" oninput="uppercaseInput(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();addAltPartNumber('${entity.tool_id}','${entity.qr_code}');}">
+                        <button type="button" class="btn-icon" style="width:auto; padding:6px 12px; font-size:12px; flex-shrink:0;" onclick="addAltPartNumber('${entity.tool_id}','${entity.qr_code}')">${icon('plus')} Add</button>
+                    </div>
+                ` : ''}
+            </div>
             <div style="display: flex; gap: 30px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Status</div><div style="font-size:14px;margin-top:4px;font-weight:bold;color:var(--accent);">${entity.status}</div></div>
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Calibration</div><div style="font-size:14px;margin-top:4px;font-weight:bold;">${calText}</div></div>
@@ -2941,6 +2961,37 @@ async function deleteSubAssembly(subId, qrCode) {
     try {
         const res = await fetch(`/api/sub-assemblies/${subId}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to delete sub-assembly.')); }
+        await renderEditableInfraTree();
+        openEntityModal('tool', qrCode);
+    } catch (e) {
+        alert('Network Error.');
+    }
+}
+
+/** Adds one alternate part number (migrations/019) to a tool -- e.g. a MIL-SPEC equivalent alongside the primary commercial/OEM part_number. No confirm()/undo ceremony on this or its delete counterpart below -- unlike a sub-assembly, a bare alternate part number string is trivial to re-add if removed by mistake. */
+async function addAltPartNumber(toolId, qrCode) {
+    const input = document.getElementById('em-new-alt-partnum');
+    const partNumber = input.value.trim();
+    if (!partNumber) return;
+    try {
+        const res = await fetch(`/api/tools/${toolId}/alt-part-numbers`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ part_number: partNumber })
+        });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to add alternate part number.')); }
+        await renderEditableInfraTree();
+        openEntityModal('tool', qrCode);
+    } catch (e) {
+        alert('Network Error.');
+    }
+}
+
+/** Removes one alternate part number. See addAltPartNumber()'s doc comment for why this skips a confirm() prompt. */
+async function deleteAltPartNumber(altId, qrCode) {
+    try {
+        const res = await fetch(`/api/alt-part-numbers/${altId}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to remove alternate part number.')); }
         await renderEditableInfraTree();
         openEntityModal('tool', qrCode);
     } catch (e) {
