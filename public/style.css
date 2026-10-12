@@ -119,6 +119,18 @@ body.dashboard-layout { display: flex; flex-direction: row; height: 100vh; overf
 .form-input:focus, .form-select:focus { border-color: var(--accent); }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: clamp(15px, 4vw, 24px); margin-bottom: 20px; overflow: hidden; height: fit-content; }
+
+/* For a .card used as the content of a fixed, viewport-centered modal overlay (entity modal,
+   credentials modal, batch-move modal -- each `<div style="position:fixed; ...; padding:20px;
+   align-items:center;">` wrapping a bare `.card`). The base .card rule above has no height
+   limit and `overflow:hidden`, so a modal whose content grows taller than the viewport (a
+   tool's card with calibration history + incident history + trace investigations + sub-
+   assemblies, say) centers itself right off both edges of the screen with nothing able to
+   scroll -- confirmed on a real small phone viewport: the close (X) button pushed entirely
+   above the top of the screen, and the "Save" button of whatever form was open pushed below
+   the bottom, both unreachable, no touch target able to scroll to either one. 40px accounts
+   for the overlay's own 20px top+bottom padding. */
+.modal-card-scroll { max-height: calc(100vh - 40px); overflow-y: auto; }
 .section-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
 
 .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 20px; flex-wrap: wrap; gap: 15px; }

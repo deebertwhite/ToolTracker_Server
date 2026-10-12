@@ -472,7 +472,7 @@
 
     <!-- Universal entity modal: shared editor/viewer for toolbox, drawer, and tool records; populated per-type by openEntityModal() and toggled between read/edit views by toggleModalEditMode() -->
     <div id="entity-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
-        <div class="card" style="width: 100%; max-width: 450px; position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+        <div class="card modal-card-scroll" style="width: 100%; max-width: 450px; position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
             <button onclick="closeEntityModal()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;"><span class="icon" data-icon="x"></span></button>
             
             <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 15px;">
@@ -525,7 +525,7 @@
          Opened via showCredentialsModal(), explicit-close only (no click-outside-to-dismiss) since
          it displays one-time-sensitive info the operator should consciously finish reading first. -->
     <div id="cred-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
-        <div class="card" style="width: 100%; max-width: 420px; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+        <div class="card modal-card-scroll" style="width: 100%; max-width: 420px; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
             <h3 id="cred-modal-title" style="margin-bottom: 6px;">Credentials</h3>
             <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Relay these to the person directly, then close this window.</p>
             <div id="cred-modal-body"></div>
@@ -541,7 +541,7 @@
          Asset and tool-edit Location fields already use) for moving every currently-selected
          tool (see toggleBatchMoveMode() in admin.js) to one drawer in a single action. -->
     <div id="batch-move-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
-        <div class="card" style="width: 100%; max-width: 420px; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+        <div class="card modal-card-scroll" style="width: 100%; max-width: 420px; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
             <h3 style="margin-bottom: 6px;">Move Tools</h3>
             <p id="batch-move-modal-subtitle" style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Choose a destination drawer.</p>
             <div class="form-group"><label class="form-label">Department</label><select class="form-select" id="batch-move-dept" onchange="populateBoxSelect(document.getElementById('batch-move-box'), this.value); populateDrawerSelect(document.getElementById('batch-move-drawer'), null);"><option value="">-- Select Department --</option></select></div>
