@@ -2334,9 +2334,10 @@ function openEntityModal(type, id) {
                     <div class="form-group" style="margin-bottom:10px;">
                         <label class="form-label">Resolution</label>
                         <select class="form-select" id="em-incident-resolution">
-                            <option value="RESOLVED">Found / Repaired -- Return to Service</option>
+                            ${entity.status === 'In' ? `<option value="RESOLVED">Found / Repaired -- Return to Service</option>` : ''}
                             <option value="WRITTEN_OFF">Write Off -- Retire Permanently</option>
                         </select>
+                        ${entity.status !== 'In' ? `<div style="font-size:11px; color: var(--muted); margin-top:4px;">To resolve as Found/Repaired, scan this tool in (Check-In) at the kiosk first -- that's the actual "it's back" moment. Come back here afterward just to close out the incident record, or write it off now if it's gone for good.</div>` : ''}
                     </div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Resolution Notes</label><input class="form-input" id="em-incident-notes" placeholder="e.g. Found in Drawer 3, mislabeled during last audit"></div>
                     <div style="display:flex; gap:8px;">
@@ -2391,15 +2392,18 @@ function openEntityModal(type, id) {
                     </select>
                 </div>`;
         } else { // Missing / Broken / Worn -- the server's status state machine only allows
-                 // staying the same, resolving back to In, or retiring from these states, so
-                 // the other two flag values must NOT be offered as selectable targets here.
+                 // staying the same or retiring from these states. "In" is deliberately NOT
+                 // offered here (or anywhere in this dropdown, for any status) -- a flagged
+                 // tool only returns to service by actually being scanned in at the kiosk
+                 // (Check-In), not by an admin editing its status. That kiosk scan is the real
+                 // accountability moment; this form can't substitute for it.
             statusFieldHtml = `
                 <div class="form-group"><label class="form-label">Physical Status</label>
                     <select class="form-select" id="em-input-status">
                         <option value="${entity.status}" selected>${entity.status} (No Change)</option>
-                        <option value="In">In (Resolved)</option>
                         <option value="Retired">Retired (Permanent)</option>
                     </select>
+                    <div style="font-size:11px; color: var(--muted); margin-top:4px;">To bring this tool back into service, scan it in (Check-In) at the kiosk -- editing status here can't do that.</div>
                 </div>`;
         }
 

@@ -556,7 +556,7 @@ async function describeAuditWindowStatus(deptId, windowStart, windowEnd = null) 
 
 /**
  * TOOL STATUS STATE MACHINE: validates whether an admin-driven status change
- * (via PUT /api/tools/:id) is legal, without touching the DB.
+ * (via PUT /api/tools/:id, the incident-resolve endpoint, or CSV import) is legal, without touching the DB.
  * - 'Out', 'Pending Transfer', and 'In Calibration' can never be *entered* here -- 'Out' only
  *   happens via a real kiosk checkout, the other two only via the transfer endpoints.
  * - While 'Pending Transfer' or 'In Calibration', no change is allowed at all.
@@ -566,7 +566,8 @@ async function describeAuditWindowStatus(deptId, windowStart, windowEnd = null) 
  *   afterward, which was impossible to do correctly and blocked reporting a tool broken or
  *   lost while someone actually had it). Retiring an Out tool directly isn't allowed -- it
  *   must pass through one of the three flagged states first, same as from every other status.
- * - Otherwise: 'In' <-> (Missing, Broken, Worn) freely, any of those -> Retired, Retired is terminal.
+ * - Otherwise: Missing/Broken/Worn -> Retired is allowed, but NONE of them can go straight
+ *   back to 'In' here -- see the dedicated block below for why.
  * @param {string} currentStatus - the tool's status before the update
  * @param {string} requestedStatus - the status being requested
  * @returns {{ allowed: true } | { allowed: false, code: string }}
@@ -591,7 +592,21 @@ const checkToolStatusTransition = (currentStatus, requestedStatus) => {
     }
 
     if (['Missing', 'Broken', 'Worn'].includes(currentStatus)) {
-        if (requestedStatus === 'In' || requestedStatus === 'Retired') return { allowed: true };
+        if (requestedStatus === 'Retired') return { allowed: true };
+        // Deliberately NOT allowing a flagged tool to go straight back to 'In' here. A tool
+        // only returns to service by someone actually scanning it in at the kiosk
+        // (CHECKIN_TOOL in POST /api/transactions, which has no status gate of its own and
+        // accepts a Missing/Broken/Worn tool exactly like an 'Out' one) -- not by an admin
+        // typing a new status into an edit form or a CSV row. That kiosk scan is the real
+        // "contract": badge+PIN+buddy sign-off, the same accountability moment as a normal
+        // check-in, for someone knowingly accepting that this specific tool is back and
+        // intact. A found-but-damaged tool should be reported broken through the normal
+        // report-issue flow once it's back, not revived as clean via a database write.
+        // POST /api/tools/:id/incidents/:incident_id/resolve's "Found/Repaired" resolution
+        // calls this same function with requestedStatus='In' -- it can only succeed once the
+        // tool is ALREADY 'In' (the no-op case at the top of this function), i.e. after it's
+        // actually been checked in; until then this correctly rejects it.
+        if (requestedStatus === 'In') return { allowed: false, code: 'MANUAL_CHECKIN_NOT_ALLOWED' };
         return { allowed: false, code: 'INVALID_STATUS_TRANSITION' };
     }
 
@@ -895,6 +910,7 @@ app.get('/api/tools', async (req, res) => {
     try {
         const query = `
             SELECT t.*, b.name AS toolbox_name, dr.name AS drawer_name, d.name AS department_name,
+                   d.dept_id AS tool_dept_id,
                    EXISTS(SELECT 1 FROM calibration_records cr WHERE cr.tool_id = t.tool_id) AS has_cal_record,
                    EXISTS(SELECT 1 FROM trace_investigations ti WHERE ti.tool_id = t.tool_id AND ti.status = 'OPEN') AS has_open_investigation,
                    tg.name AS group_name,
@@ -1962,7 +1978,10 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         const transition = checkToolStatusTransition(previousStatus, status);
         if (!transition.allowed) {
             await client.query('ROLLBACK');
-            return res.status(409).json({ error: 'That status change is not allowed.', code: transition.code });
+            const message = transition.code === 'MANUAL_CHECKIN_NOT_ALLOWED'
+                ? `${currentRes.rows[0].name} can only return to "In" by being scanned in at the kiosk -- not by editing its status here. If it's been found, check it in there first; if it's damaged, report that instead.`
+                : 'That status change is not allowed.';
+            return res.status(409).json({ error: message, code: transition.code });
         }
 
         // Lets a tool be moved to a different drawer -- including in a different toolbox or
@@ -1989,22 +2008,25 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
              serial_number, part_number, drawer_id, group_id || null, toolId]
         );
 
-        // If this save just moved the tool OUT of a flagged state (Missing/Broken/Worn),
-        // auto-close whatever OPEN tool_incidents row is behind it and log the resolution --
-        // previously this whole path left no trace at all of who resolved a lost/broken tool
-        // report or when. Doesn't require going through the dedicated resolve endpoint below;
-        // that one exists for collecting resolution notes, but a plain edit-form save that
-        // happens to change the status still gets the incident properly closed either way.
+        // If this save just retired a flagged tool (Missing/Broken/Worn -> Retired), auto-close
+        // whatever OPEN tool_incidents row is behind it and log the write-off -- previously
+        // this path left no trace at all of who resolved a lost/broken tool report or when.
+        // 'Retired' is the ONLY way previousStatus !== status can be true here from a flagged
+        // previousStatus: checkToolStatusTransition() above already rejects a flagged tool
+        // going straight back to 'In' through this endpoint (MANUAL_CHECKIN_NOT_ALLOWED) --
+        // that can only happen via an actual kiosk check-in, which is a different code path
+        // entirely and doesn't touch tool_incidents, so a "Found/Repaired" resolution is only
+        // ever recorded through the dedicated resolve endpoint below, once the tool is
+        // already back to 'In'.
         if (['Missing', 'Broken', 'Worn'].includes(previousStatus) && previousStatus !== status) {
             const openIncidentRes = await client.query(
                 "SELECT incident_id FROM tool_incidents WHERE tool_id = $1 AND status = 'OPEN' ORDER BY reported_at DESC LIMIT 1",
                 [toolId]
             );
             if (openIncidentRes.rows.length > 0) {
-                const resolution = status === 'Retired' ? 'WRITTEN_OFF' : 'RESOLVED';
                 await client.query(
-                    `UPDATE tool_incidents SET status = $1, resolved_by_user_id = $2, resolved_at = NOW() WHERE incident_id = $3`,
-                    [resolution, req.authUser.user_id, openIncidentRes.rows[0].incident_id]
+                    `UPDATE tool_incidents SET status = 'WRITTEN_OFF', resolved_by_user_id = $1, resolved_at = NOW() WHERE incident_id = $2`,
+                    [req.authUser.user_id, openIncidentRes.rows[0].incident_id]
                 );
                 await client.query(
                     "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'INCIDENT_RESOLVED', $2, $3)",
@@ -2233,7 +2255,10 @@ app.post('/api/tools/:id/incidents/:incident_id/resolve', requireFetchHeader, re
         const transition = checkToolStatusTransition(transitionRes.rows[0].status, newStatus);
         if (!transition.allowed) {
             await client.query('ROLLBACK');
-            return res.status(409).json({ error: 'That resolution is not allowed from this tool\'s current state.', code: transition.code });
+            const message = transition.code === 'MANUAL_CHECKIN_NOT_ALLOWED'
+                ? 'This tool must actually be scanned in at the kiosk (Check-In) before this incident can be resolved as Found/Repaired -- resolving it here only closes the incident record, once the tool is already back.'
+                : 'That resolution is not allowed from this tool\'s current state.';
+            return res.status(409).json({ error: message, code: transition.code });
         }
 
         await client.query('UPDATE tools SET status = $1, status_reason = NULL WHERE tool_id = $2', [newStatus, incident.tool_id]);
@@ -2515,7 +2540,12 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
             if (existingRes.rows.length > 0) {
                 const existing = existingRes.rows[0];
                 const transition = checkToolStatusTransition(existing.status, requestedStatus);
-                if (!transition.allowed) throw new Error(`Status change from "${existing.status}" to "${requestedStatus}" is not allowed (${transition.code}).`);
+                if (!transition.allowed) {
+                    if (transition.code === 'MANUAL_CHECKIN_NOT_ALLOWED') {
+                        throw new Error(`Cannot set Status to "In" by CSV import -- this tool is currently "${existing.status}" and can only return to "In" by being scanned in at the kiosk.`);
+                    }
+                    throw new Error(`Status change from "${existing.status}" to "${requestedStatus}" is not allowed (${transition.code}).`);
+                }
 
                 const duplicateSerial = await findDuplicateSerial(pool, fields.serial_number, existing.tool_id);
                 if (duplicateSerial) throw new Error(duplicateSerialErrorMessage(duplicateSerial));
