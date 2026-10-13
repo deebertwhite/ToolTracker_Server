@@ -221,9 +221,31 @@ const getRoleWeight = (role) => {
 };
 
 /**
+ * The role weight `authUser` actually holds IN A SPECIFIC department -- home department weight
+ * is always `authUser.weight` (unchanged home-role meaning); any OTHER department comes from
+ * that specific grant row's own role (migrations/021_per_department_roles.sql), not the user's
+ * home role. Returns 0 for a department the user has no access to at all. super_admin is
+ * global or not treated as department-scoped anywhere, so it's always 4 regardless of deptId.
+ *
+ * `authUser.deptRoles` (built in requireRole()/getUserAccess()) is a plain object keyed by
+ * department id -- Postgres JSON object keys always come back as strings, so deptId is always
+ * coerced via String() before the lookup, not compared as a number.
+ * @param {{role: string, dept_id: number, weight: number, deptRoles?: Object<string, string>}} authUser
+ * @param {number|null} deptId
+ * @returns {number}
+ */
+function getEffectiveRoleWeight(authUser, deptId) {
+    if (authUser.role === 'super_admin') return 4;
+    if (deptId != null && deptId === authUser.dept_id) return authUser.weight;
+    const grantRole = authUser.deptRoles ? authUser.deptRoles[String(deptId)] : null;
+    return grantRole ? getRoleWeight(grantRole) : 0;
+}
+
+/**
  * Express middleware factory: rejects the request (401/403) unless the current admin
- * session belongs to an active user whose role weight meets minWeight. On success,
- * attaches the authenticated user to req.authUser for the handler to use.
+ * session belongs to an active user whose role weight meets minWeight ANYWHERE (home
+ * department or any granted one -- see req.authUser.maxWeight below). On success, attaches
+ * the authenticated user to req.authUser for the handler to use.
  *
  * The role is re-checked against the DB on every request rather than trusted from the
  * session's cached snapshot -- a deactivated or demoted admin loses access immediately
@@ -231,21 +253,31 @@ const getRoleWeight = (role) => {
  * truth for authorization from here on: handlers must never use a client-supplied
  * `requester` field from req.body/req.query to decide what someone is allowed to do,
  * only req.authUser (sourced from the verified, server-side session).
- * @param {number} minWeight - minimum getRoleWeight() the session's user must have
+ *
+ * IMPORTANT (migrations/021_per_department_roles.sql): since a grant can now carry a role
+ * below the user's home role, this middleware is only a COARSE gate -- "does this user hold
+ * at least minWeight *somewhere*" -- not proof they hold it in the specific department a
+ * request concerns (Express middleware runs before the handler parses that out of
+ * params/body). Any handler whose action targets a specific department-owned entity MUST
+ * separately call getEffectiveRoleWeight(req.authUser, thatDepartmentId) and check it against
+ * whatever weight that action actually needs -- do not treat passing this middleware alone as
+ * sufficient for a department-scoped write.
+ * @param {number} minWeight - minimum getRoleWeight() the session's user must have, at least somewhere
  */
 function requireRole(minWeight) {
     return async (req, res, next) => {
         if (!req.session.user) return res.status(401).json({ error: 'Not logged in.' });
         try {
-            // LEFT JOINs in user_department_access (see migrations/005) so every request
+            // LEFT JOINs in user_department_access (see migrations/005, /021) so every request
             // carries the full set of departments this user can act in -- their home
             // department plus any a super_admin has explicitly granted them, e.g. a
-            // dept_admin who oversees more than one department in practice. array_agg over a
-            // LEFT JOIN with no matches produces a one-element array containing NULL, not an
-            // empty array, hence the FILTER -- see accessibleDeptIds below.
+            // dept_admin who oversees more than one department in practice -- and the ROLE
+            // (not just membership) they hold in each granted one. json_object_agg over a
+            // LEFT JOIN with no matches produces one key {null: null}, not an empty object,
+            // hence the FILTER -- see deptRoles below.
             const result = await pool.query(
                 `SELECT u.user_id, u.role, u.dept_id, u.is_active,
-                        COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+                        COALESCE(json_object_agg(uda.dept_id, uda.role) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS dept_roles
                  FROM users u
                  LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
                  WHERE u.badge_id = $1
@@ -258,16 +290,29 @@ function requireRole(minWeight) {
             }
             const row = result.rows[0];
             const weight = getRoleWeight(row.role);
-            if (weight < minWeight) return res.status(403).json({ error: 'Insufficient permissions.' });
+            const deptRoles = row.dept_roles || {};
+            const maxWeight = Math.max(weight, ...Object.values(deptRoles).map(getRoleWeight));
+            if (maxWeight < minWeight) return res.status(403).json({ error: 'Insufficient permissions.' });
             req.authUser = {
                 badge_id: req.session.user.badge_id,
                 role: row.role,
                 dept_id: row.dept_id,
+                // Home-role weight ONLY -- never redefine this to "best weight anywhere".
+                // Several account-management endpoints (reset-pin, login-token issuance,
+                // deactivate, promote-role) read this directly as the requester's global rank
+                // with no department concept at all; if this meant "best weight anywhere", a
+                // user granted dept_admin in one small department could reset/deactivate/
+                // promote ANYONE system-wide. maxWeight below is the ONLY thing the coarse
+                // gate above should use.
                 weight,
+                maxWeight,
                 user_id: row.user_id,
-                // Home department plus every granted one, deduplicated -- the single set to
-                // check anywhere a department-scoped action used to only check dept_id.
-                accessibleDeptIds: [...new Set([row.dept_id, ...row.granted_dept_ids].filter(id => id !== null))],
+                deptRoles,
+                // Home department plus every granted one, deduplicated -- MEMBERSHIP only
+                // (e.g. for populating a "which departments can I act in at all" dropdown).
+                // Does NOT by itself imply any particular weight in a granted department --
+                // use getEffectiveRoleWeight(req.authUser, deptId) for that.
+                accessibleDeptIds: [...new Set([row.dept_id, ...Object.keys(deptRoles).map(Number)])],
             };
             next();
         } catch (err) {
@@ -277,19 +322,20 @@ function requireRole(minWeight) {
 }
 
 /**
- * Resolves a badge_id to { user_id, role, dept_id, accessibleDeptIds } -- accessibleDeptIds
- * is home dept_id plus any explicitly granted ones (see migrations/005), same shape as
- * req.authUser in requireRole() above. Does NOT special-case super_admin as "unrestricted":
- * matching every other use of accessibleDeptIds in this file, callers check
- * role === 'super_admin' themselves wherever unrestricted access should apply. Returns null
- * for an unknown or deactivated badge. Shared by endpoints that need department-access info
- * outside the session-based requireRole path -- currently just the kiosk's one-off
- * badge+PIN-authenticated audit submission, which has no session to attach req.authUser to.
+ * Resolves a badge_id to { user_id, role, dept_id, weight, deptRoles, accessibleDeptIds } --
+ * same shape as req.authUser in requireRole() above (including the home-weight-only `weight`
+ * field and the per-department `deptRoles` map for getEffectiveRoleWeight()). Does NOT
+ * special-case super_admin as "unrestricted": matching every other use of accessibleDeptIds in
+ * this file, callers check role === 'super_admin' themselves wherever unrestricted access
+ * should apply. Returns null for an unknown or deactivated badge. Shared by endpoints that
+ * need department-access info outside the session-based requireRole path -- currently just the
+ * kiosk's one-off badge+PIN-authenticated audit submission, which has no session to attach
+ * req.authUser to.
  */
 async function getUserAccess(badgeId) {
     const result = await pool.query(
         `SELECT u.user_id, u.role, u.dept_id,
-                COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+                COALESCE(json_object_agg(uda.dept_id, uda.role) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS dept_roles
          FROM users u
          LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
          WHERE u.badge_id = $1 AND u.is_active = true
@@ -298,11 +344,14 @@ async function getUserAccess(badgeId) {
     );
     if (result.rows.length === 0) return null;
     const row = result.rows[0];
+    const deptRoles = row.dept_roles || {};
     return {
         user_id: row.user_id,
         role: row.role,
         dept_id: row.dept_id,
-        accessibleDeptIds: [...new Set([row.dept_id, ...row.granted_dept_ids].filter(id => id !== null))],
+        weight: getRoleWeight(row.role),
+        deptRoles,
+        accessibleDeptIds: [...new Set([row.dept_id, ...Object.keys(deptRoles).map(Number)])],
     };
 }
 
@@ -1285,13 +1334,14 @@ app.post('/api/kiosk-auth', /* DISABLED: authLimiter -- see note above authLimit
 // List active users with a lower role weight than the requester (any authenticated requester).
 app.get('/api/users', requireRole(1), async (req, res) => {
     try {
-        // Fetching photo_url for the UI. granted_dept_ids feeds the department-access admin
-        // UI (super_admin only) -- lets a dept_admin's extra departments show up alongside
-        // their home one without a separate round trip per row.
+        // Fetching photo_url for the UI. granted_depts feeds the department-access admin UI
+        // (super_admin only) -- lets a dept_admin's extra departments (each with its OWN role,
+        // migrations/021_per_department_roles.sql, independent of the user's home role) show
+        // up alongside their home one without a separate round trip per row.
         const query = `
             SELECT u.user_id, u.badge_id, u.username, u.email, u.full_name, u.role, u.dept_id, d.name AS department_name, u.photo_url,
                    (u.login_token IS NOT NULL) AS has_login_card,
-                   COALESCE(array_agg(uda.dept_id) FILTER (WHERE uda.dept_id IS NOT NULL), '{}') AS granted_dept_ids
+                   COALESCE(json_agg(json_build_object('dept_id', uda.dept_id, 'role', uda.role)) FILTER (WHERE uda.dept_id IS NOT NULL), '[]') AS granted_depts
             FROM users u
             LEFT JOIN departments d ON u.dept_id = d.dept_id
             LEFT JOIN user_department_access uda ON uda.user_id = u.user_id
@@ -1338,7 +1388,6 @@ app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
         if (!['super_admin', 'dept_admin', 'tool_rep', 'technician'].includes(role)) {
             throw new Error('Invalid role.');
         }
-        if (req.authUser.weight < getRoleWeight(role)) throw new Error('Hierarchy Violation.');
 
         // A super_admin may create a user in any department (or none). Everyone else is
         // restricted to their own accessible departments -- normally just their home one, but
@@ -1347,6 +1396,15 @@ app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
         // not only their own. Silently defaulting to their home department would let a
         // dept_admin's UI selection of a department they don't actually have access to
         // create the user somewhere else entirely without any error -- reject it instead.
+        //
+        // Resolved BEFORE the hierarchy check below (not after, as this used to be ordered) --
+        // migrations/021_per_department_roles.sql means a grant can carry a role below the
+        // requester's home role, so the hierarchy check must weigh against finalDeptId
+        // specifically, not the requester's global weight. Checking department access first
+        // and hierarchy second, using the now-known finalDeptId, closes a real hole: a
+        // dept_admin at home but only tool_rep in a granted department could otherwise still
+        // create a dept_admin-role user THERE, since the old check only ever looked at their
+        // home weight.
         let finalDeptId;
         if (req.authUser.role === 'super_admin') {
             finalDeptId = dept_id || null;
@@ -1357,6 +1415,7 @@ app.post('/api/users', requireFetchHeader, requireRole(1), async (req, res) => {
             }
             finalDeptId = requestedDeptId;
         }
+        if (getEffectiveRoleWeight(req.authUser, finalDeptId) < getRoleWeight(role)) throw new Error('Hierarchy Violation.');
         if (!email || !email.includes('@')) throw new Error('Valid email address required.');
         const username = email.split('@')[0].toLowerCase();
 
@@ -1538,9 +1597,32 @@ app.put('/api/users/:badge_id/role', requireFetchHeader, requireRole(3), async (
 // than exposing separate grant/revoke calls. super_admin-only (requireRole(4)): a dept_admin
 // granting another dept_admin extra departments would let peers hand each other access,
 // bypassing the hierarchy checks the rest of this file enforces.
+//
+// Body is { grants: [{dept_id, role}, ...] } (migrations/021_per_department_roles.sql) -- each
+// grant carries its OWN role for that department, independent of the user's home role. Two
+// caps, both enforced here (not just in the UI, since this is the real authorization
+// boundary): (1) role must be one of the three grantable roles -- 'super_admin' is rejected
+// even though the CHECK constraint would also catch it, for a clean error message instead of a
+// raw 23514 constraint violation; 'super_admin' is a global identity throughout this app
+// (checked directly via role === 'super_admin' in several places), never purely a department-
+// scoped weight, so a per-department grant of it would produce an inconsistent user. (2) the
+// granted role's weight cannot exceed the GRANTER's own home weight (req.authUser.weight, not
+// maxWeight) -- mirrors the existing "cannot promote above your own role" rule at
+// PUT /api/users/:badge_id/role, and prevents someone using an elevated grant in one
+// department to grant further elevation elsewhere.
 app.put('/api/users/:badge_id/department-access', requireFetchHeader, requireRole(4), async (req, res) => {
     const { badge_id } = req.params;
-    const dept_ids = Array.isArray(req.body.dept_ids) ? req.body.dept_ids.map(id => parseInt(id, 10)) : [];
+    const GRANTABLE_ROLES = ['technician', 'tool_rep', 'dept_admin'];
+    const grants = Array.isArray(req.body.grants) ? req.body.grants : [];
+    for (const g of grants) {
+        if (!GRANTABLE_ROLES.includes(g.role)) {
+            return res.status(400).json({ error: `"${g.role}" cannot be granted per-department -- only technician, tool_rep, or dept_admin.` });
+        }
+        if (getRoleWeight(g.role) > req.authUser.weight) {
+            return res.status(403).json({ error: `You cannot grant a role (${g.role}) above your own.` });
+        }
+    }
+    const dept_ids = grants.map(g => parseInt(g.dept_id, 10));
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -1557,10 +1639,14 @@ app.put('/api/users/:badge_id/department-access', requireFetchHeader, requireRol
         }
 
         await client.query('DELETE FROM user_department_access WHERE user_id = $1', [userId]);
-        for (const deptId of new Set(dept_ids)) {
+        const seenDeptIds = new Set();
+        for (const g of grants) {
+            const deptId = parseInt(g.dept_id, 10);
+            if (seenDeptIds.has(deptId)) continue; // one role per department per user -- last one in the list wins silently otherwise; just take the first
+            seenDeptIds.add(deptId);
             await client.query(
-                'INSERT INTO user_department_access (user_id, dept_id, granted_by_user_id) VALUES ($1, $2, $3)',
-                [userId, deptId, req.authUser.user_id]
+                'INSERT INTO user_department_access (user_id, dept_id, role, granted_by_user_id) VALUES ($1, $2, $3, $4)',
+                [userId, deptId, g.role, req.authUser.user_id]
             );
         }
 
@@ -1737,6 +1823,14 @@ app.post('/api/toolboxes', requireFetchHeader, requireRole(3), async (req, res) 
     try {
         await client.query('BEGIN');
 
+        // requireRole(3) above only confirms dept_admin+ weight SOMEWHERE (migrations/021
+        // per-department roles) -- confirm it specifically in the target department, since a
+        // grant can now carry a weight below the user's home role.
+        if (!canAccessDept(req.authUser, parseInt(dept_id, 10), 3)) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         // 1. Create the Toolbox with its Barcode ID
         const boxRes = await client.query(
             'INSERT INTO toolboxes (dept_id, name, qr_code) VALUES ($1, $2, $3) RETURNING *', 
@@ -1768,11 +1862,17 @@ app.post('/api/toolboxes', requireFetchHeader, requireRole(3), async (req, res) 
 app.post('/api/drawers', requireFetchHeader, requireRole(3), async (req, res) => {
     const { box_id, name } = req.body;
     try {
+        const boxRes = await pool.query('SELECT dept_id FROM toolboxes WHERE box_id = $1', [box_id]);
+        if (boxRes.rows.length === 0) return res.status(404).json({ error: 'Toolbox not found.' });
+        if (!canAccessDept(req.authUser, boxRes.rows[0].dept_id, 3)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const result = await pool.query('INSERT INTO drawers (box_id, name) VALUES ($1, $2) RETURNING *', [box_id, name]);
         res.json({ success: true, drawer: result.rows[0] });
-    } catch (err) { 
+    } catch (err) {
         console.error("Drawer POST Error:", err);
-        res.status(500).json({ error: err.message }); 
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -1791,6 +1891,12 @@ app.delete('/api/departments/:id', requireFetchHeader, requireRole(4), async (re
 // Delete a toolbox, but only if it has no drawers and no tools assigned to it. Requires dept_admin+.
 app.delete('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req, res) => {
     try {
+        const boxRes = await pool.query('SELECT dept_id FROM toolboxes WHERE box_id = $1', [req.params.id]);
+        if (boxRes.rows.length === 0) return res.status(404).json({ error: 'Toolbox not found.' });
+        if (!canAccessDept(req.authUser, boxRes.rows[0].dept_id, 3)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const checkDrawers = await pool.query('SELECT COUNT(*) FROM drawers WHERE box_id = $1', [req.params.id]);
         // FIX: tools has no box_id column; tools relate to toolboxes only via drawer_id -> drawers.box_id.
         // Count tools whose drawer belongs to this toolbox instead of filtering tools.box_id directly.
@@ -1807,6 +1913,15 @@ app.delete('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req,
 // Delete a drawer, but only if it has no tools assigned to it. Requires dept_admin+.
 app.delete('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res) => {
     try {
+        const drawerDeptRes = await pool.query(
+            'SELECT b.dept_id FROM drawers dr LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE dr.drawer_id = $1',
+            [req.params.id]
+        );
+        if (drawerDeptRes.rows.length === 0) return res.status(404).json({ error: 'Drawer not found.' });
+        if (!canAccessDept(req.authUser, drawerDeptRes.rows[0].dept_id, 3)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const checkTools = await pool.query('SELECT COUNT(*) FROM tools WHERE drawer_id = $1', [req.params.id]);
         if (parseInt(checkTools.rows[0].count) > 0) return res.status(400).json({ error: 'Cannot delete: Not empty.' });
         const result = await pool.query('DELETE FROM drawers WHERE drawer_id = $1 RETURNING photo_url', [req.params.id]);
@@ -1826,6 +1941,15 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
     const serial_number = normalizeCode(req.body.serial_number);
     const part_number = normalizeCode(req.body.part_number);
     try {
+        const drawerDeptRes = await pool.query(
+            'SELECT b.dept_id FROM drawers dr LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE dr.drawer_id = $1',
+            [drawer_id]
+        );
+        if (drawerDeptRes.rows.length === 0) return res.status(400).json({ error: 'Invalid drawer selected.' });
+        if (!canAccessDept(req.authUser, drawerDeptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const duplicate = await findDuplicateSerial(pool, serial_number);
         if (duplicate) {
             return res.status(409).json({ error: duplicateSerialErrorMessage(duplicate), code: 'DUPLICATE_SERIAL' });
@@ -1892,6 +2016,20 @@ app.delete('/api/tools/batch-delete', requireFetchHeader, requireRole(2), async 
         return res.status(400).json({ error: 'No tools selected.' });
     }
     try {
+        // A batch can span multiple departments -- every affected tool must individually be
+        // one this user has sufficient weight for (migrations/021), same per-row shape
+        // POST /api/audits/submit already uses for exactly this reason. Checked before the
+        // transaction starts, not per-row inside it.
+        const deptCheckRes = await pool.query(
+            `SELECT t.tool_id, b.dept_id FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE t.tool_id = ANY($1::int[])`,
+            [tool_ids]
+        );
+        if (deptCheckRes.rows.some(row => !canAccessDept(req.authUser, row.dept_id, 2))) {
+            return res.status(403).json({ error: 'You do not have sufficient access to one or more of these tools\' departments.' });
+        }
+
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
@@ -1919,6 +2057,15 @@ app.delete('/api/tools/batch-delete', requireFetchHeader, requireRole(2), async 
 app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req, res) => {
     const { tool_id } = req.params;
     try {
+        const toolDeptRes = await pool.query(
+            `SELECT b.dept_id FROM tools t LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE t.tool_id = $1`,
+            [tool_id]
+        );
+        if (toolDeptRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        if (!canAccessDept(req.authUser, toolDeptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
@@ -1944,6 +2091,11 @@ app.delete('/api/tools/:tool_id', requireFetchHeader, requireRole(2), async (req
 app.put('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req, res) => {
     const { name } = req.body;
     try {
+        const boxRes = await pool.query('SELECT dept_id FROM toolboxes WHERE box_id = $1', [req.params.id]);
+        if (boxRes.rows.length === 0) return res.status(404).json({ error: 'Toolbox not found.' });
+        if (!canAccessDept(req.authUser, boxRes.rows[0].dept_id, 3)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
         await pool.query('UPDATE toolboxes SET name = $1 WHERE box_id = $2', [name, req.params.id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Failed to update toolbox.' }); }
@@ -1953,6 +2105,14 @@ app.put('/api/toolboxes/:id', requireFetchHeader, requireRole(3), async (req, re
 app.put('/api/drawers/:id', requireFetchHeader, requireRole(3), async (req, res) => {
     const { name } = req.body;
     try {
+        const drawerDeptRes = await pool.query(
+            'SELECT b.dept_id FROM drawers dr LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE dr.drawer_id = $1',
+            [req.params.id]
+        );
+        if (drawerDeptRes.rows.length === 0) return res.status(404).json({ error: 'Drawer not found.' });
+        if (!canAccessDept(req.authUser, drawerDeptRes.rows[0].dept_id, 3)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
         await pool.query('UPDATE drawers SET name = $1 WHERE drawer_id = $2', [name, req.params.id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Failed to update drawer.' }); }
@@ -1982,8 +2142,28 @@ app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req,
         return res.status(400).json({ error: 'A destination drawer is required.' });
     }
     try {
-        const drawerRes = await pool.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
+        const drawerRes = await pool.query(
+            'SELECT dr.drawer_id, b.dept_id FROM drawers dr LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE dr.drawer_id = $1',
+            [drawer_id]
+        );
         if (drawerRes.rows.length === 0) return res.status(400).json({ error: 'Invalid destination drawer.' });
+
+        // A move touches both the SOURCE department(s) of every tool being moved (can be
+        // several, migrations/021) and the DESTINATION department -- insufficient weight in
+        // either direction is rejected, same reasoning as any other department-owned-entity
+        // mutation now needs (see canAccessDept()'s doc comment).
+        if (!canAccessDept(req.authUser, drawerRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to the destination department.' });
+        }
+        const sourceDeptRes = await pool.query(
+            `SELECT t.tool_id, b.dept_id FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE t.tool_id = ANY($1::int[])`,
+            [tool_ids]
+        );
+        if (sourceDeptRes.rows.some(row => !canAccessDept(req.authUser, row.dept_id, 2))) {
+            return res.status(403).json({ error: 'You do not have sufficient access to one or more of these tools\' current departments.' });
+        }
 
         const result = await pool.query(
             'UPDATE tools SET drawer_id = $1 WHERE tool_id = ANY($2::int[]) RETURNING tool_id, qr_code, name',
@@ -2030,6 +2210,18 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         const previousStatus = currentRes.rows[0].status;
         const previousName = currentRes.rows[0].name;
 
+        // An edit can both read and (via the Location cascade below) WRITE to a different
+        // department than the tool's current one -- insufficient weight in either the tool's
+        // current department or the requested destination is rejected (migrations/021).
+        const currentDeptRes = await client.query(
+            `SELECT b.dept_id FROM tools t LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE t.tool_id = $1`,
+            [toolId]
+        );
+        if (!canAccessDept(req.authUser, currentDeptRes.rows[0]?.dept_id, 2)) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'You do not have sufficient access to this tool\'s current department.' });
+        }
+
         const transition = checkToolStatusTransition(previousStatus, status);
         if (!transition.allowed) {
             await client.query('ROLLBACK');
@@ -2043,8 +2235,15 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
         // department -- straight from the edit modal's Location cascade. Not blocked while
         // 'Out': the tool isn't physically in any drawer at that point anyway, so reassigning
         // where it lives once returned is a legitimate, unrelated action.
-        const drawerRes = await client.query('SELECT drawer_id FROM drawers WHERE drawer_id = $1', [drawer_id]);
+        const drawerRes = await client.query(
+            'SELECT dr.drawer_id, b.dept_id FROM drawers dr LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE dr.drawer_id = $1',
+            [drawer_id]
+        );
         if (drawerRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Invalid drawer selected.' }); }
+        if (!canAccessDept(req.authUser, drawerRes.rows[0].dept_id, 2)) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'You do not have sufficient access to the destination department.' });
+        }
 
         const duplicateSerial = await findDuplicateSerial(client, serial_number, toolId);
         if (duplicateSerial) {
@@ -2133,8 +2332,11 @@ app.post('/api/tools/:id/sub-assemblies', requireFetchHeader, requireRole(2), as
     if (is_calibrated && !cal_due_date) return res.status(400).json({ error: 'Calibration Due Date is required.' });
 
     try {
-        const toolRes = await pool.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
-        if (toolRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        const toolDeptId = await getToolDeptId(pool, req.params.id);
+        if (toolDeptId === undefined) return res.status(404).json({ error: 'Tool not found.' });
+        if (!canAccessDept(req.authUser, toolDeptId, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
 
         const duplicateSerial = await findDuplicateSerial(pool, serial_number);
         if (duplicateSerial) return res.status(409).json({ error: duplicateSerialErrorMessage(duplicateSerial) });
@@ -2159,6 +2361,18 @@ app.put('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async
     if (is_calibrated && !cal_due_date) return res.status(400).json({ error: 'Calibration Due Date is required.' });
 
     try {
+        const subDeptRes = await pool.query(
+            `SELECT b.dept_id FROM tool_sub_assemblies sa
+             LEFT JOIN tools t ON sa.tool_id = t.tool_id
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE sa.sub_id = $1`,
+            [req.params.sub_id]
+        );
+        if (subDeptRes.rows.length === 0) return res.status(404).json({ error: 'Sub-assembly not found.' });
+        if (!canAccessDept(req.authUser, subDeptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const duplicateSerial = await findDuplicateSerial(pool, serial_number, undefined, req.params.sub_id);
         if (duplicateSerial) return res.status(409).json({ error: duplicateSerialErrorMessage(duplicateSerial) });
 
@@ -2178,6 +2392,18 @@ app.put('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async
 
 app.delete('/api/sub-assemblies/:sub_id', requireFetchHeader, requireRole(2), async (req, res) => {
     try {
+        const subDeptRes = await pool.query(
+            `SELECT b.dept_id FROM tool_sub_assemblies sa
+             LEFT JOIN tools t ON sa.tool_id = t.tool_id
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE sa.sub_id = $1`,
+            [req.params.sub_id]
+        );
+        if (subDeptRes.rows.length === 0) return res.status(404).json({ error: 'Sub-assembly not found.' });
+        if (!canAccessDept(req.authUser, subDeptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const result = await pool.query('DELETE FROM tool_sub_assemblies WHERE sub_id = $1 RETURNING sub_id', [req.params.sub_id]);
         if (result.rows.length === 0) return res.status(404).json({ error: 'Sub-assembly not found.' });
         res.json({ success: true });
@@ -2201,8 +2427,11 @@ app.post('/api/tools/:id/alt-part-numbers', requireFetchHeader, requireRole(2), 
     if (!part_number) return res.status(400).json({ error: 'A part number is required.' });
 
     try {
-        const toolRes = await pool.query('SELECT tool_id FROM tools WHERE tool_id = $1', [req.params.id]);
-        if (toolRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        const toolDeptId = await getToolDeptId(pool, req.params.id);
+        if (toolDeptId === undefined) return res.status(404).json({ error: 'Tool not found.' });
+        if (!canAccessDept(req.authUser, toolDeptId, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
 
         const result = await pool.query(
             'INSERT INTO tool_alt_part_numbers (tool_id, part_number) VALUES ($1, $2) RETURNING alt_id',
@@ -2217,6 +2446,18 @@ app.post('/api/tools/:id/alt-part-numbers', requireFetchHeader, requireRole(2), 
 
 app.delete('/api/alt-part-numbers/:alt_id', requireFetchHeader, requireRole(2), async (req, res) => {
     try {
+        const altDeptRes = await pool.query(
+            `SELECT b.dept_id FROM tool_alt_part_numbers ap
+             LEFT JOIN tools t ON ap.tool_id = t.tool_id
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE ap.alt_id = $1`,
+            [req.params.alt_id]
+        );
+        if (altDeptRes.rows.length === 0) return res.status(404).json({ error: 'Alternate part number not found.' });
+        if (!canAccessDept(req.authUser, altDeptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const result = await pool.query('DELETE FROM tool_alt_part_numbers WHERE alt_id = $1 RETURNING alt_id', [req.params.alt_id]);
         if (result.rows.length === 0) return res.status(404).json({ error: 'Alternate part number not found.' });
         res.json({ success: true });
@@ -2245,6 +2486,17 @@ app.put('/api/tools/:id/position', requireFetchHeader, requireRole(2), async (re
         return res.status(400).json({ error: 'position_x and position_y must be fractional values between 0 and 1.' });
     }
     try {
+        // :id here is the tool's qr_code (matching PUT /api/tools/:id's own convention), not
+        // the numeric tool_id getToolDeptId() expects -- resolved directly by qr_code instead.
+        const toolDeptRes = await pool.query(
+            `SELECT b.dept_id FROM tools t LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE t.qr_code = $1`,
+            [req.params.id]
+        );
+        if (toolDeptRes.rows.length === 0) return res.status(404).json({ error: 'Tool not found.' });
+        if (!canAccessDept(req.authUser, toolDeptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
         const result = await pool.query(
             'UPDATE tools SET position_x = $1, position_y = $2 WHERE qr_code = $3 RETURNING tool_id',
             [position_x, position_y, req.params.id]
@@ -2304,6 +2556,12 @@ app.post('/api/tools/:id/incidents/:incident_id/resolve', requireFetchHeader, re
             return res.status(404).json({ error: 'Open incident not found for this tool.' });
         }
         const incident = incidentRes.rows[0];
+
+        const toolDeptId = await getToolDeptId(client, incident.tool_id);
+        if (!canAccessDept(req.authUser, toolDeptId, 2)) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
 
         const newStatus = resolution === 'WRITTEN_OFF' ? 'Retired' : 'In';
         const transitionRes = await client.query('SELECT status FROM tools WHERE tool_id = $1', [incident.tool_id]);
@@ -2564,6 +2822,11 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
             const deptRes = await pool.query('SELECT dept_id FROM departments WHERE name = $1', [(row['Department'] || '').trim()]);
             if (deptRes.rows.length === 0) throw new Error(`No department named "${row['Department']}" -- check for typos, or create it first.`);
             const deptId = deptRes.rows[0].dept_id;
+            // requireRole(3) above only confirms dept_admin+ weight SOMEWHERE (migrations/021)
+            // -- confirm it specifically in this row's department. Per-row (not a blanket
+            // abort) matches this endpoint's existing best-effort philosophy -- a mixed-
+            // department CSV still imports whatever rows the uploader actually has access to.
+            if (!canAccessDept(req.authUser, deptId, 3)) throw new Error(`You do not have sufficient access to department "${row['Department']}".`);
 
             const boxRes = await pool.query('SELECT box_id FROM toolboxes WHERE name = $1 AND dept_id = $2', [(row['Toolbox'] || '').trim(), deptId]);
             if (boxRes.rows.length === 0) throw new Error(`No toolbox named "${row['Toolbox']}" in department "${row['Department']}" -- check for typos, or create it first.`);
@@ -2594,6 +2857,20 @@ app.post('/api/tools/import', requireFetchHeader, requireRole(3), csvUpload.sing
 
             if (existingRes.rows.length > 0) {
                 const existing = existingRes.rows[0];
+
+                // Found by a dedicated security review: the deptId check above only confirms
+                // access to the DESTINATION department (the row's own "Department" column) --
+                // for an UPDATE to an existing tool, that's not enough on its own. Without also
+                // checking the tool's CURRENT department, a user confined to department B could
+                // craft a row claiming department B with a Barcode ID matching a tool that
+                // actually lives in department A (anywhere, zero access there), and silently
+                // relocate/overwrite it -- the same "check both sides" requirement already
+                // applied to PUT /api/tools/batch-move and PUT /api/tools/:id, missed here.
+                const existingToolDeptId = await getToolDeptId(pool, existing.tool_id);
+                if (!canAccessDept(req.authUser, existingToolDeptId, 3)) {
+                    throw new Error(`You do not have sufficient access to this tool's current department.`);
+                }
+
                 const transition = checkToolStatusTransition(existing.status, requestedStatus);
                 if (!transition.allowed) {
                     if (transition.code === 'MANUAL_CHECKIN_NOT_ALLOWED') {
@@ -2715,15 +2992,15 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), (req, res, next) => 
     let finalFilename = req.file.filename;
 
     try {
-        // Baseline requireRole(2) above already keeps a plain technician out entirely. Within
-        // that, user/toolbox photos stay dept_admin+ (structural/personnel-adjacent), but a
-        // drawer's photo is routine day-to-day inventory upkeep -- it's what the shadow-board
-        // map and tool position markers are placed on, something a tool_rep maintains as
-        // inventory changes, not a structural edit to storage itself the way renaming/deleting
-        // a drawer is. Matches the equivalent canEditTools-vs-canEditInfra split on the client
-        // (admin.js, openEntityModal's drawer branch).
-        if (req.authUser.weight < 3 && (entity_type === 'user' || entity_type === 'toolbox')) {
-            throw new Error('You only have permission to upload tool and drawer photos.');
+        // 'user' photos have no department axis at all (no per-department check exists for
+        // them below), so they stay gated on home weight here -- dept_admin+ only, matching
+        // this endpoint's original intent. 'toolbox' used to also be gated here on home weight,
+        // but that became an over-restriction once migrations/021 let someone hold dept_admin
+        // in a department via a GRANT rather than their home role: the finer, per-department
+        // check below (minWeight 3 for toolbox) is correct and sufficient on its own, so
+        // 'toolbox' was removed from this coarse home-weight-only pre-check.
+        if (req.authUser.weight < 3 && entity_type === 'user') {
+            throw new Error('You do not have permission to upload a user photo.');
         }
 
         let table = '';
@@ -2737,6 +3014,32 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), (req, res, next) => 
         // who's already allowed to log a calibration record in the first place.
         else if (entity_type === 'calibration') { table = 'calibration_records'; idColumn = 'cal_id'; }
         else throw new Error('Invalid entity type.');
+
+        // Per-department check (migrations/021) for every entity type that actually has a
+        // department -- 'user' photos don't (no department concept, the home-weight check
+        // above already covers it). The coarse weight<3 check above only confirmed dept_admin+
+        // SOMEWHERE for toolbox; this confirms the SPECIFIC department for toolbox/drawer/
+        // tool/calibration alike.
+        if (entity_type !== 'user') {
+            let deptId;
+            if (entity_type === 'toolbox') {
+                const r = await pool.query('SELECT dept_id FROM toolboxes WHERE box_id = $1', [entity_id]);
+                deptId = r.rows[0]?.dept_id;
+            } else if (entity_type === 'drawer') {
+                const r = await pool.query('SELECT b.dept_id FROM drawers dr LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE dr.drawer_id = $1', [entity_id]);
+                deptId = r.rows[0]?.dept_id;
+            } else if (entity_type === 'tool') {
+                const r = await pool.query('SELECT b.dept_id FROM tools t LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE t.qr_code = $1', [entity_id]);
+                deptId = r.rows[0]?.dept_id;
+            } else if (entity_type === 'calibration') {
+                const r = await pool.query('SELECT b.dept_id FROM calibration_records cr LEFT JOIN tools t ON cr.tool_id = t.tool_id LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE cr.cal_id = $1', [entity_id]);
+                deptId = r.rows[0]?.dept_id;
+            }
+            const minWeight = entity_type === 'toolbox' ? 3 : 2;
+            if (!canAccessDept(req.authUser, deptId, minWeight)) {
+                throw new Error('You do not have sufficient access to that department.');
+            }
+        }
 
         // Compress/resize before this ever becomes a permanent photo_url -- phone camera
         // photos routinely land at 3-8MB with no benefit at the sizes this app actually
@@ -3223,14 +3526,39 @@ function validateAuditWindowInput(label, start_minute, otherWindows) {
 }
 
 /**
- * True if the user may act on deptId: super_admin (any department) or anyone whose
- * accessibleDeptIds includes it. Generalized from an audit-schedule-only check (named
- * canManageAuditSchedule originally) after review noted the same `role === 'super_admin' ||
- * accessibleDeptIds.includes(deptId)` test was already inlined at a couple of other
- * department-scoped call sites in this file -- this is now the one shared version.
+ * True if the user holds at least minWeight IN deptId specifically: super_admin (any
+ * department, always) or getEffectiveRoleWeight(authUser, deptId) >= minWeight. Generalized
+ * from an audit-schedule-only check (named canManageAuditSchedule originally) after review
+ * noted the same test was already inlined at a couple of other department-scoped call sites
+ * in this file -- this is now the one shared version.
+ *
+ * Upgraded for migrations/021_per_department_roles.sql: plain membership
+ * (accessibleDeptIds.includes(deptId)) is no longer enough on its own -- a department being in
+ * the user's accessible list no longer implies any particular weight there, since a grant can
+ * now carry a role below (or above) the user's home role. Every call site must pass the
+ * minWeight that specific action actually requires.
  */
-function canAccessDept(authUser, deptId) {
-    return authUser.role === 'super_admin' || authUser.accessibleDeptIds.includes(deptId);
+function canAccessDept(authUser, deptId, minWeight) {
+    return authUser.role === 'super_admin' || getEffectiveRoleWeight(authUser, deptId) >= minWeight;
+}
+
+/**
+ * Resolves a tool's home department via drawer -> toolbox, the same join pattern used
+ * throughout this file (e.g. the checkout gate). Returns `undefined` if the tool itself
+ * doesn't exist (distinct from a real but null dept_id, e.g. an orphaned drawer/toolbox),
+ * so callers can tell "tool not found" apart from "tool found, no resolvable department"
+ * (the latter should fall through to canAccessDept(authUser, null, N), which is only ever
+ * true for a super_admin -- matching the "no door left unscoped" intent of migrations/021).
+ * @param {import('pg').PoolClient|import('pg').Pool} client
+ * @param {number|string} toolId
+ * @returns {Promise<number|null|undefined>}
+ */
+async function getToolDeptId(client, toolId) {
+    const result = await client.query(
+        `SELECT b.dept_id FROM tools t LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id WHERE t.tool_id = $1`,
+        [toolId]
+    );
+    return result.rows.length > 0 ? result.rows[0].dept_id : undefined;
 }
 
 /**
@@ -3299,7 +3627,7 @@ app.get('/api/audit-schedules', requireRole(3), async (req, res) => {
 // special-case "already customized" as an error.
 app.post('/api/departments/:dept_id/audit-schedule/customize', requireFetchHeader, requireRole(3), async (req, res) => {
     const deptId = parseInt(req.params.dept_id, 10);
-    if (!canAccessDept(req.authUser, deptId)) return res.status(403).json({ error: 'You do not have access to that department.' });
+    if (!canAccessDept(req.authUser, deptId, 3)) return res.status(403).json({ error: 'You do not have access to that department.' });
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -3333,7 +3661,7 @@ app.post('/api/departments/:dept_id/audit-schedule/customize', requireFetchHeade
 // default the moment ANY custom row exists.
 app.post('/api/departments/:dept_id/audit-schedule', requireFetchHeader, requireRole(3), async (req, res) => {
     const deptId = parseInt(req.params.dept_id, 10);
-    if (!canAccessDept(req.authUser, deptId)) return res.status(403).json({ error: 'You do not have access to that department.' });
+    if (!canAccessDept(req.authUser, deptId, 3)) return res.status(403).json({ error: 'You do not have access to that department.' });
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -3378,7 +3706,7 @@ app.put('/api/audit-schedule/:schedule_id', requireFetchHeader, requireRole(3), 
         const current = await client.query('SELECT dept_id FROM audit_schedules WHERE schedule_id = $1', [scheduleId]);
         if (current.rows.length === 0) throw Object.assign(new Error('Audit window not found.'), { statusCode: 404 });
         const deptId = current.rows[0].dept_id;
-        if (!canAccessDept(req.authUser, deptId)) throw Object.assign(new Error('You do not have access to that department.'), { statusCode: 403 });
+        if (!canAccessDept(req.authUser, deptId, 3)) throw Object.assign(new Error('You do not have access to that department.'), { statusCode: 403 });
         await client.query('SELECT pg_advisory_xact_lock($1)', [deptId]);
 
         const others = await client.query('SELECT start_minute FROM audit_schedules WHERE dept_id = $1 AND schedule_id != $2', [deptId, scheduleId]);
@@ -3415,7 +3743,7 @@ app.delete('/api/audit-schedule/:schedule_id', requireFetchHeader, requireRole(3
         const current = await client.query('SELECT dept_id, label FROM audit_schedules WHERE schedule_id = $1', [scheduleId]);
         if (current.rows.length === 0) throw Object.assign(new Error('Audit window not found.'), { statusCode: 404 });
         const { dept_id: deptId, label } = current.rows[0];
-        if (!canAccessDept(req.authUser, deptId)) throw Object.assign(new Error('You do not have access to that department.'), { statusCode: 403 });
+        if (!canAccessDept(req.authUser, deptId, 3)) throw Object.assign(new Error('You do not have access to that department.'), { statusCode: 403 });
         await client.query('SELECT pg_advisory_xact_lock($1)', [deptId]);
 
         await client.query('DELETE FROM audit_schedules WHERE schedule_id = $1', [scheduleId]);
@@ -4532,12 +4860,17 @@ app.get('/api/dashboard/audit-compliance-trend', async (req, res) => {
 app.post('/api/reports/generate', requireFetchHeader, requireRole(1), async (req, res) => {
     const { report_type, dept_id, start_date, end_date } = req.body;
     try {
+        // Pre-existing bug fixed here: this used to check `req.authUser.weight === 3`, so only
+        // an EXACT dept_admin got scoped down -- a tool_rep or technician (weight 1 or 2) fell
+        // through untouched, getting queryDept = dept_id as submitted, including 'ALL'. Every
+        // non-super_admin role may report on their home department or any department they've
+        // been granted access to (see migrations/005, /021 -- accessibleDeptIds already
+        // reflects both correctly, regardless of what ROLE a grant carries), but never the
+        // global 'ALL' view -- that stays super_admin-only. Falls back to their home dept if
+        // the requested one isn't actually in their accessible set (covers a stale/tampered
+        // dept_id as well as 'ALL').
         let queryDept = dept_id;
-        if (req.authUser.weight === 3) {
-            // A dept_admin may report on their home department or any department they've been
-            // granted cross-department access to, but never the global 'ALL' view -- that
-            // stays super_admin-only. Falls back to their home dept if the requested one isn't
-            // actually in their accessible set (covers a stale/tampered dept_id as well as 'ALL').
+        if (req.authUser.role !== 'super_admin') {
             const requested = parseInt(dept_id, 10);
             queryDept = req.authUser.accessibleDeptIds.includes(requested) ? requested : req.authUser.dept_id;
         }
