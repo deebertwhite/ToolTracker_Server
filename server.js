@@ -2630,8 +2630,15 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), (req, res, next) => 
     let finalFilename = req.file.filename;
 
     try {
-        if (req.authUser.weight < 3 && (entity_type === 'user' || entity_type === 'toolbox' || entity_type === 'drawer')) {
-            throw new Error('You only have permission to upload tool assets.');
+        // Baseline requireRole(2) above already keeps a plain technician out entirely. Within
+        // that, user/toolbox photos stay dept_admin+ (structural/personnel-adjacent), but a
+        // drawer's photo is routine day-to-day inventory upkeep -- it's what the shadow-board
+        // map and tool position markers are placed on, something a tool_rep maintains as
+        // inventory changes, not a structural edit to storage itself the way renaming/deleting
+        // a drawer is. Matches the equivalent canEditTools-vs-canEditInfra split on the client
+        // (admin.js, openEntityModal's drawer branch).
+        if (req.authUser.weight < 3 && (entity_type === 'user' || entity_type === 'toolbox')) {
+            throw new Error('You only have permission to upload tool and drawer photos.');
         }
 
         let table = '';

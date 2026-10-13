@@ -2139,13 +2139,22 @@ function openEntityModal(type, id) {
             </div>
         ` : '';
 
+        // Photo is gated at canEditTools (tool_rep+), one level below Edit/Delete's
+        // canEditInfra (dept_admin+) -- keeping a drawer's shadow-board photo current (and
+        // placing tool positions on it, see the Tool Positions section above, already
+        // canEditTools-gated) is routine day-to-day inventory upkeep, not a structural change
+        // to storage itself the way renaming or deleting a drawer is.
         if (canEditInfra) {
-            actionsHtml = `
+            actionsHtml += `
                 <button class="btn btn-secondary" id="em-btn-edit" onclick="toggleModalEditMode(true)">${icon('pencil')} Edit Details</button>
                 <button class="btn btn-primary" id="em-btn-save" style="display:none;" onclick="saveEntityUpdates()">${icon('save')} Save Changes</button>
-                <button class="btn btn-secondary" onclick="triggerPhotoUpload('drawer', '${entity.drawer_id}')" style="width:auto;">${icon('camera')} Photo</button>
-                <button class="btn btn-secondary" onclick="deleteInfraItem('drawers', '${entity.drawer_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>
             `;
+        }
+        if (canEditTools) {
+            actionsHtml += `<button class="btn btn-secondary" onclick="triggerPhotoUpload('drawer', '${entity.drawer_id}')" style="width:auto;">${icon('camera')} Photo</button>`;
+        }
+        if (canEditInfra) {
+            actionsHtml += `<button class="btn btn-secondary" onclick="deleteInfraItem('drawers', '${entity.drawer_id}')" style="width:auto; color: var(--red); border-color: var(--red);">${icon('x')} Delete</button>`;
         }
 
     } else if (type === 'tool') {
