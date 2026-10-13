@@ -13,6 +13,7 @@ let globalDrawersCache = [];
 let globalToolsCache = [];
 let globalUsersCache = [];
 let globalToolGroupsCache = [];
+let globalDeptGroupsCache = []; // cross-checkout department groups (migrations/020) -- {group_id, name}
 // Sub-assemblies (migrations/018) of whichever tool's entity modal is currently open --
 // populated by openEntityModal() from entity.sub_assemblies (already embedded on every
 // GET /api/tools row), so openEditSubAssemblyForm()/deleteSubAssembly() can look a row up by
@@ -196,6 +197,7 @@ function bootstrapAdminUI(user) {
     }
     if (currentAdminWeight < 4) {
         safeSetDisplay('card-manage-depts', 'none');
+        safeSetDisplay('card-manage-dept-groups', 'none');
         safeSetDisplay('card-calendar-feed', 'none');
     }
     if (currentAdminWeight < 3) {
@@ -225,6 +227,13 @@ function bootstrapAdminUI(user) {
     // whenever they're actually managed -- this bootstrap fetch just covers the case where a
     // tool is edited before Reports has ever been visited this session.
     fetch('/api/tool-groups').then(r => r.json()).then(data => { if (data.success) globalToolGroupsCache = data.groups; }).catch(() => {});
+
+    // Cross-checkout department groups (migrations/020) -- same reasoning as the tool-groups
+    // prefetch above: primed here so a department's edit view has its group dropdown ready
+    // immediately, not just after this card has been visited. Also renders #dept-groups-list
+    // directly (unlike tool groups, which only cache here and render on-demand elsewhere) since
+    // this card has no separate "visit to load" entry point of its own.
+    if (currentAdminWeight >= 4) loadDeptGroups();
 
     resetAdminIdleTimer();
 }
@@ -815,8 +824,57 @@ async function submitStructureDept() {
     const payload = { name: document.getElementById('str-dept-name').value, prefix_code: document.getElementById('str-dept-prefix').value };
     if (!payload.name || !payload.prefix_code) return alert("⚠️ Required fields missing.");
     const res = await fetch('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-    if (res.ok) { alert('✅ Department Established.'); document.getElementById('str-dept-name').value = ''; document.getElementById('str-dept-prefix').value = ''; syncStorageHierarchyDropdowns(); renderEditableInfraTree(); } 
+    if (res.ok) { alert('✅ Department Established.'); document.getElementById('str-dept-name').value = ''; document.getElementById('str-dept-prefix').value = ''; syncStorageHierarchyDropdowns(); renderEditableInfraTree(); }
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
+}
+
+/** Fetches GET /api/department-groups into globalDeptGroupsCache and renders #dept-groups-list -- one row per group with an inline-editable name (blur-to-rename) and a delete button. Called at boot (bootstrapAdminUI) and after every create/rename/delete here so the list and the cache driving each department's edit-view dropdown both stay current. */
+async function loadDeptGroups() {
+    const container = document.getElementById('dept-groups-list');
+    try {
+        const res = await fetch('/api/department-groups');
+        const data = await res.json();
+        if (!data.success) throw new Error();
+        globalDeptGroupsCache = data.groups;
+        if (!container) return; // card hidden below super_admin, cache is still primed above
+        container.innerHTML = globalDeptGroupsCache.length === 0
+            ? `<span style="font-size:12px; color:var(--muted);">No groups yet -- departments check out independently by default.</span>`
+            : globalDeptGroupsCache.map(g => `
+                <div style="display:flex; align-items:center; gap:8px; background:var(--surface2); padding:6px 10px; border-radius:6px;">
+                    <input class="form-input" style="flex:1; padding:4px 8px; font-size:13px;" value="${g.name}" onchange="renameDeptGroup(${g.group_id}, this.value)">
+                    <span style="cursor:pointer; color:var(--red); display:inline-flex;" title="Delete group" onclick="deleteDeptGroup(${g.group_id})">${icon('x')}</span>
+                </div>
+            `).join('');
+    } catch (e) {
+        if (container) container.innerHTML = `<span style="font-size:12px; color:var(--red);">Failed to load.</span>`;
+    }
+}
+
+/** Submits the "+ Add Group" row to POST /api/department-groups. */
+async function submitNewDeptGroup() {
+    const input = document.getElementById('new-dept-group-name');
+    const name = input.value.trim();
+    if (!name) return alert('⚠️ A group name is required.');
+    const res = await fetch('/api/department-groups', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({ name }) });
+    if (res.ok) { input.value = ''; await loadDeptGroups(); }
+    else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to add group.')); }
+}
+
+/** Renames a department group in place (blur-to-save, no separate edit mode) via PUT /api/department-groups/:id. */
+async function renameDeptGroup(groupId, newName) {
+    const name = newName.trim();
+    if (!name) return alert('⚠️ A group name is required.');
+    const res = await fetch(`/api/department-groups/${groupId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify({ name }) });
+    if (res.ok) { await loadDeptGroups(); }
+    else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to rename group.')); await loadDeptGroups(); }
+}
+
+/** Deletes a department group -- its member departments are just ungrouped (ON DELETE SET NULL), not touched otherwise. */
+async function deleteDeptGroup(groupId) {
+    if (!confirm('Delete this group? Departments in it will simply be ungrouped, not deleted.')) return;
+    const res = await fetch(`/api/department-groups/${groupId}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
+    if (res.ok) { await loadDeptGroups(); renderEditableInfraTree(); }
+    else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to delete group.')); }
 }
 
 /** Validates and submits the "Smart Box Builder" form to POST /api/toolboxes (which also provisions the requested drawer_count), giving inline button feedback while the request is in flight. Gated to currentAdminWeight >= 3 (dept_admin+) by the hidden #card-manage-boxes card. */
@@ -2074,13 +2132,25 @@ function openEntityModal(type, id) {
         document.getElementById('em-thumb').innerHTML = icon('building-2');
 
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
-        readHtml = `<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Prefix Code</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.prefix_code}</div></div>`;
+        const currentDeptGroup = globalDeptGroupsCache.find(g => g.group_id == entity.cross_checkout_group_id);
+        readHtml = `
+            <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Prefix Code</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.prefix_code}</div></div>
+            <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Cross-Checkout Group</div><div style="font-size:14px;margin-top:4px;">${currentDeptGroup ? currentDeptGroup.name : '-- None --'}</div></div>
+        `;
         fieldsHtml = `
             <div class="form-group"><label class="form-label">Department Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
             <div class="form-group">
                 <label class="form-label">Prefix Code</label>
                 <div style="padding:8px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; font-size:13px; font-family:monospace; color:var(--muted);">${entity.prefix_code}</div>
                 <div style="font-size:11px; color: var(--muted); margin-top:4px;">Can't be changed after creation -- it's embedded in every existing barcode ID under this department.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Cross-Checkout Group</label>
+                <select class="form-select" id="em-input-dept-group">
+                    <option value="">-- None --</option>
+                    ${globalDeptGroupsCache.map(g => `<option value="${g.group_id}" ${g.group_id == entity.cross_checkout_group_id ? 'selected' : ''}>${g.name}</option>`).join('')}
+                </select>
+                <div style="font-size:11px; color: var(--muted); margin-top:4px;">Departments sharing a group can freely check out each other's tools -- manage groups from the Deployment Builder.</div>
             </div>
         `;
 
@@ -3110,7 +3180,10 @@ async function saveEntityUpdates() {
         payload.role = document.getElementById('em-input-role').value;
     } else {
         payload.name = document.getElementById('em-input-name').value;
-        if (type === 'department') { endpoint = `/api/departments/${id}`; }
+        if (type === 'department') {
+            endpoint = `/api/departments/${id}`;
+            payload.cross_checkout_group_id = document.getElementById('em-input-dept-group').value || null;
+        }
         else if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
         else if (type === 'drawer') { endpoint = `/api/drawers/${id}`; }
         else if (type === 'tool') {

@@ -250,6 +250,21 @@
                         </div>
                     </div>
 
+                    <!-- Cross-checkout department groups (migrations/020) -- departments sharing a
+                         group are mutually exempt from the cross-department checkout restriction
+                         (see POST /api/transactions). Assigning a department TO a group happens on
+                         the department's own entity-modal edit view, not here -- this card just
+                         manages the groups themselves (create/rename/delete). -->
+                    <div class="card" id="card-manage-dept-groups">
+                        <h3 style="margin-bottom: 4px;">Cross-Checkout Department Groups</h3>
+                        <div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Departments sharing a group (e.g. "Maintenance" for AVI + MX) can freely check out each other's tools -- no department-matched buddy required. Assign a department to a group from its own card.</div>
+                        <div id="dept-groups-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px;">Loading…</div>
+                        <div style="display:flex; gap:8px;">
+                            <input class="form-input" id="new-dept-group-name" placeholder="e.g. Maintenance" style="max-width:280px;">
+                            <button class="btn btn-secondary" style="width:auto;" onclick="submitNewDeptGroup()">+ Add Group</button>
+                        </div>
+                    </div>
+
                     <div class="card" id="card-manage-boxes">
                         <h3 style="margin-bottom: 16px;">2. Smart Box Builder (Storage)</h3>
                         <div class="flex-grid-4">

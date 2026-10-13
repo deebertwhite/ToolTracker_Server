@@ -1640,12 +1640,67 @@ app.post('/api/departments', requireFetchHeader, requireRole(4), async (req, res
 // after creation would desync those IDs from the department's current prefix. Requires
 // super_admin (getRoleWeight >= 4), matching create/delete.
 app.put('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, res) => {
-    const { name } = req.body;
+    const { name, cross_checkout_group_id } = req.body;
     try {
-        await pool.query('UPDATE departments SET name = $1 WHERE dept_id = $2', [name, req.params.id]);
+        await pool.query(
+            'UPDATE departments SET name = $1, cross_checkout_group_id = $2 WHERE dept_id = $3',
+            [name, cross_checkout_group_id || null, req.params.id]
+        );
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update department.' });
+    }
+});
+
+// ==========================================
+// 4.1 CROSS-CHECKOUT DEPARTMENT GROUPS (migrations/020_department_groups.sql)
+// ==========================================
+// Two departments sharing a group are mutually exempt from the cross-department checkout
+// restriction in POST /api/transactions (e.g. AVI/MX both under one "Maintenance" umbrella).
+// A group is a logical tag, not a physical container -- deleting one just ungroups its
+// departments (ON DELETE SET NULL on departments.cross_checkout_group_id), same reasoning as
+// tool_groups (migrations/014). No role check on the list (read-only, same visibility as the
+// rest of /api/storage); create/rename/delete are super_admin-only, matching department
+// create/edit/delete itself.
+app.get('/api/department-groups', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT group_id, name FROM department_groups ORDER BY name ASC');
+        res.json({ success: true, groups: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch department groups.' });
+    }
+});
+
+app.post('/api/department-groups', requireFetchHeader, requireRole(4), async (req, res) => {
+    const name = (req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'A group name is required.' });
+    try {
+        const result = await pool.query('INSERT INTO department_groups (name) VALUES ($1) RETURNING group_id', [name]);
+        res.json({ success: true, group_id: result.rows[0].group_id });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to create department group.' });
+    }
+});
+
+app.put('/api/department-groups/:id', requireFetchHeader, requireRole(4), async (req, res) => {
+    const name = (req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'A group name is required.' });
+    try {
+        const result = await pool.query('UPDATE department_groups SET name = $1 WHERE group_id = $2 RETURNING group_id', [name, req.params.id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Department group not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to rename department group.' });
+    }
+});
+
+app.delete('/api/department-groups/:id', requireFetchHeader, requireRole(4), async (req, res) => {
+    try {
+        const result = await pool.query('DELETE FROM department_groups WHERE group_id = $1 RETURNING group_id', [req.params.id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Department group not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete department group.' });
     }
 });
 
@@ -2768,7 +2823,7 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
         let signoff = null;
         if (manager_login_token) {
             const signoffRes = await client.query(
-                'SELECT user_id, full_name, badge_id, role FROM users WHERE login_token = $1 AND is_active = true',
+                'SELECT user_id, full_name, badge_id, role, dept_id FROM users WHERE login_token = $1 AND is_active = true',
                 [manager_login_token]
             );
             signoff = signoffRes.rows[0] || null;
@@ -2780,7 +2835,7 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
             // the only real requirement is being a different person (checked next). Shop-scale
             // candidate counts (dozens at most) make this negligible at bcrypt's cost factor.
             const candidatesRes = await client.query(
-                "SELECT user_id, full_name, badge_id, role, pin_hash FROM users WHERE is_active = true"
+                "SELECT user_id, full_name, badge_id, role, dept_id, pin_hash FROM users WHERE is_active = true"
             );
             for (const candidate of candidatesRes.rows) {
                 if (await bcrypt.compare(manager_pin, candidate.pin_hash)) {
@@ -2801,6 +2856,27 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
         }
 
         const auditGateCache = {};
+
+        // CROSS-DEPARTMENT CHECKOUT (migrations/020_department_groups.sql) -- only fetched for
+        // an actual checkout (see the "D." block in the per-tool loop below; check-in is never
+        // restricted this way), so a check-in transaction doesn't pay for an unused query.
+        // Declared in this outer scope (not just inside the `if`) so it's still safely callable
+        // -- as an always-false stub -- from the shared per-tool loop regardless of action; in
+        // practice the D block itself only ever runs for CHECKOUT_TOOL anyway. Two departments
+        // sharing the same non-null cross_checkout_group_id are treated as equivalent for this
+        // check in both directions (e.g. AVI/MX both under "Maintenance").
+        let sameCrossCheckoutGroup = () => false;
+        if (action === 'CHECKOUT_TOOL') {
+            const deptGroupRes = await client.query('SELECT dept_id, cross_checkout_group_id FROM departments');
+            const deptGroupMap = {};
+            deptGroupRes.rows.forEach(d => { deptGroupMap[d.dept_id] = d.cross_checkout_group_id; });
+            sameCrossCheckoutGroup = (deptA, deptB) => {
+                if (deptA == null || deptB == null) return false;
+                const groupA = deptGroupMap[deptA];
+                const groupB = deptGroupMap[deptB];
+                return groupA != null && groupA === groupB;
+            };
+        }
         const logNotes = `Signed off by: ${signoff.full_name} (${signoff.badge_id})`;
 
         // 3.5 TOOLBOX SINGLE-SCAN CHECKOUT -- a toolbox has its own qr_code (unlike a drawer,
@@ -2951,6 +3027,24 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
                     if (pendingToolboxes.length > 0) {
                         await client.query('ROLLBACK');
                         return res.status(403).json({ error: `Checkout Blocked: department has not completed the required audit for this shift.`, code: 'AUDIT_REQUIRED', pending_toolboxes: pendingToolboxes });
+                    }
+                }
+
+                // D. CROSS-DEPARTMENT BUDDY CHECK (skip if the tool has no resolvable home
+                // department, same convention as the audit gate above) -- a technician outside
+                // the tool's home department (and not dept_admin+, and not in a department
+                // sharing a cross-checkout group with it) can still check it out, but the
+                // buddy sign-off must actually belong to that tool's department (or a linked
+                // one) -- any other active person is no longer enough for a cross-department
+                // pull. Check-in is deliberately NOT restricted this way -- returning a tool
+                // isn't a custody question the same way taking one out is.
+                if (tool.tool_dept_id != null
+                    && user.dept_id !== tool.tool_dept_id
+                    && getRoleWeight(user.role) < 3
+                    && !sameCrossCheckoutGroup(user.dept_id, tool.tool_dept_id)) {
+                    if (signoff.dept_id !== tool.tool_dept_id && !sameCrossCheckoutGroup(signoff.dept_id, tool.tool_dept_id)) {
+                        await client.query('ROLLBACK');
+                        return res.status(403).json({ error: `Checkout Blocked: ${tool.name} belongs to a different department -- the buddy sign-off must be from that department (or a linked one).`, code: 'BUDDY_WRONG_DEPT' });
                     }
                 }
 

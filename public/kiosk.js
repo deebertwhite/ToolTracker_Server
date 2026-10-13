@@ -8,6 +8,13 @@ let html5QrScannerInstance = null;
 // Tool name lookup by qr_code, for showing "CUT-0001 -- Wire Cutter" in the checkout/check-in
 // queue instead of just the bare code -- see loadKioskToolNames()/renderQueue().
 let kioskToolNameByQr = {};
+// tool_dept_id per qr_code, plus dept_id -> cross_checkout_group_id -- together let
+// handleToolScan() show an informational heads-up when a scanned tool belongs to a different
+// department than the technician's own (see migrations/020_department_groups.sql). Populated
+// alongside kioskToolNameByQr in loadKioskToolNames(); purely for the toast, the real
+// enforcement is server-side in POST /api/transactions.
+let kioskToolDeptByQr = {};
+let kioskDeptGroupById = {};
 
 // Specific Audit State Variables
 let auditTools = []; // tools currently 'In' this box -- what the attestation actually confirms
@@ -334,14 +341,33 @@ function setupActionScreen() {
  */
 async function loadKioskToolNames() {
     try {
-        const res = await fetch('/api/tools');
-        const data = await res.json();
+        const [toolsRes, storageRes] = await Promise.all([fetch('/api/tools'), fetch('/api/storage')]);
+        const data = await toolsRes.json();
+        const storageData = await storageRes.json();
         kioskToolNameByQr = {};
-        (data.tools || []).forEach(t => { kioskToolNameByQr[t.qr_code] = t.name; });
+        kioskToolDeptByQr = {};
+        (data.tools || []).forEach(t => {
+            kioskToolNameByQr[t.qr_code] = t.name;
+            kioskToolDeptByQr[t.qr_code] = t.tool_dept_id;
+        });
+        kioskDeptGroupById = {};
+        (storageData.departments || []).forEach(d => { kioskDeptGroupById[d.dept_id] = d.cross_checkout_group_id; });
         renderQueue(); // refresh any rows already drawn before this resolved
     } catch (e) {
         // Best-effort -- see doc comment above.
     }
+}
+
+/**
+ * True if deptA and deptB are different, non-null, and share the same non-null
+ * cross_checkout_group_id -- mirrors sameCrossCheckoutGroup() in server.js (the real,
+ * authoritative check); this copy is for the informational scan-time heads-up only.
+ */
+function sameKioskCrossCheckoutGroup(deptA, deptB) {
+    if (deptA == null || deptB == null) return false;
+    const groupA = kioskDeptGroupById[deptA];
+    const groupB = kioskDeptGroupById[deptB];
+    return groupA != null && groupA === groupB;
 }
 
 // ==========================================
@@ -421,9 +447,22 @@ function handleToolScan() {
     batchQueue.push(qr);
     renderQueue();
     input.value = '';
+
+    // Informational only (the real enforcement is server-side, see "D. CROSS-DEPARTMENT
+    // BUDDY CHECK" in POST /api/transactions) -- checkout only, since check-in isn't
+    // department-restricted. dept_admin+ technicians are exempt from the real restriction too,
+    // so skip the heads-up for them -- it would be a true non-issue, not just a formality.
+    let crossDeptNote = '';
+    if (!isBox && pendingMode === 'OUT' && activeUser && activeUser.role !== 'dept_admin' && activeUser.role !== 'super_admin') {
+        const toolDeptId = kioskToolDeptByQr[qr];
+        if (toolDeptId != null && toolDeptId !== activeUser.deptId && !sameKioskCrossCheckoutGroup(toolDeptId, activeUser.deptId)) {
+            crossDeptNote = ' (different department -- buddy must be from there too)';
+        }
+    }
+
     showToast(isBox
         ? `${icon('plus')} Added Toolbox ${qr} -- every tool currently in it will be checked out.`
-        : `${icon('plus')} Added: ${qr}${kioskToolNameByQr[qr] ? ' -- ' + kioskToolNameByQr[qr] : ''}`);
+        : `${icon('plus')} Added: ${qr}${kioskToolNameByQr[qr] ? ' -- ' + kioskToolNameByQr[qr] : ''}${crossDeptNote}`);
 }
 
 /**
