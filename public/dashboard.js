@@ -240,13 +240,16 @@ let currentMapTools = {};
  * Visual "EMPTY" stamp overlaid on a drawer's photo when it has zero non-Retired tools --
  * matches the same stamp used on the admin panel's print sheet and shadow-board editors
  * (see emptyDrawerStamp() in admin.js; duplicated here since this page loads its own script,
- * not admin.js). Dark text on a light/opaque background for legibility against any photo.
+ * not admin.js). Just the word itself at partial opacity (no background badge/oval), with a
+ * white halo (text-shadow) around the black text so it still reads against a dark patch of photo.
  */
 function emptyDrawerStamp(fontSizePx) {
+    const haloTight = Math.round(fontSizePx * 0.1);
+    const haloWide = Math.round(fontSizePx * 0.2);
     return `<div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) rotate(-16deg);
-                background:rgba(255,255,255,0.92); border:3px solid #000; border-radius:8px;
-                padding:${Math.round(fontSizePx * 0.3)}px ${Math.round(fontSizePx * 0.9)}px; color:#000; font-size:${fontSizePx}px;
-                font-weight:900; letter-spacing:${Math.round(fontSizePx * 0.12)}px; text-transform:uppercase; white-space:nowrap;
+                opacity:0.6; color:#000; font-size:${fontSizePx}px; font-weight:900;
+                letter-spacing:${Math.round(fontSizePx * 0.12)}px; text-transform:uppercase; white-space:nowrap;
+                text-shadow: 0 0 ${haloTight}px #fff, 0 0 ${haloTight}px #fff, 0 0 ${haloWide}px #fff, 0 0 ${haloWide}px #fff;
                 pointer-events:none;">Empty</div>`;
 }
 

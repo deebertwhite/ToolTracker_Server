@@ -468,21 +468,24 @@ async function waitForImages(container) {
 /**
  * Shared "EMPTY" visual stamp for a drawer with zero tools assigned (Retired tools don't count --
  * every caller excludes them itself, matching the print sheet's own long-standing tools filter).
- * Dark text on a light/opaque background, not the reverse -- style.css's `@media print` block
- * forces `color: black !important` under .printable-area (see numberBadge() below), which would
- * silently render light text invisible on the print sheet; using the same scheme in the live app
- * too keeps both visually consistent. `absolute` floats it centered over a photo (the caller's
- * container must already be position:relative and this stamp the only thing needing centering in
- * it); pass false for a page/section with no photo, where the caller centers it itself (e.g. with
- * a flex wrapper) alongside normal document flow.
+ * Just the word itself (no background badge/oval) at partial opacity, so it reads as a light
+ * watermark over the photo rather than a solid sticker. Text stays black -- style.css's
+ * `@media print` block forces `color: black !important` under .printable-area (see numberBadge()
+ * below) anyway -- with a white halo (`text-shadow`, a separate property that override doesn't
+ * touch) standing in for the removed background so it still reads against a dark patch of photo,
+ * in print or on screen. `absolute` floats it centered over a photo (the caller's container must
+ * already be position:relative); pass false for a page/section with no photo, where the caller
+ * centers it itself (e.g. with a flex wrapper) alongside normal document flow.
  */
 function emptyDrawerStamp(fontSizePx, absolute = true) {
     const position = absolute
         ? 'position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) rotate(-16deg);'
         : 'transform:rotate(-16deg);';
-    return `<div style="${position} background:rgba(255,255,255,0.92); border:3px solid #000; border-radius:8px;
-                padding:${Math.round(fontSizePx * 0.3)}px ${Math.round(fontSizePx * 0.9)}px; color:#000; font-size:${fontSizePx}px;
-                font-weight:900; letter-spacing:${Math.round(fontSizePx * 0.12)}px; text-transform:uppercase; white-space:nowrap;
+    const haloTight = Math.round(fontSizePx * 0.1);
+    const haloWide = Math.round(fontSizePx * 0.2);
+    return `<div style="${position} opacity:0.6; color:#000; font-size:${fontSizePx}px; font-weight:900;
+                letter-spacing:${Math.round(fontSizePx * 0.12)}px; text-transform:uppercase; white-space:nowrap;
+                text-shadow: 0 0 ${haloTight}px #fff, 0 0 ${haloTight}px #fff, 0 0 ${haloWide}px #fff, 0 0 ${haloWide}px #fff;
                 pointer-events:none;">Empty</div>`;
 }
 
