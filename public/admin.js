@@ -659,9 +659,28 @@ async function openToolboxPrintSheet(boxId) {
                 </div>
             </div>` : '';
 
+        // The wrapper used to be `display:inline-block` with no explicit size, relying on its
+        // shrink-to-fit auto-height happening to come out matching the <img>'s own rendered box.
+        // That auto height is CSS-spec "indefinite", though -- which made the <img>'s own
+        // `max-height:100%` (referencing this wrapper as its containing block) fail to resolve
+        // for a photo that's tall enough to be height-constrained rather than width-constrained
+        // (any photo less panoramic than ~16:9 on this page shape). With no effective max-height,
+        // the image sized itself from width alone, via its own aspect ratio, with NO regard for
+        // whether that height actually fit the page -- confirmed live: a 1600x1200 (4:3) drawer
+        // photo rendered 1152px tall inside a page whose body row only had ~911px of real height,
+        // overflowing the page by roughly 240px (2.5in), silently clipped wherever the real page
+        // boundary fell when printed. James reported this as photos looking "cut off around the
+        // edges." Fixed by making the wrapper `width:100%; height:100%` of its own flex parent
+        // instead -- a flex item's cross size IS definite per spec, so the <img>'s max-height:100%
+        // now properly resolves against it, and object-fit:contain correctly shrinks the image (on
+        // both axes) to actually fit, instead of only ever checking its width. This can
+        // reintroduce letterboxing within the wrapper when the photo's aspect ratio doesn't match
+        // the wrapper's -- but the marker overlay no longer depends on the two matching exactly
+        // (see the `beforeprint` listener below, which already re-measures and repositions it
+        // against the <img>'s own true rendered box for exactly this reason).
         const photoArea = `
             <div style="flex:1 1 auto; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden;">
-                <div style="position:relative; display:inline-block; line-height:0; max-width:100%; max-height:100%;">
+                <div style="position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center;">
                     <img src="${drawer.photo_url}" style="display:block; max-width:100%; max-height:100%; object-fit:contain;">
                     <div data-photo-overlay style="position:absolute; top:0; left:0; width:100%; height:100%;">${overlays}</div>
                 </div>
@@ -709,20 +728,21 @@ window.addEventListener('afterprint', () => {
 });
 
 // Fixes a real marker-drift bug: each map page's photo overlay (`[data-photo-overlay]`, holding
-// the scan-code/number-badge markers) is sized to its wrapper div via plain percentages,
-// assuming the wrapper always ends up exactly the same size as the <img> it wraps (the usual
-// inline-block/object-fit shrink-to-fit trick). That holds for a wide (e.g. 16:9) photo, which
-// is width-constrained by the page -- but a taller photo (e.g. 4:3) instead becomes
-// height-constrained, and in that case the wrapper's own percentage-height resolution comes out
-// smaller than the image's real rendered height (confirmed live: a 1600x1200 photo rendered at
-// 1188px tall, but its overlay wrapper only got 959px) -- compressing every marker upward from
-// its true spot, worse the further down the drawer a tool is placed. `.printable-area`'s real
-// print-only layout (position:absolute, full page width -- see style.css's `@media print` block)
-// isn't active during on-screen preview, so this can't be measured/fixed before `window.print()`
+// the scan-code/number-badge markers) is sized to its wrapper div via plain percentages, on the
+// assumption that the wrapper and the <img> it wraps always end up the same size. That's no
+// longer guaranteed now that the wrapper fills its flex parent rather than shrink-wrapping the
+// image (see photoArea's own comment above) -- a photo whose aspect ratio doesn't match the
+// wrapper's legitimately letterboxes within it (object-fit:contain), leaving the wrapper BIGGER
+// than the image's real visible box on one axis. (The original version of this bug ran the other
+// way -- the wrapper came out SMALLER than the image, which was overflowing its page entirely;
+// fixed separately, see photoArea's comment.) Either way, a percentage-sized overlay drifts from
+// the photo's real on-screen position. `.printable-area`'s real print-only layout
+// (position:absolute, full page width -- see style.css's `@media print` block) isn't active
+// during on-screen preview, so the TRUE geometry can't be measured/fixed before `window.print()`
 // is called -- `beforeprint` is the one reliable hook that fires once print media (and therefore
-// the real layout) is actually active, letting this re-measure the image's TRUE rendered box and
-// force the overlay to match it exactly via explicit pixel values, overriding the unreliable
-// percentage sizing rather than trying to make the percentages themselves resolve correctly.
+// the real layout) is actually active, letting this re-measure the image's real rendered box and
+// force the overlay to match it exactly via explicit pixel values, regardless of which direction
+// (or whether) the wrapper and image sizes actually differ.
 window.addEventListener('beforeprint', () => {
     document.querySelectorAll('[data-photo-overlay]').forEach(overlay => {
         const wrapper = overlay.parentElement;
