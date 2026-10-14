@@ -466,12 +466,35 @@ async function waitForImages(container) {
 }
 
 /**
+ * Shared "EMPTY" visual stamp for a drawer with zero tools assigned (Retired tools don't count --
+ * every caller excludes them itself, matching the print sheet's own long-standing tools filter).
+ * Dark text on a light/opaque background, not the reverse -- style.css's `@media print` block
+ * forces `color: black !important` under .printable-area (see numberBadge() below), which would
+ * silently render light text invisible on the print sheet; using the same scheme in the live app
+ * too keeps both visually consistent. `absolute` floats it centered over a photo (the caller's
+ * container must already be position:relative and this stamp the only thing needing centering in
+ * it); pass false for a page/section with no photo, where the caller centers it itself (e.g. with
+ * a flex wrapper) alongside normal document flow.
+ */
+function emptyDrawerStamp(fontSizePx, absolute = true) {
+    const position = absolute
+        ? 'position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) rotate(-16deg);'
+        : 'transform:rotate(-16deg);';
+    return `<div style="${position} background:rgba(255,255,255,0.92); border:3px solid #000; border-radius:8px;
+                padding:${Math.round(fontSizePx * 0.3)}px ${Math.round(fontSizePx * 0.9)}px; color:#000; font-size:${fontSizePx}px;
+                font-weight:900; letter-spacing:${Math.round(fontSizePx * 0.12)}px; text-transform:uppercase; white-space:nowrap;
+                pointer-events:none;">Empty</div>`;
+}
+
+/**
  * Builds and prints a reference sheet for one toolbox: every drawer in it gets a full tabloid
  * (11x17in landscape -- see the injected <style> right before window.print() below, which sets
  * this scoped to just this print job) "map" page, titled "<toolbox> -- <drawer>" so a page is
- * self-identifying without flipping back to the first one. A drawer with a photo and at least
- * one tool also gets a second "Tool List" page right after its map, with full details (code,
- * name, ID) for every tool in it.
+ * self-identifying without flipping back to the first one. A drawer with a photo gets a second
+ * "Tool List" page right after its map, with full details (code, name, ID) for every tool in it.
+ * An empty drawer (zero non-Retired tools) still gets both pages -- its photo (if any) and its
+ * Tool List page both show the EMPTY stamp instead of being skipped, so the binder always has an
+ * entry for every drawer, not just occupied ones.
  * Meant to be printed and kept in a binder near the physical box, so a tool can be signed out by
  * scanning straight from the page instead of needing a barcode label on the tool itself or in
  * its drawer slot.
@@ -587,7 +610,7 @@ async function openToolboxPrintSheet(boxId) {
                 ? `<div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:10px; align-content:start;">
                         ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px;">${toolCard(t, 50)}</div>`).join('')}
                    </div>`
-                : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
+                : `<div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center;">${emptyDrawerStamp(64, false)}</div>`;
             return pageDiv(`${pageTitle(drawer)}${grid}`);
         }
 
@@ -611,7 +634,7 @@ async function openToolboxPrintSheet(boxId) {
                 <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:50px; height:50px; object-fit:contain; display:block; box-shadow:0 1px 4px rgba(0,0,0,0.6);">
                 <div style="position:absolute; top:-8px; left:-8px;">${numberBadge(idx + 1, 20)}</div>
             </div>
-        `).join('');
+        `).join('') + (tools.length ? '' : emptyDrawerStamp(56));
 
         const sidebar = unpositioned.length ? `
             <div style="flex:0 0 2.5in; min-width:0; overflow-y:auto; border-left:1px solid #ccc; padding-left:10px;">
@@ -629,18 +652,15 @@ async function openToolboxPrintSheet(boxId) {
                 </div>
             </div>`;
 
-        const body = tools.length
-            ? `<div style="flex:1 1 auto; min-height:0; display:flex; gap:12px;">${photoArea}${sidebar}</div>`
-            : `<p style="color:#666;">No tools currently assigned to this drawer.</p>`;
-
+        const body = `<div style="flex:1 1 auto; min-height:0; display:flex; gap:12px;">${photoArea}${sidebar}</div>`;
         const mapPage = pageDiv(`${pageTitle(drawer)}${body}`);
-        if (!tools.length) return mapPage;
 
-        const detailGrid = `
-            <div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:8px; align-content:start;">
-                ${positioned.map((t, idx) => detailRow(t, idx + 1)).join('')}
-                ${unpositioned.map(t => detailRow(t, null)).join('')}
-            </div>`;
+        const detailGrid = tools.length
+            ? `<div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:8px; align-content:start;">
+                    ${positioned.map((t, idx) => detailRow(t, idx + 1)).join('')}
+                    ${unpositioned.map(t => detailRow(t, null)).join('')}
+               </div>`
+            : `<div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center;">${emptyDrawerStamp(64, false)}</div>`;
         const detailPage = pageDiv(`${pageTitle(drawer, 'Tool List')}${detailGrid}`);
 
         return mapPage + detailPage;
@@ -2665,13 +2685,17 @@ function renderPositionMap(drawer) {
     if (!markersEl || !controlsEl) return; // modal was closed/switched before this ran
 
     const { drawerTools, placed, unplaced, statusColor } = getDrawerPositionData(drawer);
+    // Excludes Retired tools, unlike getDrawerPositionData()'s own drawerTools -- matches the
+    // print sheet's established "empty" definition (see emptyDrawerStamp()) without changing
+    // that shared helper's behavior for its other callers.
+    const isEmpty = !globalToolsCache.some(t => t.drawer_id === drawer.drawer_id && t.status !== 'Retired');
 
     markersEl.innerHTML = placed.map(t => `
         <div title="${t.name} (${t.status})" onclick="event.stopPropagation();${canEditTools ? ` unplaceToolPosition('${t.qr_code}')` : ''}"
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
                     width:16px; height:16px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
                     box-shadow:0 0 4px rgba(0,0,0,0.6); pointer-events:auto;${canEditTools ? ' cursor:pointer;' : ''}"></div>
-    `).join('');
+    `).join('') + (isEmpty ? emptyDrawerStamp(20) : '');
 
     const img = document.getElementById('em-position-map-img');
 
@@ -2800,13 +2824,17 @@ function renderPositionEditor() {
         : 'none';
 
     const { drawerTools, placed, unplaced, statusColor } = getDrawerPositionData(drawer);
+    // Excludes Retired tools, unlike getDrawerPositionData()'s own drawerTools -- matches the
+    // print sheet's established "empty" definition (see emptyDrawerStamp()) without changing
+    // that shared helper's behavior for its other callers.
+    const isEmpty = !globalToolsCache.some(t => t.drawer_id === drawer.drawer_id && t.status !== 'Retired');
 
     markersEl.innerHTML = placed.map(t => `
         <div title="${t.name} (${t.status})" onpointerdown="startDragMarker(event, '${t.qr_code}', this)"
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
                     width:26px; height:26px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
                     box-shadow:0 0 4px rgba(0,0,0,0.6); pointer-events:auto; cursor:grab; touch-action:none;"></div>
-    `).join('');
+    `).join('') + (isEmpty ? emptyDrawerStamp(40) : '');
 
     if (unplaced.length === 0) {
         imgEl.onclick = null;

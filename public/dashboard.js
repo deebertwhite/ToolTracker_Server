@@ -237,11 +237,27 @@ function loadDrawerMapFromTree(drawerId, clickedEl) {
 let currentMapTools = {};
 
 /**
+ * Visual "EMPTY" stamp overlaid on a drawer's photo when it has zero non-Retired tools --
+ * matches the same stamp used on the admin panel's print sheet and shadow-board editors
+ * (see emptyDrawerStamp() in admin.js; duplicated here since this page loads its own script,
+ * not admin.js). Dark text on a light/opaque background for legibility against any photo.
+ */
+function emptyDrawerStamp(fontSizePx) {
+    return `<div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) rotate(-16deg);
+                background:rgba(255,255,255,0.92); border:3px solid #000; border-radius:8px;
+                padding:${Math.round(fontSizePx * 0.3)}px ${Math.round(fontSizePx * 0.9)}px; color:#000; font-size:${fontSizePx}px;
+                font-weight:900; letter-spacing:${Math.round(fontSizePx * 0.12)}px; text-transform:uppercase; white-space:nowrap;
+                pointer-events:none;">Empty</div>`;
+}
+
+/**
  * Renders the selected drawer's photo with a colored marker for every tool that has a saved
  * position (green/accent/red -- same convention as everywhere else in this app), read-only
  * (no click-to-place here; markers are set from the drawer's entity modal in the admin
  * panel). Re-fetches /api/tools fresh rather than trusting globalTools' page-load snapshot,
- * since this view is meant to be left open on a shared screen for a while.
+ * since this view is meant to be left open on a shared screen for a while. An empty drawer
+ * (zero non-Retired tools) gets the EMPTY stamp overlaid on its photo instead of just the
+ * existing text note below it.
  */
 async function renderDrawerMap(drawerId) {
     const drawer = globalStorageDrawers.find(d => d.drawer_id == drawerId);
@@ -280,6 +296,7 @@ async function renderDrawerMap(drawerId) {
     const placed = tools.filter(t => t.position_x !== null && t.position_y !== null);
     const unplacedCount = tools.length - placed.length;
     const statusColor = (status) => status === 'In' ? 'var(--green)' : (status === 'Out' ? 'var(--accent)' : 'var(--red)');
+    const isEmpty = !tools.some(t => t.status !== 'Retired');
 
     // Bigger + a colored glow (not just a plain dark drop-shadow) so each marker reads clearly
     // at a glance from across a room -- this view is meant to be left open on a shared/wall
@@ -294,7 +311,7 @@ async function renderDrawerMap(drawerId) {
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
                     width:24px; height:24px; border-radius:50%; background:${statusColor(t.status)}; border:3px solid #fff;
                     box-shadow:0 0 10px 3px ${statusColor(t.status)}, 0 2px 4px rgba(0,0,0,0.8); cursor:pointer;"></div>
-    `).join('');
+    `).join('') + (isEmpty ? emptyDrawerStamp(48) : '');
 
     document.getElementById('map-unplaced-note').textContent = unplacedCount > 0
         ? `${unplacedCount} tool(s) in this drawer don't have a marked position yet.`
