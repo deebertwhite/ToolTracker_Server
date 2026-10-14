@@ -550,9 +550,21 @@ async function openToolboxPrintSheet(boxId) {
     // has no height of its own (just width:100%, see style.css), so a percentage height here
     // would have nothing definite to resolve against and collapse to the content's own natural
     // size instead of actually filling a page (confirmed via a live PDF-generation test: the
-    // page div measured 0 height). Matches the 17x11in page / 0.25in margin injected into
+    // page div measured 0 height). Matches the 17x11in page / 0.5in margin injected into
     // #toolbox-sheet-page-size below -- keep both in sync if either ever changes.
-    const PAGE_SIZE = 'width:16.5in; height:10.5in;';
+    //
+    // 0.5in, not the original 0.25in: James reported real printed photos looking cropped at the
+    // edges. A CSS @page margin only controls the DOCUMENT's content box -- it has no say over
+    // a real printer's own hardware "non-printable area" (nearly every printer, tabloid-size
+    // ones especially, physically can't lay ink all the way to the paper edge), and since the
+    // drawer photo is deliberately sized to fill essentially the whole page, anything inside
+    // that unprintable band gets silently clipped right at the photo's own edge -- exactly the
+    // reported symptom. 0.25in was too tight a margin to reliably clear that; 0.5in is a
+    // conservative buffer that should clear it on most printers. If photos still look clipped
+    // after this, the printer itself likely doesn't support true 17x11in (Tabloid/Ledger) paper
+    // and is silently substituting/scaling onto a smaller sheet -- a printer/driver setting to
+    // check, not something a page margin can fix.
+    const PAGE_SIZE = 'width:16in; height:10in;';
     const pageDiv = (inner) => `<div style="break-before: page; ${PAGE_SIZE} box-sizing:border-box; display:flex; flex-direction:column;">${inner}</div>`;
 
     // Compact scan-code-plus-text card, used for the not-yet-pinpointed sidebar and the no-photo
@@ -684,7 +696,7 @@ async function openToolboxPrintSheet(boxId) {
     // call and the afterprint listener below removes it again right after.
     const pageSizeStyle = document.createElement('style');
     pageSizeStyle.id = 'toolbox-sheet-page-size';
-    pageSizeStyle.textContent = '@page { size: 17in 11in; margin: 0.25in; }';
+    pageSizeStyle.textContent = '@page { size: 17in 11in; margin: 0.5in; }'; // 0.5in margin -- see PAGE_SIZE's comment above for why
     document.head.appendChild(pageSizeStyle);
 
     window.print();
@@ -1246,11 +1258,21 @@ async function renderEditableInfraTree() {
                                 const batchCheckbox = batchMoveMode
                                     ? `<input type="checkbox" onclick="event.stopPropagation();" onchange="toggleToolSelection(${tool.tool_id}, this.checked)" ${selectedToolIds.has(tool.tool_id) ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; flex-shrink:0;">`
                                     : '';
+                                // Same "photo, or a fallback icon" convention as the drawer row's own
+                                // thumbnail just above (drThumb) and the entity modal's #em-thumb --
+                                // click zooms via openImageModal() without also opening the entity
+                                // modal underneath it (stopPropagation(), since the whole row itself
+                                // is clickable here, unlike the drawer row's thumbnail which sits
+                                // outside its own clickable span).
+                                const toolThumb = tool.photo_url
+                                    ? `<img src="${tool.photo_url}" onclick="event.stopPropagation(); openImageModal('${tool.photo_url}')" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover; cursor: zoom-in; flex-shrink: 0;">`
+                                    : `<span style="width: 24px; height: 24px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color: var(--muted);">${icon('wrench')}</span>`;
                                 const altPartNumberList = (tool.alt_part_numbers || []).map(ap => ap.part_number);
                                 const searchKey = [tool.name, tool.qr_code, tool.serial_number, tool.part_number, ...altPartNumberList].filter(Boolean).join(' ').toUpperCase();
                                 html += `
                                     <div class="tool-tree-row" data-search="${searchKey.replace(/"/g, '&quot;')}" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.02); cursor: pointer;" onclick="openEntityModal('tool', '${tool.qr_code}')">
                                         ${batchCheckbox}
+                                        ${toolThumb}
                                         <span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: ${statusColor};">${tool.status}</span>
                                         <span style="font-size: 13px; font-weight:bold;">${tool.name}</span>
                                         <span style="font-family: monospace; font-size: 10px; color: var(--muted);">${tool.qr_code}</span>
