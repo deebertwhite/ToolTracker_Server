@@ -651,7 +651,7 @@ async function openToolboxPrintSheet(boxId) {
             <div style="flex:1 1 auto; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden;">
                 <div style="position:relative; display:inline-block; line-height:0; max-width:100%; max-height:100%;">
                     <img src="${drawer.photo_url}" style="display:block; max-width:100%; max-height:100%; object-fit:contain;">
-                    <div style="position:absolute; top:0; left:0; width:100%; height:100%;">${overlays}</div>
+                    <div data-photo-overlay style="position:absolute; top:0; left:0; width:100%; height:100%;">${overlays}</div>
                 </div>
             </div>`;
 
@@ -694,6 +694,35 @@ window.addEventListener('afterprint', () => {
     const area = document.getElementById('toolbox-print-sheet-area');
     if (area) area.style.display = 'none';
     document.getElementById('toolbox-sheet-page-size')?.remove();
+});
+
+// Fixes a real marker-drift bug: each map page's photo overlay (`[data-photo-overlay]`, holding
+// the scan-code/number-badge markers) is sized to its wrapper div via plain percentages,
+// assuming the wrapper always ends up exactly the same size as the <img> it wraps (the usual
+// inline-block/object-fit shrink-to-fit trick). That holds for a wide (e.g. 16:9) photo, which
+// is width-constrained by the page -- but a taller photo (e.g. 4:3) instead becomes
+// height-constrained, and in that case the wrapper's own percentage-height resolution comes out
+// smaller than the image's real rendered height (confirmed live: a 1600x1200 photo rendered at
+// 1188px tall, but its overlay wrapper only got 959px) -- compressing every marker upward from
+// its true spot, worse the further down the drawer a tool is placed. `.printable-area`'s real
+// print-only layout (position:absolute, full page width -- see style.css's `@media print` block)
+// isn't active during on-screen preview, so this can't be measured/fixed before `window.print()`
+// is called -- `beforeprint` is the one reliable hook that fires once print media (and therefore
+// the real layout) is actually active, letting this re-measure the image's TRUE rendered box and
+// force the overlay to match it exactly via explicit pixel values, overriding the unreliable
+// percentage sizing rather than trying to make the percentages themselves resolve correctly.
+window.addEventListener('beforeprint', () => {
+    document.querySelectorAll('[data-photo-overlay]').forEach(overlay => {
+        const wrapper = overlay.parentElement;
+        const img = wrapper?.querySelector(':scope > img');
+        if (!img) return;
+        const imgRect = img.getBoundingClientRect();
+        const wrapperRect = wrapper.getBoundingClientRect();
+        overlay.style.left = (imgRect.left - wrapperRect.left) + 'px';
+        overlay.style.top = (imgRect.top - wrapperRect.top) + 'px';
+        overlay.style.width = imgRect.width + 'px';
+        overlay.style.height = imgRect.height + 'px';
+    });
 });
 
 // ==========================================
