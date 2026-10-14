@@ -2815,6 +2815,13 @@ async function unplaceToolPosition(qrCode) {
 let positionEditorDrawerId = null;
 const POSITION_GRID_STEP = 0.02; // 50x50 grid -- finer than the original 0.05 (20x20) per James's feedback, for easier precise pinpointing
 
+// Batch-select state for the full-screen editor -- see togglePositionBatchSelect(). Lets several
+// stale placements be cleared in one request instead of one click-and-confirm per marker, the
+// common need right after a drawer gets a new reference photo (the old positions no longer line
+// up, and re-placing everything is much easier starting from a clean slate).
+let peBatchSelectMode = false;
+let peSelectedQrCodes = new Set();
+
 /** Snaps a fractional (0-1) coordinate to POSITION_GRID_STEP when #pe-snap-toggle is checked, and always clamps to [0,1]. */
 function snapPositionCoord(v) {
     const clamped = Math.max(0, Math.min(1, v));
@@ -2827,6 +2834,8 @@ function openPositionEditor(drawerId) {
     const drawer = globalDrawersCache.find(d => d.drawer_id == drawerId);
     if (!drawer || !drawer.photo_url) return;
     positionEditorDrawerId = drawer.drawer_id;
+    peBatchSelectMode = false;
+    peSelectedQrCodes.clear();
     document.getElementById('pe-title').textContent = drawer.name;
     document.getElementById('pe-map-img').src = drawer.photo_url;
     document.getElementById('position-editor-overlay').style.display = 'flex';
@@ -2838,6 +2847,69 @@ function closePositionEditor() {
     document.getElementById('position-editor-overlay').style.display = 'none';
     document.getElementById('pe-map-img').src = '';
     positionEditorDrawerId = null;
+    peBatchSelectMode = false;
+    peSelectedQrCodes.clear();
+}
+
+/** Toggles batch-select mode: clicking a marker then toggles its selection instead of dragging/removing it. Turning it off clears any in-progress selection. */
+function togglePositionBatchSelect() {
+    peBatchSelectMode = !peBatchSelectMode;
+    if (!peBatchSelectMode) peSelectedQrCodes.clear();
+    renderPositionEditor();
+}
+
+/** Adds/removes one tool's qr_code from the batch selection (called by a marker click while peBatchSelectMode is on). */
+function togglePositionMarkerSelection(qrCode) {
+    if (peSelectedQrCodes.has(qrCode)) peSelectedQrCodes.delete(qrCode); else peSelectedQrCodes.add(qrCode);
+    renderPositionEditor();
+}
+
+/** Selects every currently-placed tool in this drawer at once -- the common case right after a new photo, where every existing marker needs clearing to start fresh. */
+function selectAllPositionMarkers() {
+    const drawer = globalDrawersCache.find(d => d.drawer_id === positionEditorDrawerId);
+    if (!drawer) return;
+    const { placed } = getDrawerPositionData(drawer);
+    placed.forEach(t => peSelectedQrCodes.add(t.qr_code));
+    renderPositionEditor();
+}
+
+/** Empties the batch selection without leaving batch-select mode. */
+function deselectAllPositionMarkers() {
+    peSelectedQrCodes.clear();
+    renderPositionEditor();
+}
+
+/**
+ * Clears the shadow-board position for every selected tool in one request
+ * (PUT /api/tools/batch-unplace), confirming first since there's no undo -- the batch
+ * counterpart to unplaceToolPosition(). Stays in batch-select mode afterward, ready for another
+ * round, same convention as the Master Storage & Asset Tree's own batch-select actions.
+ */
+async function batchUnplaceSelectedMarkers() {
+    if (peSelectedQrCodes.size === 0) return alert('⚠️ Select at least one marker first.');
+    const qrCodes = Array.from(peSelectedQrCodes);
+    if (!confirm(`Clear the shadow-board position for ${qrCodes.length} tool(s)? They'll move back to "Not Yet Pinpointed" until re-placed.`)) return;
+
+    try {
+        const res = await fetch('/api/tools/batch-unplace', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ qr_codes: qrCodes }),
+        });
+        const data = await res.json();
+        if (!res.ok) return alert('❌ ' + (data.error || 'Failed to clear positions.'));
+
+        qrCodes.forEach(qr => {
+            const tool = globalToolsCache.find(t => t.qr_code === qr);
+            if (tool) { tool.position_x = null; tool.position_y = null; }
+        });
+        peSelectedQrCodes.clear();
+        const drawer = globalDrawersCache.find(d => d.drawer_id == document.getElementById('em-target-id').value);
+        if (drawer) renderPositionMap(drawer);
+        if (positionEditorDrawerId) renderPositionEditor();
+    } catch (err) {
+        alert('❌ Network error while clearing positions.');
+    }
 }
 
 /** (Re)draws the position editor's grid lines, markers, and unplaced-tool picker for the currently open drawer. */
@@ -2848,6 +2920,13 @@ function renderPositionEditor() {
     const imgEl = document.getElementById('pe-map-img');
     const gridEl = document.getElementById('pe-grid-overlay');
     if (!drawer || !markersEl || !controlsEl || !imgEl) return;
+
+    const batchToggleBtn = document.getElementById('btn-pe-batch-toggle');
+    const batchBar = document.getElementById('pe-batch-bar');
+    const batchCountEl = document.getElementById('pe-batch-count');
+    if (batchToggleBtn) batchToggleBtn.classList.toggle('active', peBatchSelectMode);
+    if (batchBar) batchBar.style.display = peBatchSelectMode ? 'flex' : 'none';
+    if (batchCountEl) batchCountEl.textContent = `${peSelectedQrCodes.size} selected`;
 
     const snapOn = document.getElementById('pe-snap-toggle')?.checked;
     gridEl.style.backgroundSize = `${POSITION_GRID_STEP * 100}% ${POSITION_GRID_STEP * 100}%`;
@@ -2861,12 +2940,22 @@ function renderPositionEditor() {
     // that shared helper's behavior for its other callers.
     const isEmpty = !globalToolsCache.some(t => t.drawer_id === drawer.drawer_id && t.status !== 'Retired');
 
-    markersEl.innerHTML = placed.map(t => `
-        <div title="${t.name} (${t.status})" onpointerdown="startDragMarker(event, '${t.qr_code}', this)"
+    // In batch-select mode, a click toggles selection instead of dragging/removing the marker --
+    // selected markers get a thick accent-colored ring in place of the plain white border so the
+    // running selection is visible at a glance across a dense drawer.
+    markersEl.innerHTML = placed.map(t => {
+        const selected = peBatchSelectMode && peSelectedQrCodes.has(t.qr_code);
+        const interactionAttr = peBatchSelectMode
+            ? `onclick="togglePositionMarkerSelection('${t.qr_code}')"`
+            : `onpointerdown="startDragMarker(event, '${t.qr_code}', this)"`;
+        const border = selected ? '4px solid var(--accent)' : '2px solid #fff';
+        const boxShadow = selected ? '0 0 0 3px rgba(203,96,21,0.55), 0 0 6px rgba(0,0,0,0.7)' : '0 0 4px rgba(0,0,0,0.6)';
+        return `
+        <div title="${t.name} (${t.status})" ${interactionAttr}
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
-                    width:26px; height:26px; border-radius:50%; background:${statusColor(t.status)}; border:2px solid #fff;
-                    box-shadow:0 0 4px rgba(0,0,0,0.6); pointer-events:auto; cursor:grab; touch-action:none;"></div>
-    `).join('') + (isEmpty ? emptyDrawerStamp(40) : '');
+                    width:26px; height:26px; border-radius:50%; background:${statusColor(t.status)}; border:${border};
+                    box-shadow:${boxShadow}; pointer-events:auto; cursor:${peBatchSelectMode ? 'pointer' : 'grab'}; touch-action:none;"></div>`;
+    }).join('') + (isEmpty ? emptyDrawerStamp(40) : '');
 
     if (unplaced.length === 0) {
         imgEl.onclick = null;

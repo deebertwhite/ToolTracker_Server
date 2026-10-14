@@ -2509,6 +2509,41 @@ app.put('/api/tools/:id/position', requireFetchHeader, requireRole(2), async (re
     }
 });
 
+// Clears the shadow-board position for several tools at once -- the batch counterpart to
+// PUT /api/tools/:id/position's null/null "unplace" case, for the admin panel's position-editor
+// batch-select mode. Keyed by qr_code (not tool_id, unlike /api/tools/batch-move|batch-delete)
+// to match that single-tool endpoint's own identification convention, since this is its direct
+// batch sibling, not the Master Storage Tree's.
+app.put('/api/tools/batch-unplace', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { qr_codes } = req.body;
+    if (!Array.isArray(qr_codes) || qr_codes.length === 0) {
+        return res.status(400).json({ error: 'No tools selected.' });
+    }
+    try {
+        // A batch can span multiple departments -- every affected tool must individually be one
+        // this user has sufficient weight for (migrations/021), same per-row shape
+        // batch-move/batch-delete already use for exactly this reason.
+        const deptCheckRes = await pool.query(
+            `SELECT t.qr_code, b.dept_id FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE t.qr_code = ANY($1::text[])`,
+            [qr_codes]
+        );
+        if (deptCheckRes.rows.some(row => !canAccessDept(req.authUser, row.dept_id, 2))) {
+            return res.status(403).json({ error: 'You do not have sufficient access to one or more of these tools\' departments.' });
+        }
+
+        const result = await pool.query(
+            'UPDATE tools SET position_x = NULL, position_y = NULL WHERE qr_code = ANY($1::text[]) RETURNING tool_id, qr_code, name',
+            [qr_codes]
+        );
+        res.json({ success: true, unplaced: result.rows.length, results: result.rows });
+    } catch (err) {
+        console.error('Batch Unplace Error:', err);
+        res.status(500).json({ error: 'Failed to clear tool positions.' });
+    }
+});
+
 // Full incident history for one tool -- every reported Missing/Broken/Worn cycle (see
 // tool_incidents / migrations/007), newest first, so an admin can see the full lifecycle:
 // when it was reported, where it was last known to be, and how/when/by whom it was

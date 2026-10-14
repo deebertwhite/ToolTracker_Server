@@ -518,11 +518,24 @@
     <div id="position-editor-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.92); z-index: 10001; flex-direction: column; align-items: center; padding: 20px; box-sizing: border-box;">
         <div style="width:100%; max-width:1400px; display:flex; justify-content:space-between; align-items:center; gap:12px; color:white; margin-bottom:12px; flex-wrap:wrap;">
             <div style="font-weight:bold; font-size:16px;" id="pe-title"></div>
-            <div style="display:flex; gap:16px; align-items:center;">
+            <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
                 <label style="font-size:13px; display:flex; align-items:center; gap:6px; cursor:pointer;">
                     <input type="checkbox" id="pe-snap-toggle" checked onchange="renderPositionEditor()"> Snap to grid
                 </label>
+                <button type="button" class="btn-icon" id="btn-pe-batch-toggle" style="padding: 4px 10px; font-size: 12px;" onclick="togglePositionBatchSelect()"><span class="icon" data-icon="move"></span> Batch Select</button>
                 <button type="button" class="btn btn-secondary" style="width:auto;" onclick="closePositionEditor()"><span class="icon" data-icon="check"></span> Done</button>
+            </div>
+        </div>
+        <!-- Shown only while batch-select mode is on (see togglePositionBatchSelect() in admin.js)
+             -- clicking a marker then toggles its selection instead of dragging/removing it, for
+             clearing several stale placements at once (e.g. after a new reference photo). -->
+        <div id="pe-batch-bar" style="display:none; width:100%; max-width:1400px; align-items:center; justify-content:space-between; gap:10px; background: rgba(203,96,21,0.1); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; flex-wrap:wrap;">
+            <span id="pe-batch-count" style="font-size:13px; font-weight:bold; color:white;">0 selected</span>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button type="button" class="btn btn-secondary" style="width:auto;" onclick="selectAllPositionMarkers()">Select All</button>
+                <button type="button" class="btn btn-secondary" style="width:auto;" onclick="deselectAllPositionMarkers()">Deselect All</button>
+                <button type="button" class="btn btn-danger" style="width:auto;" onclick="batchUnplaceSelectedMarkers()">Clear Selected...</button>
+                <button type="button" class="btn btn-secondary" style="width:auto;" onclick="togglePositionBatchSelect()">Exit Batch Mode</button>
             </div>
         </div>
         <div id="pe-controls" style="width:100%; max-width:1400px; margin-bottom:12px;"></div>
