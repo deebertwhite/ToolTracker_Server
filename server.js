@@ -2180,6 +2180,46 @@ app.put('/api/tools/batch-move', requireFetchHeader, requireRole(2), async (req,
     }
 });
 
+// Clears the shadow-board position for several tools at once -- the batch counterpart to
+// PUT /api/tools/:id/position's null/null "unplace" case, for the admin panel's position-editor
+// batch-select mode. Keyed by qr_code (not tool_id, unlike /api/tools/batch-move|batch-delete)
+// to match that single-tool endpoint's own identification convention, since this is its direct
+// batch sibling, not the Master Storage Tree's. Must be registered here, before the generic
+// PUT /api/tools/:id below -- Express matches routes in registration order, and :id would
+// otherwise greedily match the literal path segment "batch-unplace" first (confirmed live: this
+// exact mistake briefly shipped, routing here into "/api/tools/:id" instead and failing with
+// "A drawer/location is required.", that endpoint's own validation error for a missing body
+// field this request never sends).
+app.put('/api/tools/batch-unplace', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { qr_codes } = req.body;
+    if (!Array.isArray(qr_codes) || qr_codes.length === 0) {
+        return res.status(400).json({ error: 'No tools selected.' });
+    }
+    try {
+        // A batch can span multiple departments -- every affected tool must individually be one
+        // this user has sufficient weight for (migrations/021), same per-row shape
+        // batch-move/batch-delete already use for exactly this reason.
+        const deptCheckRes = await pool.query(
+            `SELECT t.qr_code, b.dept_id FROM tools t
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE t.qr_code = ANY($1::text[])`,
+            [qr_codes]
+        );
+        if (deptCheckRes.rows.some(row => !canAccessDept(req.authUser, row.dept_id, 2))) {
+            return res.status(403).json({ error: 'You do not have sufficient access to one or more of these tools\' departments.' });
+        }
+
+        const result = await pool.query(
+            'UPDATE tools SET position_x = NULL, position_y = NULL WHERE qr_code = ANY($1::text[]) RETURNING tool_id, qr_code, name',
+            [qr_codes]
+        );
+        res.json({ success: true, unplaced: result.rows.length, results: result.rows });
+    } catch (err) {
+        console.error('Batch Unplace Error:', err);
+        res.status(500).json({ error: 'Failed to clear tool positions.' });
+    }
+});
+
 // Update a Tool (name, description, status, calibration info). Requires tool_rep+ (getRoleWeight >= 2).
 app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) => {
     const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, drawer_id, group_id } = req.body;
@@ -2506,41 +2546,6 @@ app.put('/api/tools/:id/position', requireFetchHeader, requireRole(2), async (re
     } catch (err) {
         console.error("Tool Position Update Error:", err);
         res.status(500).json({ error: 'Failed to update tool position.' });
-    }
-});
-
-// Clears the shadow-board position for several tools at once -- the batch counterpart to
-// PUT /api/tools/:id/position's null/null "unplace" case, for the admin panel's position-editor
-// batch-select mode. Keyed by qr_code (not tool_id, unlike /api/tools/batch-move|batch-delete)
-// to match that single-tool endpoint's own identification convention, since this is its direct
-// batch sibling, not the Master Storage Tree's.
-app.put('/api/tools/batch-unplace', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { qr_codes } = req.body;
-    if (!Array.isArray(qr_codes) || qr_codes.length === 0) {
-        return res.status(400).json({ error: 'No tools selected.' });
-    }
-    try {
-        // A batch can span multiple departments -- every affected tool must individually be one
-        // this user has sufficient weight for (migrations/021), same per-row shape
-        // batch-move/batch-delete already use for exactly this reason.
-        const deptCheckRes = await pool.query(
-            `SELECT t.qr_code, b.dept_id FROM tools t
-             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id LEFT JOIN toolboxes b ON dr.box_id = b.box_id
-             WHERE t.qr_code = ANY($1::text[])`,
-            [qr_codes]
-        );
-        if (deptCheckRes.rows.some(row => !canAccessDept(req.authUser, row.dept_id, 2))) {
-            return res.status(403).json({ error: 'You do not have sufficient access to one or more of these tools\' departments.' });
-        }
-
-        const result = await pool.query(
-            'UPDATE tools SET position_x = NULL, position_y = NULL WHERE qr_code = ANY($1::text[]) RETURNING tool_id, qr_code, name',
-            [qr_codes]
-        );
-        res.json({ success: true, unplaced: result.rows.length, results: result.rows });
-    } catch (err) {
-        console.error('Batch Unplace Error:', err);
-        res.status(500).json({ error: 'Failed to clear tool positions.' });
     }
 });
 
