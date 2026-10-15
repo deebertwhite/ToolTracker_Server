@@ -57,6 +57,26 @@ function uppercaseInput(el) {
 }
 
 /**
+ * Returns the same calendar date one year later, as a `YYYY-MM-DD` string (the native
+ * `<input type="date">` value format) -- used to default a "Calibration Due" field to one year
+ * past whichever "Last Calibrated" date was just picked, the shop's usual interval, wired via
+ * onchange on every "Last Calibrated" field throughout the app (ingest form, +Log Calibration,
+ * sub-assembly, tool edit). Left freely editable afterward -- this only sets the initial default.
+ * Deliberately built from local year/month/day integers (`new Date(y, m, d)`'s numeric-argument
+ * form, never a parsed date STRING) rather than any UTC round-trip (e.g. `.toISOString()` on a
+ * `new Date(dateStr)`), since this app has been bitten before by exactly that class of
+ * timezone-dependent off-by-one-day bug on calibration dates (see GET /api/tools's
+ * cal_due_date::text cast and GROUP_MEMBER_BLOCKED_SQL's CURRENT_DATE fix in server.js).
+ */
+function oneYearFromDate(dateStr) {
+    if (!dateStr) return '';
+    const [y, m, d] = dateStr.split('-').map(Number);
+    if (!y || !m || !d) return '';
+    const result = new Date(y + 1, m - 1, d);
+    return `${result.getFullYear()}-${String(result.getMonth() + 1).padStart(2, '0')}-${String(result.getDate()).padStart(2, '0')}`;
+}
+
+/**
  * Toggles the universal entity modal (#entity-modal-overlay) between its read-only view
  * and its edit view. isEditing=false (the default when the modal opens) shows #em-read-fields
  * and the "Edit Details" button; isEditing=true shows #em-edit-fields and the "Save Changes"
@@ -1845,6 +1865,45 @@ function onAddToolQuantityChange() {
 
     document.getElementById('btn-add-tool-scan').style.display = quantity > 1 ? 'none' : '';
     fetchNextToolId();
+    renderBatchCalRows();
+}
+
+/**
+ * Switches the ingest form's calibration date fields between the single shared pair
+ * (#add-tool-cal-fields, Quantity === 1) and one date pair per tool in the batch
+ * (#add-tool-cal-batch-fields, Quantity > 1) -- each physical tool in a batch often has its own
+ * actual calibration date (e.g. a mixed-date shipment), so a single shared date doesn't always
+ * fit. Tools aren't named/ID'd yet at this point (barcode IDs are only fetched at save time, one
+ * per tool, inside addNewTool()'s own loop), so rows are just labeled by position ("Tool 1",
+ * "Tool 2"...), matching the order they'll be saved in. Re-rendering preserves whatever's already
+ * typed into a row that still exists after the count changes (e.g. bumping Quantity from 3 to 5
+ * keeps rows 1-3 as entered and only adds fresh rows 4-5).
+ */
+function renderBatchCalRows() {
+    const quantity = Math.max(1, parseInt(document.getElementById('add-tool-quantity').value, 10) || 1);
+    const isCalibrated = document.getElementById('add-tool-is-cal').checked;
+    const singleFields = document.getElementById('add-tool-cal-fields');
+    const batchFields = document.getElementById('add-tool-cal-batch-fields');
+    const useBatchRows = isCalibrated && quantity > 1;
+
+    singleFields.style.display = isCalibrated && quantity === 1 ? 'flex' : 'none';
+    batchFields.style.display = useBatchRows ? 'flex' : 'none';
+    if (!useBatchRows) return;
+
+    const existing = [];
+    for (let i = 0; i < quantity; i++) {
+        existing.push({
+            last: document.getElementById(`add-tool-last-cal-${i}`)?.value || '',
+            due: document.getElementById(`add-tool-cal-due-${i}`)?.value || '',
+        });
+    }
+    batchFields.innerHTML = existing.map((v, i) => `
+        <div class="cal-date-pair" style="align-items:center;">
+            <span style="font-size:12px; color:var(--muted); width:52px; flex-shrink:0;">Tool ${i + 1}</span>
+            <div class="form-group" style="margin:0; flex:1;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="add-tool-last-cal-${i}" value="${v.last}" onchange="document.getElementById('add-tool-cal-due-${i}').value = oneYearFromDate(this.value)"></div>
+            <div class="form-group" style="margin:0; flex:1;"><label class="form-label">Calibration Due</label><input type="date" class="form-input" id="add-tool-cal-due-${i}" value="${v.due}"></div>
+        </div>
+    `).join('');
 }
 
 /** Change handler for #add-tool-photo -- swaps the placeholder camera icon for a thumbnail of the chosen file, purely client-side (nothing uploaded yet, see addNewTool()). */
@@ -1872,11 +1931,14 @@ function previewAddToolPhoto() {
  * its date fields were visually present but never read here at all -- a real pre-existing gap,
  * not something this batch feature introduced, just one it would have been wrong to build on
  * top of unfixed). Checking "Requires Calibration Tracking" sets the flag on every tool in the
- * batch; the two date fields, if filled in, are likewise shared across the whole batch as a
- * starting point. That's bare dates only, not a real calibration_records row (provider,
- * certificate, standard) -- for calibrated tools, the results list below links straight to
- * each new tool's own card, where "+ Log Calibration" already exists for exactly that, same as
- * it always has for a tool added one at a time.
+ * batch, but the dates themselves are per-tool, not shared -- each physical tool in a batch often
+ * has its own real calibration date (e.g. a mixed-date shipment), so James asked for dates to be
+ * entered per item rather than one shared date applied to all of them. See renderBatchCalRows()
+ * for the Quantity > 1 per-tool rows (#add-tool-last-cal-N/#add-tool-cal-due-N); at Quantity ===
+ * 1 the original single shared pair is still used. These are bare dates only, not a real
+ * calibration_records row (provider, certificate, standard) -- for calibrated tools, the results
+ * list below links straight to each new tool's own card, where "+ Log Calibration" already
+ * exists for exactly that, same as it always has for a tool added one at a time.
  */
 async function addNewTool() {
     const quantity = Math.max(1, parseInt(document.getElementById('add-tool-quantity').value, 10) || 1);
@@ -1891,9 +1953,15 @@ async function addNewTool() {
         replacement_url: document.getElementById('add-tool-url').value,
         drawer_id: document.getElementById('add-tool-drawer').value,
         is_calibrated: isCalibrated,
-        last_cal_date: isCalibrated ? (document.getElementById('add-tool-last-cal').value || null) : null,
-        cal_due_date: isCalibrated ? (document.getElementById('add-tool-cal-due').value || null) : null
     };
+    // Calibration dates are per-tool, not shared -- at Quantity === 1 there's only ever the one
+    // shared pair to read; at Quantity > 1, each tool reads its own row (see
+    // renderBatchCalRows()), indexed to match the save order below.
+    const calDatesFor = (i) => isCalibrated
+        ? (quantity > 1
+            ? { last_cal_date: document.getElementById(`add-tool-last-cal-${i}`)?.value || null, cal_due_date: document.getElementById(`add-tool-cal-due-${i}`)?.value || null }
+            : { last_cal_date: document.getElementById('add-tool-last-cal').value || null, cal_due_date: document.getElementById('add-tool-cal-due').value || null })
+        : { last_cal_date: null, cal_due_date: null };
     if (!sharedFields.name) return alert('⚠️ Name is required.');
     if (!deptSelect.value || !document.getElementById('add-tool-box').value || !sharedFields.drawer_id) {
         return alert('⚠️ Select a department, toolbox, and drawer for this asset.');
@@ -1929,7 +1997,7 @@ async function addNewTool() {
                 const res = await fetch('/api/tools', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
-                    body: JSON.stringify({ ...sharedFields, qr_code: qrCode, serial_number: serialNumber })
+                    body: JSON.stringify({ ...sharedFields, ...calDatesFor(i), qr_code: qrCode, serial_number: serialNumber })
                 });
                 const data = await res.json();
                 if (!res.ok) { results.push({ qr_code: qrCode, success: false, message: data.error || 'Failed to save.' }); continue; }
@@ -1981,8 +2049,9 @@ async function addNewTool() {
         document.getElementById('add-tool-cal-fields').style.display = 'none';
         document.getElementById('add-tool-last-cal').value = '';
         document.getElementById('add-tool-cal-due').value = '';
+        document.getElementById('add-tool-cal-batch-fields').innerHTML = '';
         previewAddToolPhoto();
-        onAddToolQuantityChange();
+        onAddToolQuantityChange(); // also re-hides the (already-empty) batch cal rows via renderBatchCalRows()
         await renderEditableInfraTree(); // awaited so globalToolsCache already has the new tools by the time the results list below is clickable
     }
 
@@ -2395,8 +2464,8 @@ function openEntityModal(type, id) {
                 <div id="em-cal-history-list" style="font-size:12px;color:var(--muted);margin-top:4px;">Loading...</div>
 
                 <div id="em-cal-log-form" style="display:none; margin-top:10px; background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; border:1px solid var(--border);">
-                    <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom:10px;">
-                        <div class="form-group" style="margin:0;"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="em-cal-date"></div>
+                    <div class="cal-date-pair" style="margin-bottom:10px;">
+                        <div class="form-group" style="margin:0;"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="em-cal-date" onchange="document.getElementById('em-cal-due').value = oneYearFromDate(this.value)"></div>
                         <div class="form-group" style="margin:0;"><label class="form-label">Due Date</label><input type="date" class="form-input" id="em-cal-due"></div>
                     </div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Provider / Lab</label><input class="form-input" id="em-cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
@@ -2469,8 +2538,8 @@ function openEntityModal(type, id) {
                         <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:13px;"><input type="checkbox" id="em-sub-is-calibrated" onchange="toggleSubCalFields()"> Requires Calibration Tracking</label>
                     </div>
                     <div id="em-sub-cal-fields" style="display:none; margin-bottom:10px;">
-                        <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr;">
-                            <div class="form-group" style="margin:0;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="em-sub-last-cal"></div>
+                        <div class="cal-date-pair">
+                            <div class="form-group" style="margin:0;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="em-sub-last-cal" onchange="document.getElementById('em-sub-cal-due').value = oneYearFromDate(this.value)"></div>
                             <div class="form-group" style="margin:0;"><label class="form-label">Calibration Due</label><input type="date" class="form-input" id="em-sub-cal-due"></div>
                         </div>
                     </div>
@@ -2620,8 +2689,8 @@ function openEntityModal(type, id) {
                     <input type="checkbox" id="em-input-is-cal" ${entity.is_calibrated ? 'checked' : ''} onchange="document.getElementById('em-cal-dates').style.display = this.checked ? 'flex' : 'none'">
                     <strong>Requires Calibration</strong>
                 </label>
-                <div id="em-cal-dates" style="display: ${entity.is_calibrated ? 'flex' : 'none'}; gap: 10px;">
-                    <div class="form-group" style="margin: 0;"><label class="form-label">Last Cal</label><input type="date" class="form-input" id="em-input-last-cal" value="${lastCal}"></div>
+                <div id="em-cal-dates" class="cal-date-pair" style="display: ${entity.is_calibrated ? 'flex' : 'none'};">
+                    <div class="form-group" style="margin: 0;"><label class="form-label">Last Cal</label><input type="date" class="form-input" id="em-input-last-cal" value="${lastCal}" onchange="document.getElementById('em-input-cal-due').value = oneYearFromDate(this.value)"></div>
                     <div class="form-group" style="margin: 0;"><label class="form-label">Cal Due</label><input type="date" class="form-input" id="em-input-cal-due" value="${dueCal}"></div>
                 </div>
             </div>

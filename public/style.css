@@ -157,6 +157,15 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
 .flex-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; align-items: end; margin-bottom: 15px; }
 .flex-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; align-items: end; margin-bottom: 15px; }
 
+/* Shared by every "Last Calibrated" + "Due Date" pair across the app's calibration forms (tool
+   ingest, +Log Calibration, sub-assembly, tool edit). A plain 2-up flex row on desktop; stacks to
+   one column under the same 850px breakpoint .flex-grid-3/.flex-grid-4 already collapse at,
+   since a native date input has a real minimum usable width (so its calendar icon/picker isn't
+   squished) that two side-by-side fields can't always honor on a narrow phone screen -- these
+   pairs used to set their columns via an inline style (or a bespoke flex row with no breakpoint
+   at all), which silently defeated that same media query for everything else on the page. */
+.cal-date-pair { display: flex; gap: 15px; }
+
 /* ==========================================
    6. MODULE SPECIFIC: ADMIN & HUB CARDS
    ========================================== */
@@ -258,6 +267,7 @@ td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); font-s
    ========================================== */
 @media (max-width: 850px) {
     .flex-grid-4, .flex-grid-3 { grid-template-columns: 1fr; align-items: start; }
+    .cal-date-pair { flex-direction: column; gap: 10px; }
     .header { flex-direction: column; align-items: flex-start; }
     .header div:last-child { width: 100%; }
     

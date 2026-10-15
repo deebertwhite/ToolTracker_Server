@@ -339,13 +339,19 @@
                         </div>
                         <div style="background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; margin-top: 15px; border: 1px solid var(--border);">
                             <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;">
-                                <input type="checkbox" id="add-tool-is-cal" onchange="document.getElementById('add-tool-cal-fields').style.display = this.checked ? 'flex' : 'none'">
+                                <input type="checkbox" id="add-tool-is-cal" onchange="renderBatchCalRows()">
                                 <strong>Asset Requires Calibration Tracking</strong>
                             </label>
-                            <div id="add-tool-cal-fields" style="display: none; gap: 15px; margin-top: 10px;">
-                                <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="add-tool-last-cal"></div>
+                            <!-- Quantity === 1 only: one shared date pair. -->
+                            <div id="add-tool-cal-fields" class="cal-date-pair" style="display: none; margin-top: 10px;">
+                                <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Last Calibrated</label><input type="date" class="form-input" id="add-tool-last-cal" onchange="document.getElementById('add-tool-cal-due').value = oneYearFromDate(this.value)"></div>
                                 <div class="form-group" style="margin: 0; flex: 1;"><label class="form-label">Calibration Due Date</label><input type="date" class="form-input" id="add-tool-cal-due"></div>
                             </div>
+                            <!-- Quantity > 1 only: one date pair PER tool in the batch (each physical
+                                 tool's actual calibration dates often differ, e.g. a mixed-date
+                                 shipment) -- rebuilt by renderBatchCalRows() in admin.js whenever
+                                 Quantity or this checkbox changes. -->
+                            <div id="add-tool-cal-batch-fields" style="display: none; flex-direction: column; gap: 10px; margin-top: 10px;"></div>
                         </div>
                         <button class="btn btn-secondary" style="width: auto; margin-top: 15px;" id="btn-save-asset" onclick="addNewTool()">+ Save Asset to Database</button>
 
