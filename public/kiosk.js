@@ -37,6 +37,14 @@ let auditGatePendingList = [];
 // the same department happen to share a name.
 let auditGateBoxId = null;
 
+// Voluntary multi-box audit queue (see loadAuditBoxStatus()/beginAuditQueue() onward) -- entirely
+// separate from the auditGate* state above, which belongs only to the AUDIT_REQUIRED gate and is
+// never touched by this queue.
+let auditQueue = []; // {box_id, name, dept_id}[] remaining to audit this run
+let auditQueueTotal = 0; // original queue length, for the "Box X of N" progress line
+let auditSelectedBoxIds = new Set(); // checklist selection, before "Begin Audit" is pressed
+let auditBoxStatusById = new Map(); // box_id -> {box_id, name, dept_id, dept_name, audited}, from the last loadAuditBoxStatus() fetch
+
 // ==========================================
 // 2. WORKFLOW NAVIGATION
 // ==========================================
@@ -92,6 +100,12 @@ function resetToIdle() {
     auditGateReturnPending = false;
     auditGatePendingList = []; // defensive -- every real read is already gated/overwritten fresh, but a kiosk is shared across technicians all shift, so don't leave anything behind on logout
     auditGateBoxId = null;
+    auditQueue = [];
+    auditQueueTotal = 0;
+    auditSelectedBoxIds = new Set();
+    auditBoxStatusById = new Map();
+    const auditProgressEl = document.getElementById('audit-queue-progress');
+    if (auditProgressEl) auditProgressEl.textContent = '';
 
     document.getElementById('auth-login-card-input').value = '';
     document.getElementById('auth-badge-input').value = '';
@@ -292,6 +306,12 @@ function setupActionScreen() {
     batchQueue = [];
     auditTools = [];
     auditExcludedCount = 0;
+    auditQueue = [];
+    auditQueueTotal = 0;
+    auditSelectedBoxIds = new Set();
+    auditBoxStatusById = new Map();
+    const auditProgressEl = document.getElementById('audit-queue-progress');
+    if (auditProgressEl) auditProgressEl.textContent = '';
     renderQueue();
 
     document.getElementById('panel-scanner').style.display = 'none';
@@ -308,7 +328,7 @@ function setupActionScreen() {
         document.getElementById('panel-audit').style.display = 'block';
         document.getElementById('audit-step-1').style.display = 'block';
         document.getElementById('audit-step-2').style.display = 'none';
-        loadAuditDropdown();
+        loadAuditBoxStatus();
     } else if (pendingMode === 'TRANSFERS') {
         document.getElementById('panel-transfers').style.display = 'block';
         loadTransferQueue();
@@ -552,6 +572,166 @@ async function loadAuditDropdown() {
 }
 
 /**
+ * Populates the voluntary audit flow's checklist (#audit-box-checklist, audit-step-1) from
+ * GET /api/audits/box-status -- every auditable toolbox the logged-in technician can access,
+ * grouped by department, each with a live "Audited"/"Audit Pending" status pill (same visual
+ * convention as admin.js's loadAuditStatus() department chips) so it's obvious up front what
+ * still needs doing. This REPLACES loadAuditDropdown() for the voluntary entry point only --
+ * that function and #audit-box-select are left untouched, since jumpToAuditFromGate() (the
+ * AUDIT_REQUIRED gate's own entry into this same screen) still depends on them exactly as they
+ * are today. Resets auditSelectedBoxIds on every load, since a stale selection from a previous
+ * visit to this screen no longer corresponds to anything a tech consciously just checked.
+ */
+async function loadAuditBoxStatus() {
+    const container = document.getElementById('audit-box-checklist');
+    if (!container) return;
+    try {
+        const res = await fetch('/api/audits/box-status');
+        const data = await res.json();
+
+        const accessibleDeptIds = getAccessibleDeptIds();
+        const visibleBoxes = (activeUser && activeUser.role === 'super_admin')
+            ? data.boxes
+            : data.boxes.filter(b => accessibleDeptIds.includes(b.dept_id));
+
+        auditBoxStatusById = new Map(visibleBoxes.map(b => [b.box_id, b]));
+        auditSelectedBoxIds = new Set();
+        updateAuditSelectionCount();
+
+        const byDept = new Map();
+        visibleBoxes.forEach(b => {
+            if (!byDept.has(b.dept_id)) byDept.set(b.dept_id, { name: b.dept_name, boxes: [] });
+            byDept.get(b.dept_id).boxes.push(b);
+        });
+
+        const deptGroups = [...byDept.values()].sort((a, b) => a.name.localeCompare(b.name));
+        if (deptGroups.length === 0) {
+            container.innerHTML = `<p style="color:var(--muted);">No auditable toolboxes found.</p>`;
+            return;
+        }
+
+        container.innerHTML = deptGroups.map(dept => `
+            <div style="margin-bottom:14px;">
+                <div style="font-size:12px; font-weight:bold; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">${dept.name}</div>
+                ${dept.boxes
+                    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+                    .map(b => `
+                        <label style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); cursor:pointer;">
+                            <input type="checkbox" data-box-id="${b.box_id}" onchange="toggleAuditBoxSelection(${b.box_id}, this.checked)" style="width:18px; height:18px; flex-shrink:0;">
+                            <span style="flex:1;">${b.name}</span>
+                            ${b.audited
+                                ? `<span style="font-size:11px; font-weight:bold; padding:2px 8px; border-radius:10px; background: rgba(255,255,255,0.05); color: var(--muted);">Audited</span>`
+                                : `<span style="font-size:11px; font-weight:bold; padding:2px 8px; border-radius:10px; background: rgba(255,255,255,0.05); color: var(--red);">Audit Pending</span>`}
+                        </label>
+                    `).join('')}
+            </div>
+        `).join('');
+    } catch (e) {
+        container.innerHTML = `<p style="color:var(--red);">Failed to load toolbox status.</p>`;
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to load toolbox status.`);
+    }
+}
+
+/** Adds/removes one toolbox from the running checklist selection (a checkbox's onchange) and refreshes the live count/Begin-Audit enabled state. */
+function toggleAuditBoxSelection(boxId, checked) {
+    if (checked) auditSelectedBoxIds.add(boxId); else auditSelectedBoxIds.delete(boxId);
+    updateAuditSelectionCount();
+}
+
+/** Reflects auditSelectedBoxIds.size in #audit-selected-count and enables/disables #btn-begin-audit-queue accordingly. */
+function updateAuditSelectionCount() {
+    const countEl = document.getElementById('audit-selected-count');
+    if (countEl) countEl.textContent = `${auditSelectedBoxIds.size} selected`;
+    const beginBtn = document.getElementById('btn-begin-audit-queue');
+    if (beginBtn) beginBtn.disabled = auditSelectedBoxIds.size === 0;
+}
+
+/**
+ * Selects every toolbox from the last loadAuditBoxStatus() fetch that still needs auditing --
+ * the common "clear everything pending" shortcut. Never touches an already-audited box a tech
+ * checked manually (this only ever ADDS pending boxes to whatever's already selected), and is a
+ * harmless no-op (with a toast) if nothing is currently pending.
+ */
+function selectAllNeedingAudit() {
+    const before = auditSelectedBoxIds.size;
+    auditBoxStatusById.forEach((box, boxId) => { if (!box.audited) auditSelectedBoxIds.add(boxId); });
+    if (auditSelectedBoxIds.size === before) {
+        showToast(`${icon('circle-check', 'icon-success')} Every toolbox is already audited.`);
+    }
+    document.querySelectorAll('#audit-box-checklist input[type="checkbox"]').forEach(cb => {
+        cb.checked = auditSelectedBoxIds.has(parseInt(cb.dataset.boxId, 10));
+    });
+    updateAuditSelectionCount();
+}
+
+/** Builds auditQueue from the checklist's current selection and starts stepping through it one box at a time (see advanceAuditQueue()). */
+function beginAuditQueue() {
+    if (auditSelectedBoxIds.size === 0) return showToast(`${icon('triangle-alert', 'icon-warning')} Select at least one toolbox first.`);
+    auditQueue = [...auditSelectedBoxIds].map(boxId => auditBoxStatusById.get(boxId)).filter(Boolean);
+    auditQueueTotal = auditQueue.length;
+    auditSelectedBoxIds = new Set();
+    advanceAuditQueue();
+}
+
+/**
+ * Opens the next toolbox in the voluntary audit queue, or -- once it's empty -- returns to a
+ * freshly-reloaded checklist. The one place deciding "next box" vs. "done" for this flow; also
+ * reached when openAuditBoxFromQueue() auto-skips an unexpectedly-empty box, not just after a
+ * normal submit.
+ */
+function advanceAuditQueue() {
+    if (auditQueue.length === 0) {
+        document.getElementById('audit-step-2').style.display = 'none';
+        document.getElementById('audit-step-1').style.display = 'block';
+        document.getElementById('audit-queue-progress').textContent = '';
+        auditQueueTotal = 0;
+        loadAuditBoxStatus();
+        return;
+    }
+    openAuditBoxFromQueue(auditQueue.shift());
+}
+
+/**
+ * Opens one toolbox from the voluntary audit queue by its real box_id (GET /api/tools?box_id=),
+ * avoiding the toolbox-NAME ambiguity startAudit()'s own dropdown-driven lookup has once boxes
+ * from multiple departments can appear together (toolbox names aren't unique across
+ * departments). Deliberately a small standalone duplicate of startAudit()'s populate-and-render
+ * tail rather than a refactor of startAudit() itself -- that function is also reachable from the
+ * AUDIT_REQUIRED gate (jumpToAuditFromGate()) and is kept at a literal zero-diff here. Auto-skips
+ * to the next queued box (with a toast) if this one now has zero auditable tools -- e.g. it was
+ * emptied or retired since the checklist was loaded -- rather than stalling the way startAudit()
+ * does for a single manually-picked box with nothing to show.
+ */
+async function openAuditBoxFromQueue(entry) {
+    auditBoxName = entry.name;
+    document.getElementById('audit-box-title').textContent = entry.name;
+    document.getElementById('audit-queue-progress').textContent = `Box ${auditQueueTotal - auditQueue.length} of ${auditQueueTotal}: ${entry.name}`;
+
+    try {
+        const res = await fetch(`/api/tools?box_id=${entry.box_id}`);
+        const data = await res.json();
+        const inBox = data.tools.filter(t => !['Retired', 'Pending Transfer', 'In Calibration'].includes(t.status));
+
+        if (inBox.length === 0) {
+            showToast(`${icon('triangle-alert', 'icon-warning')} ${entry.name} has no tools to audit -- skipping.`);
+            return advanceAuditQueue();
+        }
+
+        auditTools = inBox.filter(t => t.status === 'In');
+        auditExcludedCount = inBox.length - auditTools.length;
+
+        document.getElementById('audit-step-1').style.display = 'none';
+        document.getElementById('audit-step-2').style.display = 'block';
+        document.getElementById('audit-attest-checkbox').checked = false;
+        document.getElementById('btn-submit-audit').disabled = true;
+
+        renderAuditList();
+    } catch (err) {
+        showToast(`${icon('circle-x', 'icon-danger')} Failed to pull manifest for ${entry.name}.`);
+    }
+}
+
+/**
  * Begins the physical audit for the toolbox selected in #audit-box-select: fetches the full
  * tool manifest via GET /api/tools and splits it into auditTools (tools currently 'In' --
  * expected to be sitting in this box, and what physically confirming the box means checking
@@ -619,18 +799,20 @@ function renderAuditList() {
 
 /**
  * Finalizes the audit and POSTs the results to /api/audits/submit: every tool in auditTools
- * (everything currently 'In' this box -- see startAudit()) is submitted as 'Present', since
- * reaching this point already required checking #audit-attest-checkbox, i.e. an affirmative
- * statement that the operator physically opened the box and confirmed all of them. There's
- * no per-tool ambiguity to resolve here by design (see the comment above #audit-step-2 in
- * kiosk.html for why) -- an actual problem with a specific tool goes through the separate
- * Report Issue workflow instead. On success, shows a toast and either returns to
- * #panel-scanner with the original batchQueue still intact (if this audit was reached via
- * the AUDIT_REQUIRED gate mid-checkout, auditGateReturnPending) so the tech can finalize the
- * checkout that triggered the gate, or otherwise back to audit-step-1 (toolbox selection) --
- * NOT the idle screen -- so several boxes can be audited in one visit without
- * re-authenticating for each one. The operator stays signed in until they explicitly hit
- * "Cancel & Log Out".
+ * (everything currently 'In' this box -- see startAudit()/openAuditBoxFromQueue()) is submitted
+ * as 'Present', since reaching this point already required checking #audit-attest-checkbox, i.e.
+ * an affirmative statement that the operator physically opened the box and confirmed all of
+ * them. There's no per-tool ambiguity to resolve here by design (see the comment above
+ * #audit-step-2 in kiosk.html for why) -- an actual problem with a specific tool goes through
+ * the separate Report Issue workflow instead. On success, one of three mutually-exclusive things
+ * happens: (1) if this audit was reached via the AUDIT_REQUIRED gate mid-checkout
+ * (auditGateReturnPending), returns to #panel-scanner with the original batchQueue still intact,
+ * or loops back into the gate modal if other gate-pending boxes remain -- entirely unchanged by
+ * the voluntary flow below; (2) otherwise, if the voluntary multi-box queue (auditQueue) still
+ * has entries, advances to the next one (advanceAuditQueue()); (3) otherwise, the queue (or a
+ * single ad-hoc audit) is done -- back to the checklist (audit-step-1), NOT the idle screen, so
+ * several boxes can be audited in one visit without re-authenticating for each one. The operator
+ * stays signed in until they explicitly hit "Cancel & Log Out".
  */
 async function submitAudit() {
     try {
@@ -677,16 +859,28 @@ async function submitAudit() {
             return;
         }
 
+        auditTools = [];
+        auditExcludedCount = 0;
+        auditBoxName = '';
+
+        // Voluntary multi-box queue: advance to the next selected toolbox instead of returning
+        // to the checklist, continuing until every selected box has been verified. A queue of
+        // just one box falls straight through to the "all done" branch below, same as before.
+        if (auditQueue.length > 0) {
+            showToast(`${icon('circle-check', 'icon-success')} Audited -- ${auditQueue.length} more to go.`);
+            advanceAuditQueue();
+            return;
+        }
+
         showToast(`${icon('circle-check', 'icon-success')} Audit complete and verified.`);
         // Return to toolbox selection rather than logging out -- auditing several boxes in
         // one visit used to mean re-scanning a badge and re-entering a PIN for every single
         // one. The operator stays signed in until they explicitly hit "Cancel & Log Out".
-        auditTools = [];
-        auditExcludedCount = 0;
-        auditBoxName = '';
         document.getElementById('audit-step-2').style.display = 'none';
         document.getElementById('audit-step-1').style.display = 'block';
-        loadAuditDropdown();
+        document.getElementById('audit-queue-progress').textContent = '';
+        auditQueueTotal = 0;
+        loadAuditBoxStatus();
     } catch (e) {
         showToast(`${icon('circle-x', 'icon-danger')} Connection error.`);
     }

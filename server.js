@@ -566,6 +566,26 @@ const getAuditGatePendingToolboxes = async (client, deptId, windowStart = null, 
 };
 
 /**
+ * Every toolbox in a department that currently has at least one auditable tool (same exclusion
+ * set as getAuditGatePendingToolboxes's own "auditable_boxes" CTE above -- duplicated here
+ * deliberately rather than changing that function's return shape, since the checkout gate
+ * already depends on it returning exactly {box_id, name}[] of PENDING boxes only). Powers
+ * GET /api/audits/box-status, which needs the full set (audited + pending) to show a status per
+ * box, not just which ones still need it.
+ * @returns {Promise<Array<{box_id: number, name: string}>>}
+ */
+async function getAuditableBoxesForDept(client, deptId) {
+    const result = await client.query(
+        `SELECT b.box_id, b.name FROM toolboxes b WHERE b.dept_id = $1
+           AND EXISTS (SELECT 1 FROM tools t JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                       WHERE dr.box_id = b.box_id AND t.status NOT IN ('Retired','Pending Transfer','In Calibration'))
+         ORDER BY b.name ASC`,
+        [deptId]
+    );
+    return result.rows;
+}
+
+/**
  * Shared core of the audit-gate completion check: which toolboxes are still pending for
  * a window, and -- only if none are -- who completed the most recent AUDIT in it. Both
  * the admin-panel status endpoint and the daily log formatter build their own output
@@ -985,9 +1005,15 @@ app.get('/api/tools', async (req, res) => {
                 ) ORDER BY ap.created_at ASC) FILTER (WHERE ap.alt_id IS NOT NULL), '[]') AS alt_part_numbers
                 FROM tool_alt_part_numbers ap WHERE ap.tool_id = t.tool_id
             ) alts ON true
+            WHERE ($1::int IS NULL OR b.box_id = $1)
             ORDER BY t.name ASC;
         `;
-        const result = await pool.query(query); 
+        // Optional -- the kiosk's multi-box audit queue uses this to fetch exactly one box's
+        // tools by its real box_id, instead of matching on toolbox_name (not unique across
+        // departments). Every other existing caller omits it and gets the full unfiltered list,
+        // unchanged.
+        const boxId = parseInt(req.query.box_id, 10) || null;
+        const result = await pool.query(query, [boxId]);
         res.json({ success: true, tools: result.rows });
     } catch (err) { 
         res.status(500).json({ error: 'Failed to fetch tools.' }); 
@@ -3533,6 +3559,38 @@ app.get('/api/audits/today-status', async (req, res) => {
     } catch (err) {
         console.error("Audit Today-Status Error:", err);
         res.status(500).json({ error: 'Failed to fetch audit status.' });
+    }
+});
+
+// Per-TOOLBOX (not just per-department) audit status for every department -- powers the kiosk's
+// voluntary multi-box audit flow, which needs to show a status next to every box up front so a
+// technician knows what still needs auditing before selecting several to step through at once.
+// A separate endpoint from today-status (different shape/consumer -- the admin panel's
+// per-department chip view has no use for a nested per-box array) that reuses the same
+// building blocks: getAuditableBoxesForDept() for the full set, getAuditGatePendingToolboxes()
+// (called with just deptId so it resolves its own current window) for which of those are still
+// pending. Unauthenticated, matching today-status's own convention.
+app.get('/api/audits/box-status', async (req, res) => {
+    try {
+        const depts = await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC');
+        const perDept = await Promise.all(depts.rows.map(async (dept) => {
+            const [allBoxes, pending] = await Promise.all([
+                getAuditableBoxesForDept(pool, dept.dept_id),
+                getAuditGatePendingToolboxes(pool, dept.dept_id),
+            ]);
+            const pendingIds = new Set(pending.map(b => b.box_id));
+            return allBoxes.map(b => ({
+                box_id: b.box_id,
+                name: b.name,
+                dept_id: dept.dept_id,
+                dept_name: dept.name,
+                audited: !pendingIds.has(b.box_id),
+            }));
+        }));
+        res.json({ success: true, boxes: perDept.flat() });
+    } catch (err) {
+        console.error('Audit Box-Status Error:', err);
+        res.status(500).json({ error: 'Failed to fetch box audit status.' });
     }
 });
 

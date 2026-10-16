@@ -231,18 +231,36 @@
             <div class="card" id="panel-audit" style="display: none; max-width: 750px; width: 100%;">
                 <div class="section-title"><span class="icon" data-icon="clipboard-list"></span> Audit Toolbox</div>
 
-                <!-- Audit Step 1: select which toolbox to inventory.
-                     startAudit() pulls the manifest and advances to
-                     audit-step-2. -->
+                <!-- Audit Step 1: see the audit status of every toolbox up front, select one or
+                     more that still need it, then step through verifying each in turn
+                     (beginAuditQueue()/advanceAuditQueue() in kiosk.js) -- audit-step-2 below is
+                     shown once per selected box, in sequence. -->
                 <div id="audit-step-1">
                     <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">
-                        Select the physical storage unit you wish to inventory. This will pull a manifest of everything that should currently be inside.
+                        Every toolbox below shows whether it's already been audited this shift. Select one or more that still need it, then step through verifying each in turn.
                     </p>
-                    <div class="form-group">
-                        <label class="form-label">Select Target Toolbox</label>
-                        <select class="form-select" id="audit-box-select"><option value="">Loading...</option></select>
+
+                    <div id="audit-box-checklist" style="margin-bottom: 14px;"><p style="color:var(--muted);">Loading...</p></div>
+
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+                        <span id="audit-selected-count" style="font-size:13px; font-weight:bold; color:var(--muted);">0 selected</span>
+                        <button type="button" class="btn btn-secondary" style="width:auto;" onclick="selectAllNeedingAudit()">Select All Needing Audit</button>
                     </div>
-                    <button class="btn btn-primary" onclick="startAudit()">Begin Physical Audit</button>
+
+                    <button class="btn btn-primary" id="btn-begin-audit-queue" onclick="beginAuditQueue()" disabled>Begin Audit</button>
+
+                    <!-- Legacy single-toolbox picker -- kept fully functional but hidden from
+                         this voluntary flow's own UI above. jumpToAuditFromGate() (the
+                         AUDIT_REQUIRED gate's own entry into this same screen, mid-checkout)
+                         still drives this directly via loadAuditDropdown()/startAudit(),
+                         unaffected by the checklist above. -->
+                    <div id="audit-legacy-picker" style="display:none;">
+                        <div class="form-group">
+                            <label class="form-label">Select Target Toolbox</label>
+                            <select class="form-select" id="audit-box-select"><option value="">Loading...</option></select>
+                        </div>
+                        <button class="btn btn-primary" onclick="startAudit()">Begin Physical Audit</button>
+                    </div>
                 </div>
 
                 <!-- Audit Step 2: a single physical-inspection attestation for the whole
@@ -254,6 +272,10 @@
                      (startWorkflow('REPORT')), not part of this screen. -->
                 <div id="audit-step-2" style="display: none;">
 
+                    <!-- Set/cleared only by the voluntary multi-box queue (openAuditBoxFromQueue()/
+                         advanceAuditQueue() in kiosk.js); left blank whenever the AUDIT_REQUIRED
+                         gate is driving this same screen. -->
+                    <div id="audit-queue-progress" style="font-size: 12px; font-weight: bold; color: var(--accent); margin-bottom: 4px;"></div>
                     <h4 id="audit-box-title" style="margin-bottom: 6px;">Box Name</h4>
                     <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">
                         Physically open this toolbox and visually confirm every tool below is present and in serviceable condition. Something wrong with a specific tool? Use "Report Issue" from the main menu instead of (or in addition to) this audit.
