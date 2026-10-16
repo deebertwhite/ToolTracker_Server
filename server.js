@@ -3545,19 +3545,34 @@ app.post('/api/audits/submit', async (req, res) => {
 
         // Iterate through the array of audited tools
         for (let item of results) {
+            // 'Accounted' is a checked-out tool riding along in the same submission (see
+            // submitAudit() in kiosk.js) -- it's already accounted for (the system knows who has
+            // it), unlike a tool that's actually missing, so it logs for traceability WITHOUT
+            // touching tools.status. This is deliberate: it must never flip a checked-out tool
+            // to 'In', and must never clear an existing Missing/Broken/Worn flag on some other
+            // tool. Without this branch, a box where every tool happened to be checked out could
+            // never register as audited at all, since the submission would otherwise be empty.
+            if (item.audit_status === 'Accounted') {
+                await client.query(
+                    'INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)',
+                    [userId, 'AUDIT', item.tool_id, 'Audited as Accounted - checked out at time of audit']
+                );
+                continue;
+            }
+
             // If the tech marked it Present, it resets to "In". Otherwise, match the flagged issue.
             let newStatus = item.audit_status === 'Present' ? 'In' : item.audit_status;
-            
+
             // 1. Update the Tool's physical status
             await client.query(
-                'UPDATE tools SET status = $1, status_reason = $2 WHERE tool_id = $3', 
+                'UPDATE tools SET status = $1, status_reason = $2 WHERE tool_id = $3',
                 [newStatus, item.audit_notes || null, item.tool_id]
             );
 
             // 2. Insert a definitive log of the audit
             const logNotes = `Audited as ${item.audit_status}` + (item.audit_notes ? ` - ${item.audit_notes}` : '');
             await client.query(
-                'INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)', 
+                'INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, $2, $3, $4)',
                 [userId, 'AUDIT', item.tool_id, logNotes]
             );
         }

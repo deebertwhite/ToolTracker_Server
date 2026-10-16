@@ -256,12 +256,14 @@ function emptyDrawerStamp(fontSizePx) {
 
 /**
  * Renders the selected drawer's photo with a colored marker for every tool that has a saved
- * position (green/accent/red -- same convention as everywhere else in this app), read-only
- * (no click-to-place here; markers are set from the drawer's entity modal in the admin
- * panel). Re-fetches /api/tools fresh rather than trusting globalTools' page-load snapshot,
- * since this view is meant to be left open on a shared screen for a while. An empty drawer
- * (zero non-Retired tools) gets the EMPTY stamp overlaid on its photo instead of just the
- * existing text note below it.
+ * position (green/accent/red -- same convention as everywhere else in this app), read-only for
+ * placement (no click-to-place here; markers are set from the drawer's entity modal in the admin
+ * panel). Clicking a marker DOES open that tool's read-only detail modal (openToolDetailModal(),
+ * same one every tool row elsewhere on this page already opens), which includes the "Open in
+ * Admin Portal" deep link -- this is the only path to that link from the Shadow Board Map view.
+ * Re-fetches /api/tools fresh rather than trusting globalTools' page-load snapshot, since this
+ * view is meant to be left open on a shared screen for a while. An empty drawer (zero non-Retired
+ * tools) gets the EMPTY stamp overlaid on its photo instead of just the existing text note below it.
  */
 async function renderDrawerMap(drawerId) {
     const drawer = globalStorageDrawers.find(d => d.drawer_id == drawerId);
@@ -311,7 +313,7 @@ async function renderDrawerMap(drawerId) {
     // richer than the plain/slow native `title` attribute) replaces it on hover, showing the
     // tool's full name/ID/status/cal-due-date.
     document.getElementById('map-drawer-markers').innerHTML = placed.map(t => `
-        <div onmouseenter="showMarkerTooltip(event, '${t.qr_code}')" onmousemove="positionMarkerTooltip(event)" onmouseleave="hideMarkerTooltip()"
+        <div onmouseenter="showMarkerTooltip(event, '${t.qr_code}')" onmousemove="positionMarkerTooltip(event)" onmouseleave="hideMarkerTooltip()" onclick="openToolDetailModal('${t.qr_code}')"
              style="position:absolute; left:${t.position_x * 100}%; top:${t.position_y * 100}%; transform:translate(-50%,-50%);
                     width:24px; height:24px; border-radius:50%; background:${statusColor(t.status)}; border:3px solid #fff;
                     box-shadow:0 0 10px 3px ${statusColor(t.status)}, 0 2px 4px rgba(0,0,0,0.8); cursor:pointer;"></div>

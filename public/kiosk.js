@@ -17,8 +17,20 @@ let kioskToolDeptByQr = {};
 let kioskDeptGroupById = {};
 
 // Specific Audit State Variables
-let auditTools = []; // tools currently 'In' this box -- what the attestation actually confirms
-let auditExcludedCount = 0; // tools in this box left out of auditTools (Out, or already Missing/Broken/Worn) -- shown as an informational note, never touched
+let auditTools = []; // tools currently 'In' this box -- physically confirmed, submitted as 'Present'
+// Tools currently 'Out' (checked out) -- not part of the physical checklist, but still submitted
+// alongside auditTools (see submitAudit()) with a distinct 'Accounted' status so the box correctly
+// registers as audited even when EVERY tool in it happens to be checked out right now. A
+// checked-out tool is already accounted for -- the system knows exactly who has it -- unlike a
+// tool that's actually missing, which should NOT be waved through the same way (see
+// auditExcludedCount below). Before this, a box with zero tools currently 'In' would submit an
+// empty result set and silently never register as audited, no matter how many times the
+// attestation was completed.
+let auditAccountedTools = [];
+// Tools already flagged Missing/Broken/Worn -- a real, separate problem resolved via the Report
+// Issue workflow, not here -- so these stay purely informational (a count only) and are never
+// submitted: no audit_logs row, and their status is never touched by this flow.
+let auditExcludedCount = 0;
 let auditBoxName = '';
 // Set by jumpToAuditFromGate() when the audit workflow was entered via the
 // AUDIT_REQUIRED gate (mid-checkout); checked/cleared at the end of
@@ -96,6 +108,7 @@ function resetToIdle() {
     pendingMode = null;
     batchQueue = [];
     auditTools = [];
+    auditAccountedTools = [];
     auditExcludedCount = 0;
     auditGateReturnPending = false;
     auditGatePendingList = []; // defensive -- every real read is already gated/overwritten fresh, but a kiosk is shared across technicians all shift, so don't leave anything behind on logout
@@ -305,6 +318,7 @@ async function loadIdleAuditStatus() {
 function setupActionScreen() {
     batchQueue = [];
     auditTools = [];
+    auditAccountedTools = [];
     auditExcludedCount = 0;
     auditQueue = [];
     auditQueueTotal = 0;
@@ -697,10 +711,12 @@ function advanceAuditQueue() {
  * from multiple departments can appear together (toolbox names aren't unique across
  * departments). Deliberately a small standalone duplicate of startAudit()'s populate-and-render
  * tail rather than a refactor of startAudit() itself -- that function is also reachable from the
- * AUDIT_REQUIRED gate (jumpToAuditFromGate()) and is kept at a literal zero-diff here. Auto-skips
- * to the next queued box (with a toast) if this one now has zero auditable tools -- e.g. it was
- * emptied or retired since the checklist was loaded -- rather than stalling the way startAudit()
- * does for a single manually-picked box with nothing to show.
+ * AUDIT_REQUIRED gate (jumpToAuditFromGate()), so both copies apply the same auditTools/
+ * auditAccountedTools/auditExcludedCount split rather than sharing code. Auto-skips to the next
+ * queued box (with a toast) if this one has nothing submittable -- i.e. every tool in it is
+ * already flagged Missing/Broken/Worn (see auditExcludedCount), or it was emptied/retired since
+ * the checklist was loaded -- rather than stalling the way startAudit() does for a single
+ * manually-picked box with nothing to show.
  */
 async function openAuditBoxFromQueue(entry) {
     auditBoxName = entry.name;
@@ -712,13 +728,14 @@ async function openAuditBoxFromQueue(entry) {
         const data = await res.json();
         const inBox = data.tools.filter(t => !['Retired', 'Pending Transfer', 'In Calibration'].includes(t.status));
 
-        if (inBox.length === 0) {
+        auditTools = inBox.filter(t => t.status === 'In');
+        auditAccountedTools = inBox.filter(t => t.status === 'Out');
+        auditExcludedCount = inBox.length - auditTools.length - auditAccountedTools.length;
+
+        if (auditTools.length === 0 && auditAccountedTools.length === 0) {
             showToast(`${icon('triangle-alert', 'icon-warning')} ${entry.name} has no tools to audit -- skipping.`);
             return advanceAuditQueue();
         }
-
-        auditTools = inBox.filter(t => t.status === 'In');
-        auditExcludedCount = inBox.length - auditTools.length;
 
         document.getElementById('audit-step-1').style.display = 'none';
         document.getElementById('audit-step-2').style.display = 'block';
@@ -733,14 +750,17 @@ async function openAuditBoxFromQueue(entry) {
 
 /**
  * Begins the physical audit for the toolbox selected in #audit-box-select: fetches the full
- * tool manifest via GET /api/tools and splits it into auditTools (tools currently 'In' --
- * expected to be sitting in this box, and what physically confirming the box means checking
- * against) and auditExcludedCount (tools currently 'Out', 'Missing', 'Broken', or 'Worn' --
- * not expected to be physically present, or already a tracked issue via the separate Report
- * Issue workflow, so they're shown as an informational count only and never touched by this
- * audit). Retired/Pending Transfer/In Calibration tools are dropped entirely, matching
+ * tool manifest via GET /api/tools and splits it three ways -- auditTools (tools currently 'In',
+ * what physically confirming the box means checking against, submitted as 'Present'),
+ * auditAccountedTools (tools currently 'Out' -- not physically present, but already accounted
+ * for since the system knows who has them, so they're submitted too with a distinct 'Accounted'
+ * status that logs them without touching tools.status), and auditExcludedCount (tools already
+ * flagged Missing/Broken/Worn -- a real, separate problem tracked via the Report Issue workflow,
+ * so these are left out of the submission entirely and shown only as an informational count).
+ * Retired/Pending Transfer/In Calibration tools are dropped entirely, matching
  * getAuditGatePendingToolboxes()'s own exclusion set in server.js. Advances the UI from
- * audit-step-1 to audit-step-2.
+ * audit-step-1 to audit-step-2 -- unless there's nothing submittable at all (every tool already
+ * flagged), in which case it toasts and stays put.
  */
 async function startAudit() {
     const select = document.getElementById('audit-box-select');
@@ -757,12 +777,13 @@ async function startAudit() {
 
         const inBox = data.tools.filter(t => t.toolbox_name === auditBoxName && !['Retired', 'Pending Transfer', 'In Calibration'].includes(t.status));
 
-        if (inBox.length === 0) {
-            return showToast(`${icon('triangle-alert', 'icon-warning')} No tools assigned to this box.`);
-        }
-
         auditTools = inBox.filter(t => t.status === 'In');
-        auditExcludedCount = inBox.length - auditTools.length;
+        auditAccountedTools = inBox.filter(t => t.status === 'Out');
+        auditExcludedCount = inBox.length - auditTools.length - auditAccountedTools.length;
+
+        if (auditTools.length === 0 && auditAccountedTools.length === 0) {
+            return showToast(`${icon('triangle-alert', 'icon-warning')} No tools to audit in this box -- everything in it is already flagged Missing/Broken/Worn. Resolve those first.`);
+        }
 
         document.getElementById('audit-step-1').style.display = 'none';
         document.getElementById('audit-step-2').style.display = 'block';
@@ -777,9 +798,11 @@ async function startAudit() {
 
 /**
  * Redraws #audit-tool-list (read-only: ID + description, no per-row controls -- see
- * submitAudit() for why) from the current auditTools array, plus #audit-excluded-note
- * summarizing how many other tools in this box were left out (currently checked out, or
- * already flagged Missing/Broken/Worn) and therefore aren't part of this attestation.
+ * submitAudit() for why) from the current auditTools array, plus #audit-excluded-note. The note
+ * distinguishes tools that are checked out (auditAccountedTools -- still submitted, just not part
+ * of the physical checklist) from tools already flagged Missing/Broken/Worn (auditExcludedCount --
+ * a separate problem, genuinely left out of the attestation entirely) since conflating the two
+ * would make it look like a known Missing tool was being silently cleared by this audit.
  */
 function renderAuditList() {
     document.getElementById('audit-tool-list').innerHTML = auditTools.map(t => `
@@ -792,9 +815,14 @@ function renderAuditList() {
         </tr>
     `).join('');
 
-    document.getElementById('audit-excluded-note').textContent = auditExcludedCount > 0
-        ? `${auditExcludedCount} other tool(s) in this box are currently checked out or already flagged, and aren't part of this checklist.`
-        : '';
+    const noteParts = [];
+    if (auditAccountedTools.length > 0) {
+        noteParts.push(`${auditAccountedTools.length} tool(s) are currently checked out and will be recorded as accounted for, not part of this physical checklist.`);
+    }
+    if (auditExcludedCount > 0) {
+        noteParts.push(`${auditExcludedCount} tool(s) are already flagged Missing/Broken/Worn and are left out of this audit entirely -- resolve those via Report Issue.`);
+    }
+    document.getElementById('audit-excluded-note').textContent = noteParts.join(' ');
 }
 
 /**
@@ -804,7 +832,11 @@ function renderAuditList() {
  * an affirmative statement that the operator physically opened the box and confirmed all of
  * them. There's no per-tool ambiguity to resolve here by design (see the comment above
  * #audit-step-2 in kiosk.html for why) -- an actual problem with a specific tool goes through
- * the separate Report Issue workflow instead. On success, one of three mutually-exclusive things
+ * the separate Report Issue workflow instead. auditAccountedTools (checked-out tools) rides along
+ * in the same submission with a distinct 'Accounted' status, so the server logs them for
+ * traceability without touching their tools.status -- this is what lets a box register as audited
+ * even when nothing in it is physically present to check right now. On success, one of three
+ * mutually-exclusive things
  * happens: (1) if this audit was reached via the AUDIT_REQUIRED gate mid-checkout
  * (auditGateReturnPending), returns to #panel-scanner with the original batchQueue still intact,
  * or loops back into the gate modal if other gate-pending boxes remain -- entirely unchanged by
@@ -821,7 +853,10 @@ async function submitAudit() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 badge_id: activeUser.badgeId,
-                results: auditTools.map(t => ({ tool_id: t.tool_id, audit_status: 'Present', audit_notes: '' }))
+                results: [
+                    ...auditTools.map(t => ({ tool_id: t.tool_id, audit_status: 'Present', audit_notes: '' })),
+                    ...auditAccountedTools.map(t => ({ tool_id: t.tool_id, audit_status: 'Accounted', audit_notes: '' }))
+                ]
             })
         });
 
@@ -832,6 +867,7 @@ async function submitAudit() {
         if (auditGateReturnPending) {
             auditGateReturnPending = false;
             auditTools = [];
+            auditAccountedTools = [];
             auditExcludedCount = 0;
 
             // Clear this box from the full list tracked since the original AUDIT_REQUIRED
@@ -860,6 +896,7 @@ async function submitAudit() {
         }
 
         auditTools = [];
+        auditAccountedTools = [];
         auditExcludedCount = 0;
         auditBoxName = '';
 
