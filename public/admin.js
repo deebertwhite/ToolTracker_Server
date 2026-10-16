@@ -255,6 +255,24 @@ function bootstrapAdminUI(user) {
     // this card has no separate "visit to load" entry point of its own.
     if (currentAdminWeight >= 4) loadDeptGroups();
 
+    // Deep link from the dashboard's read-only tool card ("Open in Admin Portal", a new tab --
+    // see openToolDetailModal() in dashboard.js) -- ?tool=<qr_code> jumps straight to that tool's
+    // entity modal once logged in (or already logged in, via restoreAdminSession()'s own call
+    // into this same function). No separate permission check needed here: openEntityModal()
+    // already shows edit controls only up to the viewer's own weight, exactly as it does for
+    // every other way of reaching this same modal. renderEditableInfraTree() is awaited first
+    // since globalToolsCache (which openEntityModal('tool', ...) reads) isn't populated until
+    // the Inventory tab has been visited at least once -- normally lazy, but this entry point
+    // needs it immediately. The query param is then stripped so a later refresh doesn't reopen
+    // the same tool.
+    const deepLinkTool = new URLSearchParams(window.location.search).get('tool');
+    if (deepLinkTool) {
+        renderEditableInfraTree().then(() => {
+            openEntityModal('tool', deepLinkTool);
+            history.replaceState({}, '', window.location.pathname);
+        });
+    }
+
     resetAdminIdleTimer();
 }
 
@@ -1196,12 +1214,13 @@ async function renderEditableInfraTree() {
         let html = '';
         storage.departments.forEach(dept => {
             const deptContentId = `dept-content-${dept.dept_id}`;
-            // Departments default OPEN (there are only a handful, and they're just names +
-            // toolbox counts -- not where the actual clutter/scrolling problem is), unless the
-            // admin has explicitly collapsed this one. Toolboxes and drawers below default
-            // CLOSED instead (treeExpandState[id] === true) since that's where a fully-expanded
-            // tree gets genuinely overwhelming -- every tool in every drawer in every box.
-            const deptExpanded = treeExpandState[deptContentId] !== false;
+            // Departments default CLOSED, same as toolboxes/drawers below (treeExpandState[id]
+            // === true) -- previously defaulted open on the theory that a handful of departments
+            // wasn't where the clutter was, but James asked for the whole tree to start
+            // collapsed, so this is now a uniform rule top to bottom rather than a dept-level
+            // exception. Still per-id, so an admin's own expand/collapse choices persist across
+            // a renderEditableInfraTree() rebuild exactly as before.
+            const deptExpanded = treeExpandState[deptContentId] === true;
 
             // Clicking the toggle-icon expands/collapses; clicking the name opens the entity
             // modal (view details, or edit/delete if permitted) -- see openEntityModal().
@@ -1399,7 +1418,7 @@ function restoreTreeExpandState() {
         if (toggleIcon) toggleIcon.innerHTML = expanded ? ICONS['chevron-down'] : ICONS['chevron-right'];
     });
     document.querySelectorAll('[id^="dept-content-"]').forEach(el => {
-        const expanded = treeExpandState[el.id] !== false;
+        const expanded = treeExpandState[el.id] === true; // same default as renderEditableInfraTree()'s own deptExpanded
         el.style.display = expanded ? 'block' : 'none';
         const toggleIcon = el.previousElementSibling ? el.previousElementSibling.querySelector('.toggle-icon') : null;
         if (toggleIcon) toggleIcon.innerHTML = expanded ? ICONS['chevron-down'] : ICONS['chevron-right'];

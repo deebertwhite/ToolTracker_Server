@@ -125,10 +125,11 @@ function updateAuditWindowCountdown() {
  *
  * Department and toolbox rows also get a collapse/expand chevron (toggleDashboardTreeNode()),
  * same pattern as admin.js's Master Storage & Asset Tree -- adding drawers as a 3rd level made
- * a shop with several toolboxes produce a long, all-expanded scroll; departments default open
- * (just names + counts, not where the clutter is) and toolboxes default collapsed (drawers are
- * the level that actually piles up), matching that tree's own established convention. Drawers
- * are leaf rows here (no further nesting in this tree), so they don't get a chevron.
+ * a shop with several toolboxes produce a long, all-expanded scroll, so both levels default
+ * collapsed, matching that tree's own convention (departments used to default open on the theory
+ * that a handful of names+counts wasn't where the clutter was, but James asked for the whole tree
+ * to start collapsed). Drawers are leaf rows here (no further nesting in this tree), so they
+ * don't get a chevron.
  */
 async function fetchStorageTree() {
     try {
@@ -181,10 +182,10 @@ async function fetchStorageTree() {
             const deptContentId = `dash-dept-content-${dept.dept_id}`;
             html += `
                 <div class="nav-item nav-dept" style="display:flex; align-items:center; gap:6px;">
-                    <span class="tree-toggle-tap" style="cursor:pointer;" onclick="toggleDashboardTreeNode('${deptContentId}', this.parentElement)"><span class="icon toggle-icon">${ICONS['chevron-down']}</span></span>
+                    <span class="tree-toggle-tap" style="cursor:pointer;" onclick="toggleDashboardTreeNode('${deptContentId}', this.parentElement)"><span class="icon toggle-icon">${ICONS['chevron-right']}</span></span>
                     <span onclick="loadLocationView('dept', '${dept.dept_id}', '${dept.name}', '${dept.prefix_code}')" style="cursor:pointer; flex:1;">${icon('building-2')} ${dept.name} ${flagBadge(deptFlagged)}</span>
                 </div>
-                <div id="${deptContentId}" style="display:block;">${boxesHtml}</div>`;
+                <div id="${deptContentId}" style="display:none;">${boxesHtml}</div>`;
         });
         document.getElementById('tree-container').innerHTML = html;
     } catch (e) {
@@ -1128,8 +1129,16 @@ function openToolDetailModal(qrCode) {
 
     // Replacement link -- only if present
     if (entity.replacement_url) {
-        bodyHtml += `<div><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
+        bodyHtml += `<div style="margin-bottom:15px;"><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
     }
+
+    // Jumps to this same tool's card in the admin portal (new tab -- this dashboard is meant to
+    // stay open on a shared/wall screen, see the view's own doc comments elsewhere in this file).
+    // Always shown: this view has no login/identity of its own to check a permission against, so
+    // there's nothing to gate client-side -- the admin login wall and openEntityModal()'s existing
+    // per-role edit gating (see admin.js) are what actually decide what the person can do once
+    // they get there, exactly as they already do for every other way of reaching that same modal.
+    bodyHtml += `<div style="padding-top:15px; border-top:1px solid var(--border);"><a href="admin.html?tool=${encodeURIComponent(entity.qr_code)}" target="_blank" style="color:var(--accent); font-size: 13px; font-weight:bold; text-decoration: none;">${icon('external-link')} Open in Admin Portal →</a></div>`;
 
     document.getElementById('td-body').innerHTML = bodyHtml;
     document.getElementById('tool-detail-overlay').style.display = 'flex';
