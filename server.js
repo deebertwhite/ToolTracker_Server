@@ -1028,7 +1028,7 @@ app.get('/api/tools', async (req, res) => {
 app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number,
+            `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number, cr.cert_pending,
                     cr.standard_used, cr.vendor_tracking_id, cr.notes, cr.recorded_at, cr.result, cr.photo_url, u.full_name AS recorded_by_name
              FROM calibration_records cr
              LEFT JOIN users u ON cr.recorded_by_user_id = u.user_id
@@ -1080,9 +1080,16 @@ app.get('/api/tools/:id/scan-code.png', requireRole(2), async (req, res) => {
 // just whatever was submitted -- so backfilling an OLD record after a newer one already
 // exists doesn't clobber the tool's current due date with stale data.
 app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result } = req.body;
+    const { cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result, cert_pending } = req.body;
     if (!cal_date || !due_date) return res.status(400).json({ error: 'Calibration date and due date are both required.' });
-    if (!provider || !certificate_number) return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.' });
+    if (!provider) return res.status(400).json({ error: 'Calibration provider is required.' });
+    // Certificate number can be deferred (cert_pending) when the vendor hasn't issued one yet --
+    // see migrations/023. Still a traceable record either way: provider and dates are always
+    // required, this only ever defers the one piece of paper the vendor hasn't sent back.
+    const certPending = !!cert_pending;
+    if (!certPending && !certificate_number) {
+        return res.status(400).json({ error: 'A certificate/reference number is required, unless marked as pending from the vendor.' });
+    }
     const calResult = result === 'Fail' ? 'Fail' : 'Pass';
 
     const client = await pool.connect();
@@ -1094,9 +1101,9 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
         const currentLastCal = toolRes.rows[0].last_cal_date;
 
         const calRes = await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING cal_id`,
-            [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, vendor_tracking_id || null, notes || null, req.authUser.user_id, calResult]
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, cert_pending, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING cal_id`,
+            [req.params.id, cal_date, due_date, provider, certPending ? null : certificate_number, certPending, standard_used || null, vendor_tracking_id || null, notes || null, req.authUser.user_id, calResult]
         );
 
         // Only advance the tool's snapshot fields if this record is now the most recent
@@ -1120,14 +1127,15 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
             await client.query('UPDATE tools SET is_calibrated = true WHERE tool_id = $1', [req.params.id]);
         }
 
+        const certDisplay = certPending ? 'PENDING' : certificate_number;
         await client.query(
             "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
-            [req.authUser.user_id, req.params.id, `Calibration logged directly by admin: ${provider} (cert ${certificate_number})${calResult === 'Fail' ? ' -- FAILED' : ''}`]
+            [req.authUser.user_id, req.params.id, `Calibration logged directly by admin: ${provider} (cert ${certDisplay})${calResult === 'Fail' ? ' -- FAILED' : ''}`]
         );
 
         if (calResult === 'Fail') {
             await triggerFailedCalibration(client, {
-                toolId: req.params.id, calDate: cal_date, provider, certificateNumber: certificate_number,
+                toolId: req.params.id, calDate: cal_date, provider, certificateNumber: certDisplay,
                 calId: calRes.rows[0].cal_id, userId: req.authUser.user_id
             });
         }
@@ -1140,6 +1148,41 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
         res.status(500).json({ error: 'Failed to log calibration record.' });
     } finally {
         client.release();
+    }
+});
+
+// Backfills the certificate/reference number on a calibration record that was originally logged
+// with cert_pending (migrations/023 -- the vendor hadn't issued one yet at log time). The one
+// allowed mutation on an otherwise append-only traceability record (see migrations/006's own
+// design intent), scoped narrowly to exactly this field for exactly this purpose -- everything
+// else about a logged calibration (date, provider, result) stays immutable. requireRole(2)
+// matches the weight needed to log a calibration in the first place.
+app.put('/api/calibration-records/:cal_id/certificate', requireFetchHeader, requireRole(2), async (req, res) => {
+    const certificateNumber = (req.body.certificate_number || '').trim();
+    if (!certificateNumber) return res.status(400).json({ error: 'A certificate/reference number is required.' });
+    try {
+        const deptRes = await pool.query(
+            `SELECT cr.cert_pending, b.dept_id FROM calibration_records cr
+             LEFT JOIN tools t ON cr.tool_id = t.tool_id
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE cr.cal_id = $1`,
+            [req.params.cal_id]
+        );
+        if (deptRes.rows.length === 0) return res.status(404).json({ error: 'Calibration record not found.' });
+        if (!canAccessDept(req.authUser, deptRes.rows[0].dept_id, 2)) {
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
+        const result = await pool.query(
+            'UPDATE calibration_records SET certificate_number = $1, cert_pending = false WHERE cal_id = $2 RETURNING cal_id',
+            [certificateNumber, req.params.cal_id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Calibration record not found.' });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Backfill Certificate Error:', err);
+        res.status(500).json({ error: 'Failed to update certificate number.' });
     }
 });
 
@@ -4242,7 +4285,8 @@ app.post('/api/transfers/:transfer_id/qa-accept', /* DISABLED: authLimiter -- se
 // enough for FAA-grade calibration traceability.
 app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin, login_token, last_cal_date, cal_due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result } = req.body;
+    const { badge_id, pin, login_token, last_cal_date, cal_due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result, cert_pending } = req.body;
+    const certPending = !!cert_pending;
     const calResult = result === 'Fail' ? 'Fail' : 'Pass';
     const client = await pool.connect();
 
@@ -4278,9 +4322,16 @@ app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter --
             await client.query('ROLLBACK');
             return res.status(400).json({ error: 'Calibration date and due date are both required.', code: 'CAL_DUE_DATE_REQUIRED' });
         }
-        if (!provider || !certificate_number) {
+        if (!provider) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.', code: 'CAL_TRACEABILITY_REQUIRED' });
+            return res.status(400).json({ error: 'Calibration provider is required.', code: 'CAL_TRACEABILITY_REQUIRED' });
+        }
+        // Certificate number can be deferred (cert_pending) when the vendor hasn't issued one
+        // yet -- see migrations/023. Provider and dates are always required either way; this
+        // only ever defers the one piece of paper the vendor hasn't sent back.
+        if (!certPending && !certificate_number) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'A certificate/reference number is required, unless marked as pending from the vendor.', code: 'CAL_TRACEABILITY_REQUIRED' });
         }
 
         // A failed calibration still completes the hand-off (the tool returns to its home
@@ -4301,18 +4352,19 @@ app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter --
             [user.user_id, transfer_id]
         );
         const calRes = await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING cal_id`,
-            [transfer.tool_id, last_cal_date, cal_due_date, provider, certificate_number, standard_used || null, vendor_tracking_id || null, notes || null, user.user_id, calResult]
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, cert_pending, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING cal_id`,
+            [transfer.tool_id, last_cal_date, cal_due_date, provider, certPending ? null : certificate_number, certPending, standard_used || null, vendor_tracking_id || null, notes || null, user.user_id, calResult]
         );
+        const certDisplay = certPending ? 'PENDING' : certificate_number;
         await client.query(
             "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
-            [user.user_id, transfer.tool_id, `Calibration completed by ${provider} (cert ${certificate_number}); awaiting home department acceptance${calResult === 'Fail' ? ' -- FAILED' : ''}`]
+            [user.user_id, transfer.tool_id, `Calibration completed by ${provider} (cert ${certDisplay}); awaiting home department acceptance${calResult === 'Fail' ? ' -- FAILED' : ''}`]
         );
 
         if (calResult === 'Fail') {
             await triggerFailedCalibration(client, {
-                toolId: transfer.tool_id, calDate: last_cal_date, provider, certificateNumber: certificate_number,
+                toolId: transfer.tool_id, calDate: last_cal_date, provider, certificateNumber: certDisplay,
                 calId: calRes.rows[0].cal_id, userId: user.user_id
             });
         }

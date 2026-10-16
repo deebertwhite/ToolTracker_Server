@@ -403,7 +403,10 @@
                 <div class="form-group"><label class="form-label">Due Date</label><input type="date" class="form-input" id="cal-due-date"></div>
             </div>
             <div class="form-group"><label class="form-label">Calibration Provider / Lab</label><input class="form-input" id="cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
-            <div class="form-group"><label class="form-label">Certificate / Reference Number</label><input class="form-input" id="cal-cert-number" placeholder="e.g. CERT-2026-04231"></div>
+            <div class="form-group" style="margin-bottom:4px;"><label class="form-label">Certificate / Reference Number</label><input class="form-input" id="cal-cert-number" placeholder="e.g. CERT-2026-04231"></div>
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:12px; color:var(--muted); margin-bottom:16px;">
+                <input type="checkbox" id="cal-cert-pending" onchange="toggleCertPending('cal-cert-number', this.checked)"> Certificate not yet received from vendor -- can be added later once it arrives
+            </label>
             <div class="form-group"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-standard" placeholder="e.g. NIST-traceable"></div>
             <div class="form-group"><label class="form-label">Vendor Tracking # <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-vendor-tracking" placeholder="e.g. this vendor's own serial/asset ID, if different from ours"></div>
             <div class="form-group"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-notes"></div>
@@ -426,6 +429,20 @@
     <!-- Toast notification element: shown/hidden by showToast() to
          surface transient success/error/warning messages. -->
     <div class="toast" id="kiosk-toast">Toast Message</div>
+
+    <!-- Important/blocking message overlay (showAlert() in kiosk.js) -- a dimmed full-screen
+         backdrop with a centered card, same visual weight as #override-modal/#audit-gate-modal,
+         for a message serious enough that it shouldn't just blend in as another corner toast
+         (James: a checkout rejection "didnt feel important... should darken the background like
+         an overlay"). Requires an explicit "OK" tap to dismiss -- no auto-hide timer, unlike the
+         toast, since the whole point is that it shouldn't be possible to miss. -->
+    <div id="kiosk-alert-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 10000; justify-content: center; align-items: center; padding: 20px;">
+        <div class="card modal-card-scroll" style="width: 100%; max-width: 420px; border-top: 4px solid var(--red); text-align: center;">
+            <div id="kiosk-alert-icon" style="font-size: 48px; color: var(--red); margin-bottom: 14px;"></div>
+            <div id="kiosk-alert-message" style="font-size: 16px; font-weight: bold; margin-bottom: 20px;"></div>
+            <button class="btn btn-primary" style="width: 100%;" onclick="document.getElementById('kiosk-alert-overlay').style.display='none'">OK</button>
+        </div>
+    </div>
 
     <script src="icons.js"></script>
     <script src="kiosk.js"></script>

@@ -1190,32 +1190,38 @@ async function submitTransaction(managerCredential = null) {
             // Restore button
             if(submitBtn) { submitBtn.textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in'; submitBtn.disabled = false; }
 
-            // Handle Custom Hard-Stops
+            // Handle Custom Hard-Stops -- every one of these is a real rejection of the
+            // checkout/check-in itself, so all use showAlert() (front-and-center, dimmed
+            // backdrop) rather than showToast()'s small corner notification: James felt a
+            // blocked checkout "didnt feel important" as just another toast. AUDIT_REQUIRED is
+            // the one exception, left as its own dedicated full-screen modal (showAuditGateModal())
+            // -- already exactly this same front-and-center treatment, just with its own
+            // per-toolbox UI instead of a plain message.
             if (data.code === 'BAD_TECH_PIN') {
                 document.getElementById('override-modal').style.display = 'none';
                 // Covers both credential types activeUser might be caching (see
                 // techCredentialFields()) -- a stale PIN and a reissued/invalidated login
                 // token hit this exact same server response, so the message can't say "PIN"
                 // specifically without being wrong half the time.
-                showToast(`${icon('circle-x', 'icon-danger')} Your session credentials are invalid. Please sign in again.`);
+                showAlert('Your session credentials are invalid. Please sign in again.');
                 return resetToIdle();
             }
             else if (data.code === 'SIGNOFF_REQUIRED') {
-                return showToast(icon('triangle-alert', 'icon-warning') + ' ' + (data.error || 'Sign-off is required.'));
+                return showAlert(data.error || 'Sign-off is required.', 'triangle-alert');
             }
             else if (data.code === 'BAD_PIN') {
-                return showToast(`${icon('circle-x', 'icon-danger')} Invalid buddy PIN or login card.`);
+                return showAlert('Invalid buddy PIN or login card.');
             }
             else if (data.code === 'SIGNOFF_SAME_PERSON') {
-                return showToast(`${icon('circle-x', 'icon-danger')} Sign-off must be from a different person.`);
+                return showAlert('Sign-off must be from a different person.');
             }
             else if (data.code === 'CAL_EXPIRED' || data.code === 'CAL_NO_DUE_DATE' || data.code === 'CAL_NO_CERTIFICATE' || data.code === 'CAL_INVESTIGATION_OPEN') {
                 document.getElementById('override-modal').style.display = 'none';
-                return showToast(icon('octagon', 'icon-danger') + ' ' + data.error);
+                return showAlert(data.error);
             }
             else if (data.code === 'TOOL_IN_TRANSFER') {
                 document.getElementById('override-modal').style.display = 'none';
-                return showToast(icon('octagon', 'icon-danger') + ' ' + data.error);
+                return showAlert(data.error);
             }
             else if (data.code === 'AUDIT_REQUIRED') {
                 document.getElementById('override-modal').style.display = 'none';
@@ -1228,7 +1234,7 @@ async function submitTransaction(managerCredential = null) {
                 showAuditGateModal(auditGatePendingList);
                 return;
             }
-            return showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Transaction failed.'));
+            return showAlert(data.error || 'Transaction failed.');
         }
 
         document.getElementById('override-modal').style.display = 'none';
@@ -1238,7 +1244,7 @@ async function submitTransaction(managerCredential = null) {
         setTimeout(resetToIdle, 1500);
     } catch (err) {
         if(submitBtn) { submitBtn.textContent = 'Error'; submitBtn.disabled = false; }
-        showToast(icon('circle-x', 'icon-danger') + ' ' + (err && err.message ? err.message : 'Something went wrong. Please try again.'));
+        showAlert(err && err.message ? err.message : 'Something went wrong. Please try again.');
     }
 }
 
@@ -1528,10 +1534,23 @@ function oneYearFromDate(dateStr) {
 }
 
 /**
+ * Grays out and clears a certificate-number field when its paired "not yet received from
+ * vendor" checkbox is checked (migrations/023's cert_pending bypass -- James: "we dont have
+ * access to certs from the vendor, so calibration cert uploads need a methodical bypass").
+ * Re-enables it when unchecked. Same helper as admin.js's own toggleCertPending() (duplicated
+ * here since this page loads its own script, not admin.js).
+ */
+function toggleCertPending(certInputId, isPending) {
+    const input = document.getElementById(certInputId);
+    input.disabled = isPending;
+    if (isPending) input.value = '';
+}
+
+/**
  * QA-side action: opens #cal-complete-modal for the given in-progress transfer, prefilling
  * today's date as the calibration date. submitCalibrationComplete() below does the actual
- * POST once the form -- including the calibration provider and certificate/reference number,
- * required for a traceable calibration_records row -- is filled in.
+ * POST once the form -- including the calibration provider and certificate/reference number
+ * (or cert_pending, if the vendor hasn't issued one yet) -- is filled in.
  */
 function openCalCompleteModal(transferId) {
     document.getElementById('cal-complete-transfer-id').value = transferId;
@@ -1539,6 +1558,8 @@ function openCalCompleteModal(transferId) {
     document.getElementById('cal-due-date').value = '';
     document.getElementById('cal-provider').value = '';
     document.getElementById('cal-cert-number').value = '';
+    document.getElementById('cal-cert-pending').checked = false;
+    toggleCertPending('cal-cert-number', false);
     document.getElementById('cal-standard').value = '';
     document.getElementById('cal-vendor-tracking').value = '';
     document.getElementById('cal-notes').value = '';
@@ -1558,6 +1579,7 @@ async function submitCalibrationComplete() {
     const lastCalDate = document.getElementById('cal-last-date').value;
     const calDueDate = document.getElementById('cal-due-date').value;
     const provider = document.getElementById('cal-provider').value.trim();
+    const certPending = document.getElementById('cal-cert-pending').checked;
     const certificateNumber = document.getElementById('cal-cert-number').value.trim();
     const standardUsed = document.getElementById('cal-standard').value.trim();
     const vendorTrackingId = document.getElementById('cal-vendor-tracking').value.trim();
@@ -1566,7 +1588,7 @@ async function submitCalibrationComplete() {
 
     if (!lastCalDate || !calDueDate) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration date and due date are both required.`);
     if (!provider) return showToast(`${icon('triangle-alert', 'icon-warning')} Calibration provider/lab is required.`);
-    if (!certificateNumber) return showToast(`${icon('triangle-alert', 'icon-warning')} Certificate/reference number is required.`);
+    if (!certPending && !certificateNumber) return showToast(`${icon('triangle-alert', 'icon-warning')} Certificate/reference number is required, unless marked as pending from the vendor.`);
 
     try {
         const res = await fetch(`/api/transfers/${transferId}/complete-cal`, {
@@ -1578,7 +1600,8 @@ async function submitCalibrationComplete() {
                 last_cal_date: lastCalDate,
                 cal_due_date: calDueDate,
                 provider,
-                certificate_number: certificateNumber,
+                certificate_number: certPending ? null : certificateNumber,
+                cert_pending: certPending,
                 standard_used: standardUsed || null,
                 vendor_tracking_id: vendorTrackingId || null,
                 notes: notes || null,
@@ -1588,9 +1611,9 @@ async function submitCalibrationComplete() {
         const data = await res.json();
         document.getElementById('cal-complete-modal').style.display = 'none';
         if (!res.ok) {
-            showToast(icon('circle-x', 'icon-danger') + ' ' + (data.error || 'Failed to complete calibration.'));
+            showAlert(data.error || 'Failed to complete calibration.');
         } else if (result === 'Fail') {
-            showToast(`${icon('triangle-alert', 'icon-warning')} Calibration FAILED — tool is blocked from checkout and a trace-back investigation was opened.`);
+            showAlert('Calibration FAILED — tool is blocked from checkout and a trace-back investigation was opened.', 'triangle-alert');
         } else {
             showToast(`${icon('circle-check', 'icon-success')} Calibration logged — tool is on its way back.`);
         }
@@ -1639,6 +1662,23 @@ function showToast(msg) {
     el.innerHTML = msg;
     el.style.display = 'block';
     setTimeout(() => { el.style.display = 'none'; }, 3500);
+}
+
+/**
+ * Shows an important, blocking message front-and-center over a dimmed backdrop (#kiosk-alert-
+ * overlay) -- distinct from showToast()'s small corner notification, which James felt didn't
+ * stand out enough for a checkout rejection ("the message didnt feel important... should darken
+ * the background like an overlay"). Used specifically for hard-stop rejections of the
+ * checkout/check-in transaction itself (submitTransaction()) and an outright calibration
+ * failure -- routine confirmations and lighter validation reminders elsewhere in the kiosk stay
+ * as the lightweight toast, which James separately said he likes as-is. No auto-hide timer,
+ * unlike the toast -- requires an explicit "OK" tap, since the whole point is that it shouldn't
+ * be missable by glancing away for a moment.
+ */
+function showAlert(message, iconName = 'octagon') {
+    document.getElementById('kiosk-alert-icon').innerHTML = icon(iconName);
+    document.getElementById('kiosk-alert-message').innerHTML = message;
+    document.getElementById('kiosk-alert-overlay').style.display = 'flex';
 }
 
 // Last-resort safety net: this kiosk runs unattended for hours at a time, so a JS error

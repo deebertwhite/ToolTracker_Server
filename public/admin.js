@@ -2488,7 +2488,10 @@ function openEntityModal(type, id) {
                         <div class="form-group" style="margin:0;"><label class="form-label">Due Date</label><input type="date" class="form-input" id="em-cal-due"></div>
                     </div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Provider / Lab</label><input class="form-input" id="em-cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
-                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Certificate / Reference #</label><input class="form-input" id="em-cal-cert" placeholder="e.g. CERT-2026-04231"></div>
+                    <div class="form-group" style="margin-bottom:4px;"><label class="form-label">Certificate / Reference #</label><input class="form-input" id="em-cal-cert" placeholder="e.g. CERT-2026-04231"></div>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:12px; color:var(--muted); margin-bottom:10px;">
+                        <input type="checkbox" id="em-cal-cert-pending" onchange="toggleCertPending('em-cal-cert', this.checked)"> Certificate not yet received from vendor -- can be added later once it arrives
+                    </label>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-standard" placeholder="e.g. NIST-traceable"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Vendor Tracking # <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-vendor-tracking" placeholder="e.g. this vendor's own serial/asset ID, if different from ours"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-notes"></div>
@@ -3176,7 +3179,10 @@ function startDragMarker(event, qrCode, markerEl) {
  * after submitCalLogForm() doesn't need to re-render the whole container. Each record shows
  * either its certificate photo thumbnail (click to open full-size) or a camera icon to attach
  * one, so a paper certificate can be scanned/photographed and kept alongside the typed
- * provider/cert-number fields rather than only the reference number.
+ * provider/cert-number fields rather than only the reference number. A record logged with
+ * cert_pending (migrations/023 -- vendor hasn't issued one yet) shows "Certificate Pending"
+ * instead and a "+ Add Cert #" control (toggleCertBackfillForm()/submitCertBackfill() below) to
+ * backfill it once received, rather than silently staying incomplete forever.
  */
 async function loadCalibrationHistory(toolId) {
     const listEl = document.getElementById('em-cal-history-list');
@@ -3195,7 +3201,16 @@ async function loadCalibrationHistory(toolId) {
                     : `<button type="button" class="btn-icon" style="width:36px;height:36px;padding:0;flex-shrink:0;" title="Attach a photo of the certificate" onclick="triggerPhotoUpload('calibration', ${r.cal_id}, '${toolId}')">${icon('camera')}</button>`}
                 <div style="flex:1;">
                     <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text);">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
-                    <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
+                    <div style="font-size:12px; color:var(--text); margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        ${r.cert_pending
+                            ? `${r.provider} &mdash; <span style="color:var(--orange); font-weight:bold;">Certificate Pending</span> <button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCertBackfillForm(${r.cal_id})">+ Add Cert #</button>`
+                            : `${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span>`}
+                    </div>
+                    ${r.cert_pending ? `
+                    <div id="cert-backfill-form-${r.cal_id}" style="display:none; margin-top:6px; gap:6px;">
+                        <input class="form-input" id="cert-backfill-input-${r.cal_id}" placeholder="Certificate / Reference #" style="flex:1; margin:0;">
+                        <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitCertBackfill(${r.cal_id}, '${toolId}')">Save</button>
+                    </div>` : ''}
                     ${r.result === 'Fail' ? `<div style="font-size:11px; color:var(--red); font-weight:bold; margin-top:2px;">${icon('circle-x', 'icon-danger')} FAILED -- out of tolerance</div>` : ''}
                     ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
                     ${r.vendor_tracking_id ? `<div style="font-size:11px;">Vendor Tracking #: <span style="font-family:monospace;">${r.vendor_tracking_id}</span></div>` : ''}
@@ -3209,6 +3224,30 @@ async function loadCalibrationHistory(toolId) {
     }
 }
 
+/** Shows/hides the inline "Certificate / Reference #" backfill row for one pending calibration record (see loadCalibrationHistory()'s cert_pending branch). */
+function toggleCertBackfillForm(calId) {
+    const form = document.getElementById(`cert-backfill-form-${calId}`);
+    form.style.display = form.style.display === 'none' ? 'flex' : 'none';
+}
+
+/** Submits the backfilled certificate number to PUT /api/calibration-records/:cal_id/certificate (migrations/023), then reloads this tool's calibration history so the record switches from "Certificate Pending" to showing the real number. */
+async function submitCertBackfill(calId, toolId) {
+    const input = document.getElementById(`cert-backfill-input-${calId}`);
+    const certificateNumber = input.value.trim();
+    if (!certificateNumber) return alert('⚠️ Enter a certificate/reference number.');
+    try {
+        const res = await fetch(`/api/calibration-records/${calId}/certificate`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ certificate_number: certificateNumber })
+        });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to update certificate number.')); }
+        loadCalibrationHistory(toolId);
+    } catch (e) {
+        alert('❌ Network error.');
+    }
+}
+
 /** Shows/hides the "+ Log Calibration" inline form (#em-cal-log-form) in the tool modal, resetting its fields to blank (calibration date defaulted to today) each time it's opened. */
 function toggleCalLogForm(show) {
     document.getElementById('em-cal-log-form').style.display = show ? 'block' : 'none';
@@ -3217,11 +3256,27 @@ function toggleCalLogForm(show) {
         document.getElementById('em-cal-due').value = '';
         document.getElementById('em-cal-provider').value = '';
         document.getElementById('em-cal-cert').value = '';
+        document.getElementById('em-cal-cert-pending').checked = false;
+        toggleCertPending('em-cal-cert', false);
         document.getElementById('em-cal-standard').value = '';
         document.getElementById('em-cal-vendor-tracking').value = '';
         document.getElementById('em-cal-notes').value = '';
         document.getElementById('em-cal-result').value = 'Pass';
     }
+}
+
+/**
+ * Grays out and clears a certificate-number field when its paired "not yet received from
+ * vendor" checkbox is checked (migrations/023's cert_pending bypass -- James: "we dont have
+ * access to certs from the vendor, so calibration cert uploads need a methodical bypass").
+ * Re-enables it when unchecked. Shared by both calibration-logging forms (admin.js's
+ * #em-cal-cert and kiosk.js's own #cal-cert-number, each wired to their own copy of this
+ * function since they're separate pages).
+ */
+function toggleCertPending(certInputId, isPending) {
+    const input = document.getElementById(certInputId);
+    input.disabled = isPending;
+    if (isPending) input.value = '';
 }
 
 /**
@@ -3236,6 +3291,7 @@ async function submitCalLogForm(toolId, qrCode) {
     const calDate = document.getElementById('em-cal-date').value;
     const dueDate = document.getElementById('em-cal-due').value;
     const provider = document.getElementById('em-cal-provider').value.trim();
+    const certPending = document.getElementById('em-cal-cert-pending').checked;
     const certificateNumber = document.getElementById('em-cal-cert').value.trim();
     const standardUsed = document.getElementById('em-cal-standard').value.trim();
     const vendorTrackingId = document.getElementById('em-cal-vendor-tracking').value.trim();
@@ -3243,13 +3299,14 @@ async function submitCalLogForm(toolId, qrCode) {
     const result = document.getElementById('em-cal-result').value;
 
     if (!calDate || !dueDate) return alert('⚠️ Calibration date and due date are both required.');
-    if (!provider || !certificateNumber) return alert('⚠️ Calibration provider and certificate/reference number are both required.');
+    if (!provider) return alert('⚠️ Calibration provider is required.');
+    if (!certPending && !certificateNumber) return alert('⚠️ A certificate/reference number is required, unless marked as pending from the vendor.');
 
     try {
         const res = await fetch(`/api/tools/${toolId}/calibration-history`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
-            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, vendor_tracking_id: vendorTrackingId || null, notes: notes || null, result })
+            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certPending ? null : certificateNumber, cert_pending: certPending, standard_used: standardUsed || null, vendor_tracking_id: vendorTrackingId || null, notes: notes || null, result })
         });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to log calibration record.')); }
         await renderEditableInfraTree();
