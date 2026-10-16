@@ -2471,6 +2471,7 @@ function openEntityModal(type, id) {
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Provider / Lab</label><input class="form-input" id="em-cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Certificate / Reference #</label><input class="form-input" id="em-cal-cert" placeholder="e.g. CERT-2026-04231"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-standard" placeholder="e.g. NIST-traceable"></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Vendor Tracking # <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-vendor-tracking" placeholder="e.g. this vendor's own serial/asset ID, if different from ours"></div>
                     <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="em-cal-notes"></div>
                     <div class="form-group" style="margin-bottom:10px;">
                         <label class="form-label">Result</label>
@@ -3178,6 +3179,7 @@ async function loadCalibrationHistory(toolId) {
                     <div style="font-size:12px; color:var(--text); margin-top:2px;">${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span></div>
                     ${r.result === 'Fail' ? `<div style="font-size:11px; color:var(--red); font-weight:bold; margin-top:2px;">${icon('circle-x', 'icon-danger')} FAILED -- out of tolerance</div>` : ''}
                     ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
+                    ${r.vendor_tracking_id ? `<div style="font-size:11px;">Vendor Tracking #: <span style="font-family:monospace;">${r.vendor_tracking_id}</span></div>` : ''}
                     ${r.notes ? `<div style="font-size:11px;">${r.notes}</div>` : ''}
                     <div style="font-size:10px; margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
                 </div>
@@ -3197,6 +3199,7 @@ function toggleCalLogForm(show) {
         document.getElementById('em-cal-provider').value = '';
         document.getElementById('em-cal-cert').value = '';
         document.getElementById('em-cal-standard').value = '';
+        document.getElementById('em-cal-vendor-tracking').value = '';
         document.getElementById('em-cal-notes').value = '';
         document.getElementById('em-cal-result').value = 'Pass';
     }
@@ -3216,6 +3219,7 @@ async function submitCalLogForm(toolId, qrCode) {
     const provider = document.getElementById('em-cal-provider').value.trim();
     const certificateNumber = document.getElementById('em-cal-cert').value.trim();
     const standardUsed = document.getElementById('em-cal-standard').value.trim();
+    const vendorTrackingId = document.getElementById('em-cal-vendor-tracking').value.trim();
     const notes = document.getElementById('em-cal-notes').value.trim();
     const result = document.getElementById('em-cal-result').value;
 
@@ -3226,7 +3230,7 @@ async function submitCalLogForm(toolId, qrCode) {
         const res = await fetch(`/api/tools/${toolId}/calibration-history`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
-            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, notes: notes || null, result })
+            body: JSON.stringify({ cal_date: calDate, due_date: dueDate, provider, certificate_number: certificateNumber, standard_used: standardUsed || null, vendor_tracking_id: vendorTrackingId || null, notes: notes || null, result })
         });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to log calibration record.')); }
         await renderEditableInfraTree();

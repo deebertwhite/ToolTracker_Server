@@ -376,13 +376,14 @@
 
             <input type="hidden" id="cal-complete-transfer-id">
 
-            <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
-                <div class="form-group"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="cal-last-date"></div>
+            <div class="cal-date-pair" style="margin-bottom: 0;">
+                <div class="form-group"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="cal-last-date" onchange="document.getElementById('cal-due-date').value = oneYearFromDate(this.value)"></div>
                 <div class="form-group"><label class="form-label">Due Date</label><input type="date" class="form-input" id="cal-due-date"></div>
             </div>
             <div class="form-group"><label class="form-label">Calibration Provider / Lab</label><input class="form-input" id="cal-provider" placeholder="e.g. Snap-on Calibration Services"></div>
             <div class="form-group"><label class="form-label">Certificate / Reference Number</label><input class="form-input" id="cal-cert-number" placeholder="e.g. CERT-2026-04231"></div>
             <div class="form-group"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-standard" placeholder="e.g. NIST-traceable"></div>
+            <div class="form-group"><label class="form-label">Vendor Tracking # <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-vendor-tracking" placeholder="e.g. this vendor's own serial/asset ID, if different from ours"></div>
             <div class="form-group"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="cal-notes"></div>
             <div class="form-group">
                 <label class="form-label">Result</label>

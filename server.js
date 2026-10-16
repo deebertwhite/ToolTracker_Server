@@ -1003,7 +1003,7 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
     try {
         const result = await pool.query(
             `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number,
-                    cr.standard_used, cr.notes, cr.recorded_at, cr.result, cr.photo_url, u.full_name AS recorded_by_name
+                    cr.standard_used, cr.vendor_tracking_id, cr.notes, cr.recorded_at, cr.result, cr.photo_url, u.full_name AS recorded_by_name
              FROM calibration_records cr
              LEFT JOIN users u ON cr.recorded_by_user_id = u.user_id
              WHERE cr.tool_id = $1
@@ -1054,7 +1054,7 @@ app.get('/api/tools/:id/scan-code.png', requireRole(2), async (req, res) => {
 // just whatever was submitted -- so backfilling an OLD record after a newer one already
 // exists doesn't clobber the tool's current due date with stale data.
 app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2), async (req, res) => {
-    const { cal_date, due_date, provider, certificate_number, standard_used, notes, result } = req.body;
+    const { cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result } = req.body;
     if (!cal_date || !due_date) return res.status(400).json({ error: 'Calibration date and due date are both required.' });
     if (!provider || !certificate_number) return res.status(400).json({ error: 'Calibration provider and certificate/reference number are both required for a traceable record.' });
     const calResult = result === 'Fail' ? 'Fail' : 'Pass';
@@ -1068,9 +1068,9 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
         const currentLastCal = toolRes.rows[0].last_cal_date;
 
         const calRes = await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING cal_id`,
-            [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, notes || null, req.authUser.user_id, calResult]
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING cal_id`,
+            [req.params.id, cal_date, due_date, provider, certificate_number, standard_used || null, vendor_tracking_id || null, notes || null, req.authUser.user_id, calResult]
         );
 
         // Only advance the tool's snapshot fields if this record is now the most recent
@@ -4184,7 +4184,7 @@ app.post('/api/transfers/:transfer_id/qa-accept', /* DISABLED: authLimiter -- se
 // enough for FAA-grade calibration traceability.
 app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
     const { transfer_id } = req.params;
-    const { badge_id, pin, login_token, last_cal_date, cal_due_date, provider, certificate_number, standard_used, notes, result } = req.body;
+    const { badge_id, pin, login_token, last_cal_date, cal_due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result } = req.body;
     const calResult = result === 'Fail' ? 'Fail' : 'Pass';
     const client = await pool.connect();
 
@@ -4243,9 +4243,9 @@ app.post('/api/transfers/:transfer_id/complete-cal', /* DISABLED: authLimiter --
             [user.user_id, transfer_id]
         );
         const calRes = await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, notes, recorded_by_user_id, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING cal_id`,
-            [transfer.tool_id, last_cal_date, cal_due_date, provider, certificate_number, standard_used || null, notes || null, user.user_id, calResult]
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING cal_id`,
+            [transfer.tool_id, last_cal_date, cal_due_date, provider, certificate_number, standard_used || null, vendor_tracking_id || null, notes || null, user.user_id, calResult]
         );
         await client.query(
             "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",

@@ -1318,6 +1318,22 @@ async function acceptIncomingTransfer(transferId) {
 }
 
 /**
+ * Returns the same calendar date one year later, as a `YYYY-MM-DD` string (the native
+ * `<input type="date">` value format) -- used to default #cal-due-date to one year past
+ * whichever #cal-last-date was just picked, the shop's usual interval, left freely editable
+ * afterward. Same helper as admin.js's own `oneYearFromDate()` (duplicated here since this page
+ * loads its own script, not admin.js); see that copy's doc comment for why this is built from
+ * local year/month/day integers rather than any UTC round-trip.
+ */
+function oneYearFromDate(dateStr) {
+    if (!dateStr) return '';
+    const [y, m, d] = dateStr.split('-').map(Number);
+    if (!y || !m || !d) return '';
+    const result = new Date(y + 1, m - 1, d);
+    return `${result.getFullYear()}-${String(result.getMonth() + 1).padStart(2, '0')}-${String(result.getDate()).padStart(2, '0')}`;
+}
+
+/**
  * QA-side action: opens #cal-complete-modal for the given in-progress transfer, prefilling
  * today's date as the calibration date. submitCalibrationComplete() below does the actual
  * POST once the form -- including the calibration provider and certificate/reference number,
@@ -1330,6 +1346,7 @@ function openCalCompleteModal(transferId) {
     document.getElementById('cal-provider').value = '';
     document.getElementById('cal-cert-number').value = '';
     document.getElementById('cal-standard').value = '';
+    document.getElementById('cal-vendor-tracking').value = '';
     document.getElementById('cal-notes').value = '';
     document.getElementById('cal-result').value = 'Pass';
     document.getElementById('cal-complete-modal').style.display = 'flex';
@@ -1349,6 +1366,7 @@ async function submitCalibrationComplete() {
     const provider = document.getElementById('cal-provider').value.trim();
     const certificateNumber = document.getElementById('cal-cert-number').value.trim();
     const standardUsed = document.getElementById('cal-standard').value.trim();
+    const vendorTrackingId = document.getElementById('cal-vendor-tracking').value.trim();
     const notes = document.getElementById('cal-notes').value.trim();
     const result = document.getElementById('cal-result').value;
 
@@ -1368,6 +1386,7 @@ async function submitCalibrationComplete() {
                 provider,
                 certificate_number: certificateNumber,
                 standard_used: standardUsed || null,
+                vendor_tracking_id: vendorTrackingId || null,
                 notes: notes || null,
                 result
             })
