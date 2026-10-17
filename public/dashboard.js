@@ -1134,13 +1134,16 @@ function openToolDetailModal(qrCode) {
         bodyHtml += `<div style="margin-bottom:15px;"><a href="${entity.replacement_url}" target="_blank" style="color:var(--blue); font-size: 13px; text-decoration: none;">${icon('shopping-cart')} Open Replacement Link →</a></div>`;
     }
 
-    // Jumps to this same tool's card in the admin portal (new tab -- this dashboard is meant to
-    // stay open on a shared/wall screen, see the view's own doc comments elsewhere in this file).
+    // Jumps to this same tool's card in the admin portal, in THIS tab -- James asked that
+    // dashboard links stop opening a new window. Originally opened in a new tab specifically so
+    // a wall/shared-screen dashboard wouldn't navigate away (see this view's own doc comments
+    // elsewhere in this file); that tradeoff is now deliberately reversed per that request, so a
+    // dashboard left open on a shared screen WILL navigate to the admin login on this click.
     // Always shown: this view has no login/identity of its own to check a permission against, so
     // there's nothing to gate client-side -- the admin login wall and openEntityModal()'s existing
     // per-role edit gating (see admin.js) are what actually decide what the person can do once
     // they get there, exactly as they already do for every other way of reaching that same modal.
-    bodyHtml += `<div style="padding-top:15px; border-top:1px solid var(--border);"><a href="admin.html?tool=${encodeURIComponent(entity.qr_code)}" target="_blank" style="color:var(--accent); font-size: 13px; font-weight:bold; text-decoration: none;">${icon('external-link')} Open in Admin Portal →</a></div>`;
+    bodyHtml += `<div style="padding-top:15px; border-top:1px solid var(--border);"><a href="admin.html?tool=${encodeURIComponent(entity.qr_code)}" style="color:var(--accent); font-size: 13px; font-weight:bold; text-decoration: none;">${icon('external-link')} Open in Admin Portal →</a></div>`;
 
     document.getElementById('td-body').innerHTML = bodyHtml;
     document.getElementById('tool-detail-overlay').style.display = 'flex';

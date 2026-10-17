@@ -15,6 +15,15 @@ let kioskToolNameByQr = {};
 // enforcement is server-side in POST /api/transactions.
 let kioskToolDeptByQr = {};
 let kioskDeptGroupById = {};
+// Reading-order position number per qr_code (1, 2, 3... per drawer, by position_y then
+// position_x) -- the SAME numbering the admin panel's toolbox print sheet badges each tool
+// with on the drawer photo, so a technician can match "item #3 on the map/printout" to a row
+// here when several non-unique tools (e.g. identical sockets) are hard to tell apart by code
+// alone. Only set for tools with a saved position; see loadKioskToolNames(). Since it's derived
+// live from current positions (not a stored id), it always matches what printing a fresh sheet
+// right now would show -- an OLDER physical printout could drift if positions changed since it
+// was printed, same inherent limitation the print sheet itself already has as a static snapshot.
+let kioskToolItemNumberByQr = {};
 
 // Specific Audit State Variables
 let auditTools = []; // tools currently 'In' this box -- physically confirmed, submitted as 'Present'
@@ -384,6 +393,21 @@ async function loadKioskToolNames() {
             kioskToolNameByQr[t.qr_code] = t.name;
             kioskToolDeptByQr[t.qr_code] = t.tool_dept_id;
         });
+
+        // Item numbers: group positioned tools by drawer and rank each drawer's own tools in
+        // reading order (top-to-bottom, left-to-right) -- exactly admin.js's openToolboxPrintSheet()
+        // sort (position_y then position_x) so the number matches the printed sheet's badges.
+        kioskToolItemNumberByQr = {};
+        const byDrawer = {};
+        (data.tools || []).forEach(t => {
+            if (t.position_x === null || t.position_y === null || t.drawer_id === null) return;
+            (byDrawer[t.drawer_id] = byDrawer[t.drawer_id] || []).push(t);
+        });
+        Object.values(byDrawer).forEach(drawerTools => {
+            drawerTools.sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
+            drawerTools.forEach((t, i) => { kioskToolItemNumberByQr[t.qr_code] = i + 1; });
+        });
+
         kioskDeptGroupById = {};
         (storageData.departments || []).forEach(d => { kioskDeptGroupById[d.dept_id] = d.cross_checkout_group_id; });
         renderQueue(); // refresh any rows already drawn before this resolved
@@ -496,7 +520,7 @@ function handleToolScan() {
 
     showToast(isBox
         ? `${icon('plus')} Added Toolbox ${qr} -- every tool currently in it will be checked out.`
-        : `${icon('plus')} Added: ${qr}${kioskToolNameByQr[qr] ? ' -- ' + kioskToolNameByQr[qr] : ''}${crossDeptNote}`);
+        : `${icon('plus')} Added: ${qr}${kioskToolItemNumberByQr[qr] ? ' (Item #' + kioskToolItemNumberByQr[qr] + ')' : ''}${kioskToolNameByQr[qr] ? ' -- ' + kioskToolNameByQr[qr] : ''}${crossDeptNote}`);
 }
 
 /**
@@ -506,7 +530,10 @@ function handleToolScan() {
  * "Done Scanning" button while a continuous scan session is open.
  * Each tool's name (from kioskToolNameByQr, see loadKioskToolNames()) shows alongside its code
  * when known, so the operator can confirm by name, not just a bare ID -- falls back to the code
- * alone if the name lookup hasn't resolved yet or the tool isn't in it for some reason.
+ * alone if the name lookup hasn't resolved yet or the tool isn't in it for some reason. A
+ * positioned tool also shows its drawer-map item number (kioskToolItemNumberByQr) so
+ * non-unique tools (several identical sockets, etc.) can be told apart by matching the number
+ * against the drawer's printed shadow-board sheet or the on-screen map.
  */
 function renderQueue() {
     document.getElementById('queue-count').textContent = batchQueue.length;
@@ -516,7 +543,7 @@ function renderQueue() {
         <div class="batch-item">
             <div>${isToolboxCode(qr)
                 ? `${icon('package')} <strong>${qr}</strong> <span style="color:var(--accent); font-size:11px;">(whole toolbox)</span>`
-                : `${icon('wrench')} <strong>${qr}</strong>${kioskToolNameByQr[qr] ? ` <span style="color:var(--muted); font-size:12px;">${kioskToolNameByQr[qr]}</span>` : ''}`}</div>
+                : `${icon('wrench')} <strong>${qr}</strong>${kioskToolItemNumberByQr[qr] ? ` <span style="color:var(--accent); font-size:11px; font-weight:bold;">Item #${kioskToolItemNumberByQr[qr]}</span>` : ''}${kioskToolNameByQr[qr] ? ` <span style="color:var(--muted); font-size:12px;">${kioskToolNameByQr[qr]}</span>` : ''}`}</div>
             <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;" onclick="removeItem(${index})">${icon('x')}</div>
         </div>
     `).join('');
