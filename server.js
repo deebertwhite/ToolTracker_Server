@@ -5315,6 +5315,28 @@ const getOutToolsForDept = async (client, deptId) => {
     return result.rows;
 };
 
+// All tools currently checked out, across every department, each tagged with dept_id/dept_name
+// so the kiosk can filter to what the signed-in technician can access -- same convention as
+// GET /api/audits/box-status (unauthenticated, server returns everything, client filters).
+// Reuses getOutToolsForDept(), the same helper behind the hourly log / EOD report above, rather
+// than a new query, so this always agrees with what those already show. Purely informational on
+// the kiosk side (see loadOutToolsList() in kiosk.js): helps a technician recognize which
+// specific tool they're holding among non-unique ones during check-in, but deliberately isn't
+// click-to-check-in -- that would let someone "return" a tool without actually holding it,
+// giving up the one real accountability property a physical scan has that a list click doesn't.
+app.get('/api/kiosk/out-tools', async (req, res) => {
+    try {
+        const depts = await pool.query('SELECT dept_id, name FROM departments ORDER BY name');
+        const perDept = await Promise.all(depts.rows.map(async (d) => {
+            const tools = await getOutToolsForDept(pool, d.dept_id);
+            return tools.map(t => ({ ...t, dept_id: d.dept_id, dept_name: d.name }));
+        }));
+        res.json({ success: true, tools: perDept.flat() });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch checked-out tools.' });
+    }
+});
+
 /**
  * Writes a per-department snapshot of how many tools are currently checked out (and to
  * whom) to an hourly log file under logs/hourly/<dept_prefix>/<date>_hourly.log.

@@ -24,6 +24,11 @@ let kioskDeptGroupById = {};
 // right now would show -- an OLDER physical printout could drift if positions changed since it
 // was printed, same inherent limitation the print sheet itself already has as a static snapshot.
 let kioskToolItemNumberByQr = {};
+// Toolbox/drawer name per qr_code -- James asked that the checkout/check-in display lead with
+// location (Box, Drawer) ahead of item number/name, with the bare ID last. Populated alongside
+// the other per-qr lookups in loadKioskToolNames(); see describeToolLocation()/renderQueue().
+let kioskToolBoxByQr = {};
+let kioskToolDrawerByQr = {};
 
 // Specific Audit State Variables
 let auditTools = []; // tools currently 'In' this box -- physically confirmed, submitted as 'Present'
@@ -369,6 +374,13 @@ function setupActionScreen() {
         submitBtn.disabled = false;
         document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'block' : 'none';
         document.getElementById('kiosk-work-order').value = '';
+        // Reset to expanded every fresh entry into check-in -- loadKioskToolNames() (called
+        // below) does the actual fetch+render once pendingMode is confirmed 'IN'.
+        document.getElementById('checkin-out-tools-section').style.display = pendingMode === 'IN' ? 'block' : 'none';
+        const outToolsListEl = document.getElementById('out-tools-list');
+        const outToolsChevron = document.getElementById('out-tools-chevron');
+        if (outToolsListEl) outToolsListEl.style.display = 'block';
+        if (outToolsChevron) outToolsChevron.innerHTML = ICONS['chevron-down'];
         focusScanInput('kiosk-scan-input');
         loadKioskToolNames();
     }
@@ -389,9 +401,13 @@ async function loadKioskToolNames() {
         const storageData = await storageRes.json();
         kioskToolNameByQr = {};
         kioskToolDeptByQr = {};
+        kioskToolBoxByQr = {};
+        kioskToolDrawerByQr = {};
         (data.tools || []).forEach(t => {
             kioskToolNameByQr[t.qr_code] = t.name;
             kioskToolDeptByQr[t.qr_code] = t.tool_dept_id;
+            kioskToolBoxByQr[t.qr_code] = t.toolbox_name;
+            kioskToolDrawerByQr[t.qr_code] = t.drawer_name;
         });
 
         // Item numbers: group positioned tools by drawer and rank each drawer's own tools in
@@ -411,9 +427,104 @@ async function loadKioskToolNames() {
         kioskDeptGroupById = {};
         (storageData.departments || []).forEach(d => { kioskDeptGroupById[d.dept_id] = d.cross_checkout_group_id; });
         renderQueue(); // refresh any rows already drawn before this resolved
+
+        // Check-in only: the "Currently Checked Out" reference list (see loadOutToolsList())
+        // resolves each tool's box/drawer/item number from the maps just built above, so it's
+        // kicked off from here -- after they're populated -- rather than in parallel from
+        // setupActionScreen(), which would otherwise race this fetch.
+        if (pendingMode === 'IN') loadOutToolsList();
     } catch (e) {
         // Best-effort -- see doc comment above.
     }
+}
+
+/**
+ * Builds one "Currently Checked Out" row's display line for a tool, in the hierarchy James
+ * asked for: Box, Drawer, Item number, Name, then the bare ID last (reusing the exact same
+ * per-qr lookups renderQueue() uses, so both places describe a tool identically). Falls back
+ * gracefully wherever a piece isn't known (e.g. no saved position -> no item number).
+ */
+function describeToolLocation(qr) {
+    const box = kioskToolBoxByQr[qr];
+    const drawer = kioskToolDrawerByQr[qr];
+    const itemNum = kioskToolItemNumberByQr[qr];
+    const name = kioskToolNameByQr[qr];
+    const location = (box || drawer) ? `${box || '?'} › ${drawer || '?'}` : '';
+    const itemBadge = itemNum ? `<span style="color:var(--accent); font-weight:bold;">Item #${itemNum}</span> ` : '';
+    return { location, itemBadge, name: name || qr, showId: !!name };
+}
+
+/**
+ * Fetches GET /api/kiosk/out-tools and renders #out-tools-list: every tool currently checked
+ * out in a department the signed-in technician can access, grouped by department then by who
+ * has it (James: "maybe we list all tools out, by person, for the department they are
+ * associated with"). Deliberately read-only/reference-only -- rows are plain text, not
+ * clickable -- so this can't itself complete a check-in. Scanning (which requires physically
+ * holding the tagged tool) stays the only way to actually add something to the queue; this is
+ * purely here to help recognize which specific tool is in hand among non-unique ones.
+ */
+async function loadOutToolsList() {
+    const countEl = document.getElementById('out-tools-count');
+    const listEl = document.getElementById('out-tools-list');
+    if (!countEl || !listEl) return;
+    try {
+        const res = await fetch('/api/kiosk/out-tools');
+        const data = await res.json();
+
+        const accessibleDeptIds = getAccessibleDeptIds();
+        const visible = (activeUser && activeUser.role === 'super_admin')
+            ? (data.tools || [])
+            : (data.tools || []).filter(t => accessibleDeptIds.includes(t.dept_id));
+
+        countEl.textContent = `(${visible.length})`;
+        if (visible.length === 0) {
+            listEl.innerHTML = `<p style="color:var(--muted); margin:0; font-size:13px;">No tools currently checked out in your department(s).</p>`;
+            return;
+        }
+
+        const byDept = new Map();
+        visible.forEach(t => {
+            if (!byDept.has(t.dept_id)) byDept.set(t.dept_id, { name: t.dept_name, byPerson: new Map() });
+            const dept = byDept.get(t.dept_id);
+            const personKey = t.badge_id || t.user_name || 'unknown';
+            if (!dept.byPerson.has(personKey)) dept.byPerson.set(personKey, { name: t.user_name || 'Unknown User', tools: [] });
+            dept.byPerson.get(personKey).tools.push(t);
+        });
+        const deptGroups = [...byDept.values()].sort((a, b) => a.name.localeCompare(b.name));
+
+        listEl.innerHTML = deptGroups.map(dept => `
+            <div style="margin-bottom:12px;">
+                ${deptGroups.length > 1 ? `<div style="font-size:11px; font-weight:bold; color:var(--muted); text-transform:uppercase; margin-bottom:4px;">${dept.name}</div>` : ''}
+                ${[...dept.byPerson.values()].sort((a, b) => a.name.localeCompare(b.name)).map(person => `
+                    <div style="margin-bottom:10px;">
+                        <div style="font-size:12px; font-weight:bold; margin-bottom:3px;">${icon('user')} ${person.name}</div>
+                        ${person.tools.map(t => {
+                            const loc = describeToolLocation(t.qr_code);
+                            const since = t.timestamp ? new Date(t.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'unknown';
+                            return `
+                                <div style="padding:5px 0 5px 22px; font-size:12px; border-bottom:1px solid var(--border);">
+                                    ${loc.location ? `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.3px;">${loc.location}</div>` : ''}
+                                    <div>${loc.itemBadge}<strong>${loc.name}</strong>${loc.showId ? ` <span style="color:var(--muted); font-size:11px;">(${t.qr_code})</span>` : ''}</div>
+                                    <div style="color:var(--muted); font-size:10px;">${icon('clock')} since ${since}</div>
+                                </div>`;
+                        }).join('')}
+                    </div>
+                `).join('')}
+            </div>
+        `).join('');
+    } catch (e) {
+        listEl.innerHTML = `<p style="color:var(--red); margin:0; font-size:13px;">Failed to load checked-out tools.</p>`;
+    }
+}
+
+/** Expands/collapses #out-tools-list (default expanded) and flips its chevron to match. */
+function toggleOutToolsList() {
+    const listEl = document.getElementById('out-tools-list');
+    const chevron = document.getElementById('out-tools-chevron');
+    if (!listEl) return;
+    const expanding = listEl.style.display === 'none';
+    listEl.style.display = expanding ? 'block' : 'none';
+    if (chevron) chevron.innerHTML = ICONS[expanding ? 'chevron-down' : 'chevron-right'];
 }
 
 /**
@@ -518,9 +629,14 @@ function handleToolScan() {
         }
     }
 
-    showToast(isBox
-        ? `${icon('plus')} Added Toolbox ${qr} -- every tool currently in it will be checked out.`
-        : `${icon('plus')} Added: ${qr}${kioskToolItemNumberByQr[qr] ? ' (Item #' + kioskToolItemNumberByQr[qr] + ')' : ''}${kioskToolNameByQr[qr] ? ' -- ' + kioskToolNameByQr[qr] : ''}${crossDeptNote}`);
+    if (isBox) {
+        showToast(`${icon('plus')} Added Toolbox ${qr} -- every tool currently in it will be checked out.`);
+    } else {
+        const loc = describeToolLocation(qr);
+        const prefix = loc.location ? `${loc.location} -- ` : '';
+        const itemText = kioskToolItemNumberByQr[qr] ? `Item #${kioskToolItemNumberByQr[qr]} -- ` : '';
+        showToast(`${icon('plus')} Added: ${prefix}${itemText}${loc.name}${loc.showId ? ' (' + qr + ')' : ''}${crossDeptNote}`);
+    }
 }
 
 /**
@@ -528,12 +644,12 @@ function handleToolScan() {
  * batchQueue array, including each item's remove (x icon) control.
  * Also updates #queue-count-live, the same count shown on the
  * "Done Scanning" button while a continuous scan session is open.
- * Each tool's name (from kioskToolNameByQr, see loadKioskToolNames()) shows alongside its code
- * when known, so the operator can confirm by name, not just a bare ID -- falls back to the code
- * alone if the name lookup hasn't resolved yet or the tool isn't in it for some reason. A
- * positioned tool also shows its drawer-map item number (kioskToolItemNumberByQr) so
- * non-unique tools (several identical sockets, etc.) can be told apart by matching the number
- * against the drawer's printed shadow-board sheet or the on-screen map.
+ * Each row describes a tool via describeToolLocation(), in the hierarchy James asked for:
+ * Box/Drawer location first (small, muted), then the item number (accent) and name (bold) --
+ * so non-unique tools (several identical sockets, etc.) can be told apart by matching the
+ * number against the drawer's printed shadow-board sheet or the on-screen map -- and the bare
+ * ID last, de-emphasized, only shown alongside a real name (falls back to the ID alone as the
+ * primary label if the name lookup hasn't resolved yet or the tool isn't in it for some reason).
  */
 function renderQueue() {
     document.getElementById('queue-count').textContent = batchQueue.length;
@@ -543,7 +659,11 @@ function renderQueue() {
         <div class="batch-item">
             <div>${isToolboxCode(qr)
                 ? `${icon('package')} <strong>${qr}</strong> <span style="color:var(--accent); font-size:11px;">(whole toolbox)</span>`
-                : `${icon('wrench')} <strong>${qr}</strong>${kioskToolItemNumberByQr[qr] ? ` <span style="color:var(--accent); font-size:11px; font-weight:bold;">Item #${kioskToolItemNumberByQr[qr]}</span>` : ''}${kioskToolNameByQr[qr] ? ` <span style="color:var(--muted); font-size:12px;">${kioskToolNameByQr[qr]}</span>` : ''}`}</div>
+                : (() => {
+                    const loc = describeToolLocation(qr);
+                    return `${loc.location ? `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.3px;">${loc.location}</div>` : ''}
+                            <div>${icon('wrench')} ${loc.itemBadge}<strong>${loc.name}</strong>${loc.showId ? ` <span style="color:var(--muted); font-size:11px;">(${qr})</span>` : ''}</div>`;
+                })()}</div>
             <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;" onclick="removeItem(${index})">${icon('x')}</div>
         </div>
     `).join('');
