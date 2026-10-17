@@ -1029,7 +1029,8 @@ app.get('/api/tools/:id/calibration-history', requireRole(2), async (req, res) =
     try {
         const result = await pool.query(
             `SELECT cr.cal_id, cr.cal_date, cr.due_date, cr.provider, cr.certificate_number, cr.cert_pending,
-                    cr.standard_used, cr.vendor_tracking_id, cr.notes, cr.recorded_at, cr.result, cr.photo_url, u.full_name AS recorded_by_name
+                    cr.standard_used, cr.vendor_tracking_id, cr.notes, cr.recorded_at, cr.result, cr.photo_url, u.full_name AS recorded_by_name,
+                    cr.supersedes_cal_id, cr.correction_reason
              FROM calibration_records cr
              LEFT JOIN users u ON cr.recorded_by_user_id = u.user_id
              WHERE cr.tool_id = $1
@@ -1156,7 +1157,11 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
 // allowed mutation on an otherwise append-only traceability record (see migrations/006's own
 // design intent), scoped narrowly to exactly this field for exactly this purpose -- everything
 // else about a logged calibration (date, provider, result) stays immutable. requireRole(2)
-// matches the weight needed to log a calibration in the first place.
+// matches the weight needed to log a calibration in the first place. For fixing anything ELSE on
+// a record (a mis-typed date, wrong provider, etc.), see POST .../correct below -- that path adds
+// a new linked row instead of mutating this one, since unlike a backfill (filling in something
+// that was always meant to be blank), a correction replaces a value that was actively wrong and
+// needs to stay visible, not disappear.
 app.put('/api/calibration-records/:cal_id/certificate', requireFetchHeader, requireRole(2), async (req, res) => {
     const certificateNumber = (req.body.certificate_number || '').trim();
     if (!certificateNumber) return res.status(400).json({ error: 'A certificate/reference number is required.' });
@@ -1183,6 +1188,95 @@ app.put('/api/calibration-records/:cal_id/certificate', requireFetchHeader, requ
     } catch (err) {
         console.error('Backfill Certificate Error:', err);
         res.status(500).json({ error: 'Failed to update certificate number.' });
+    }
+});
+
+// Corrects a calibration record logged with a mistake (e.g. a mis-typed date) -- James: "we
+// need a way to update the data if a mistake is made but not override the data so that no one
+// can hide information." Unlike the certificate backfill above (a narrow, deliberate mutation
+// of one field), this NEVER touches the original row at all: it inserts a brand-new
+// calibration_records row with the corrected values, linked back to the mistake via
+// supersedes_cal_id (migrations/024), so the admin panel's calibration history keeps showing
+// both the original entry (visibly marked as corrected, not hidden) and the fix, with a
+// required reason for why. requireRole(2)/canAccessDept match the certificate-backfill endpoint.
+// Known limitation, deliberately not handled: correcting a record's result from Fail to Pass (or
+// vice versa) does not open or resolve a trace_investigations row -- that interaction (voiding an
+// investigation the original Fail opened, or opening a new one a correction newly reveals) needs
+// its own design and isn't part of what was asked for here.
+app.post('/api/calibration-records/:cal_id/correct', requireFetchHeader, requireRole(2), async (req, res) => {
+    const { cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result, cert_pending, correction_reason } = req.body;
+    if (!cal_date || !due_date) return res.status(400).json({ error: 'Calibration date and due date are both required.' });
+    if (!provider) return res.status(400).json({ error: 'Calibration provider is required.' });
+    const certPending = !!cert_pending;
+    if (!certPending && !certificate_number) {
+        return res.status(400).json({ error: 'A certificate/reference number is required, unless marked as pending from the vendor.' });
+    }
+    if (!correction_reason || !correction_reason.trim()) {
+        return res.status(400).json({ error: 'A reason for the correction is required.' });
+    }
+    const calResult = result === 'Fail' ? 'Fail' : 'Pass';
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const origRes = await client.query(
+            `SELECT cr.cal_id, cr.cal_date, cr.tool_id, b.dept_id FROM calibration_records cr
+             LEFT JOIN tools t ON cr.tool_id = t.tool_id
+             LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+             LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+             WHERE cr.cal_id = $1`,
+            [req.params.cal_id]
+        );
+        if (origRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Calibration record not found.' }); }
+        const original = origRes.rows[0];
+        if (!canAccessDept(req.authUser, original.dept_id, 2)) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'You do not have sufficient access to that department.' });
+        }
+
+        const toolRes = await client.query('SELECT last_cal_date FROM tools WHERE tool_id = $1', [original.tool_id]);
+        const currentLastCal = toolRes.rows[0].last_cal_date;
+
+        const calRes = await client.query(
+            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, cert_pending, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result, supersedes_cal_id, correction_reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING cal_id`,
+            [original.tool_id, cal_date, due_date, provider, certPending ? null : certificate_number, certPending, standard_used || null, vendor_tracking_id || null, notes || null, req.authUser.user_id, calResult, original.cal_id, correction_reason.trim()]
+        );
+
+        // Advance the tool's live snapshot if either (a) this correction is now the most recent
+        // calibration event on file (same "most-recent-wins" rule POST .../calibration-history
+        // uses), or (b) the record being corrected WAS the one currently driving the tool's
+        // snapshot -- in which case the fix must take over regardless of whether the corrected
+        // date moves earlier or later, since the thing that set the current value is itself what's
+        // being fixed. Without (b), correcting the most recent entry to an EARLIER date would
+        // leave the tool's displayed due date stuck on the wrong, too-late value.
+        const wasActiveRecord = currentLastCal && original.cal_date &&
+            new Date(currentLastCal).getTime() === new Date(original.cal_date).getTime();
+        const shouldAdvance = wasActiveRecord || !currentLastCal || new Date(cal_date) >= new Date(currentLastCal);
+        if (shouldAdvance) {
+            const effectiveDueDate = calResult === 'Fail' ? cal_date : due_date;
+            await client.query(
+                'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
+                [cal_date, effectiveDueDate, original.tool_id]
+            );
+        } else {
+            await client.query('UPDATE tools SET is_calibrated = true WHERE tool_id = $1', [original.tool_id]);
+        }
+
+        await client.query(
+            "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_CORRECTED', $2, $3)",
+            [req.authUser.user_id, original.tool_id, `Calibration record corrected (cal_id ${original.cal_id} -> ${calRes.rows[0].cal_id}): ${correction_reason.trim()}`]
+        );
+
+        await client.query('COMMIT');
+        res.json({ success: true, cal_id: calRes.rows[0].cal_id });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Correct Calibration Record Error:', err);
+        res.status(500).json({ error: 'Failed to correct calibration record.' });
+    } finally {
+        client.release();
     }
 });
 

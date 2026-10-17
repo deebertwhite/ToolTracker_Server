@@ -19,6 +19,11 @@ let globalDeptGroupsCache = []; // cross-checkout department groups (migrations/
 // GET /api/tools row), so openEditSubAssemblyForm()/deleteSubAssembly() can look a row up by
 // sub_id without inlining its data into an onclick attribute.
 let currentEntitySubAssemblies = [];
+// Calibration history rows of whichever tool's history list was most recently loaded --
+// populated by loadCalibrationHistory() so toggleCorrectionForm() can pre-fill a correction
+// form from a record's current values by cal_id without inlining its data into an onclick
+// attribute (same reasoning as currentEntitySubAssemblies above).
+let currentCalHistoryRecords = [];
 
 // Which dept-content-/box-content-/drawer-content- nodes of the Master Storage & Asset Tree
 // are currently expanded, keyed by that content div's id -- see toggleTreeVisibility() and
@@ -3192,25 +3197,44 @@ async function loadCalibrationHistory(toolId) {
         const data = await res.json();
         if (!res.ok || !data.records.length) {
             listEl.innerHTML = `No completed calibration cycles on record yet.`;
+            currentCalHistoryRecords = [];
             return;
         }
-        listEl.innerHTML = data.records.map(r => `
-            <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; gap:10px; align-items:flex-start;">
+        currentCalHistoryRecords = data.records;
+
+        // A record is "superseded" if some OTHER record's supersedes_cal_id points at it (see
+        // migrations/024 and toggleCorrectionForm() below) -- computed here, not stored, since
+        // it depends on the full list. Corrections never delete or hide the original: both rows
+        // stay in this list, cross-referenced by date rather than by position (a correction's
+        // own cal_date can sort it anywhere in the list, not necessarily next to what it fixes).
+        const byId = new Map(data.records.map(r => [r.cal_id, r]));
+        const supersededIds = new Set(data.records.filter(r => r.supersedes_cal_id).map(r => r.supersedes_cal_id));
+
+        listEl.innerHTML = data.records.map(r => {
+            const isSuperseded = supersededIds.has(r.cal_id);
+            const correctedBy = isSuperseded ? data.records.find(x => x.supersedes_cal_id === r.cal_id) : null;
+            const corrects = r.supersedes_cal_id ? byId.get(r.supersedes_cal_id) : null;
+            return `
+            <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; gap:10px; align-items:flex-start; ${isSuperseded ? 'opacity:0.55;' : ''}">
                 ${r.photo_url
                     ? `<img src="${r.photo_url}" onclick="openImageModal('${r.photo_url}')" style="width:36px;height:36px;object-fit:cover;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
                     : `<button type="button" class="btn-icon" style="width:36px;height:36px;padding:0;flex-shrink:0;" title="Attach a photo of the certificate" onclick="triggerPhotoUpload('calibration', ${r.cal_id}, '${toolId}')">${icon('camera')}</button>`}
                 <div style="flex:1;">
-                    <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text);">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
+                    <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text); ${isSuperseded ? 'text-decoration:line-through;' : ''}">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
+                    ${isSuperseded ? `<div style="font-size:11px; color:var(--orange); font-weight:bold; margin-top:2px;">${icon('triangle-alert', 'icon-warning')} Corrected${correctedBy ? ` -- see the ${correctedBy.cal_date.split('T')[0]} entry${correctedBy.correction_reason ? ` (${correctedBy.correction_reason})` : ''}` : ''}</div>` : ''}
+                    ${corrects ? `<div style="font-size:11px; color:var(--accent); font-weight:bold; margin-top:2px;">${icon('pencil')} Correction of the ${corrects.cal_date.split('T')[0]} entry${r.correction_reason ? ` -- ${r.correction_reason}` : ''}</div>` : ''}
                     <div style="font-size:12px; color:var(--text); margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                         ${r.cert_pending
-                            ? `${r.provider} &mdash; <span style="color:var(--orange); font-weight:bold;">Certificate Pending</span> <button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCertBackfillForm(${r.cal_id})">+ Add Cert #</button>`
+                            ? `${r.provider} &mdash; <span style="color:var(--orange); font-weight:bold;">Certificate Pending</span> ${!isSuperseded ? `<button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCertBackfillForm(${r.cal_id})">+ Add Cert #</button>` : ''}`
                             : `${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span>`}
+                        ${!isSuperseded ? `<button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCorrectionForm(${r.cal_id}, '${toolId}')">${icon('pencil')} Correct</button>` : ''}
                     </div>
-                    ${r.cert_pending ? `
+                    ${r.cert_pending && !isSuperseded ? `
                     <div id="cert-backfill-form-${r.cal_id}" style="display:none; margin-top:6px; gap:6px;">
                         <input class="form-input" id="cert-backfill-input-${r.cal_id}" placeholder="Certificate / Reference #" style="flex:1; margin:0;">
                         <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitCertBackfill(${r.cal_id}, '${toolId}')">Save</button>
                     </div>` : ''}
+                    <div id="correction-form-${r.cal_id}" style="display:none;"></div>
                     ${r.result === 'Fail' ? `<div style="font-size:11px; color:var(--red); font-weight:bold; margin-top:2px;">${icon('circle-x', 'icon-danger')} FAILED -- out of tolerance</div>` : ''}
                     ${r.standard_used ? `<div style="font-size:11px;">Standard: ${r.standard_used}</div>` : ''}
                     ${r.vendor_tracking_id ? `<div style="font-size:11px;">Vendor Tracking #: <span style="font-family:monospace;">${r.vendor_tracking_id}</span></div>` : ''}
@@ -3218,7 +3242,8 @@ async function loadCalibrationHistory(toolId) {
                     <div style="font-size:10px; margin-top:2px;">Recorded by ${r.recorded_by_name || 'Unknown'}</div>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
     } catch (e) {
         listEl.innerHTML = `<span style="color:var(--red);">Failed to load.</span>`;
     }
@@ -3243,6 +3268,99 @@ async function submitCertBackfill(calId, toolId) {
         });
         if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to update certificate number.')); }
         loadCalibrationHistory(toolId);
+    } catch (e) {
+        alert('❌ Network error.');
+    }
+}
+
+/**
+ * Shows/hides the inline correction form (#correction-form-${calId}) for one calibration
+ * history row, lazily building it from the record's CURRENT values (currentCalHistoryRecords,
+ * populated by loadCalibrationHistory()) on first open rather than baking a full form into
+ * every row up front. Pre-filled so correcting one wrong field doesn't require re-typing
+ * everything else; a required Reason field (see migrations/024) is the one addition beyond
+ * what "+ Log Calibration" itself collects.
+ */
+function toggleCorrectionForm(calId, toolId) {
+    const container = document.getElementById(`correction-form-${calId}`);
+    if (!container) return;
+    if (container.style.display === 'block') {
+        container.style.display = 'none';
+        return;
+    }
+    const r = currentCalHistoryRecords.find(x => x.cal_id === calId);
+    if (!r) return;
+    container.innerHTML = `
+        <div style="margin-top:8px; background: rgba(255,255,255,0.03); padding:10px; border-radius:8px; border:1px solid var(--orange);">
+            <div style="font-size:11px; color:var(--orange); font-weight:bold; margin-bottom:8px;">${icon('triangle-alert', 'icon-warning')} Saving this adds a new, linked record -- the original entry above is never changed or hidden.</div>
+            <div class="cal-date-pair" style="margin-bottom:10px;">
+                <div class="form-group" style="margin:0;"><label class="form-label">Calibration Date</label><input type="date" class="form-input" id="correct-cal-date-${calId}" value="${r.cal_date.split('T')[0]}" onchange="document.getElementById('correct-cal-due-${calId}').value = oneYearFromDate(this.value)"></div>
+                <div class="form-group" style="margin:0;"><label class="form-label">Due Date</label><input type="date" class="form-input" id="correct-cal-due-${calId}" value="${r.due_date.split('T')[0]}"></div>
+            </div>
+            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Provider / Lab</label><input class="form-input" id="correct-cal-provider-${calId}" value="${r.provider || ''}"></div>
+            <div class="form-group" style="margin-bottom:4px;"><label class="form-label">Certificate / Reference #</label><input class="form-input" id="correct-cal-cert-${calId}" value="${r.cert_pending ? '' : (r.certificate_number || '')}" ${r.cert_pending ? 'disabled' : ''}></div>
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:12px; color:var(--muted); margin-bottom:10px;">
+                <input type="checkbox" id="correct-cal-cert-pending-${calId}" ${r.cert_pending ? 'checked' : ''} onchange="toggleCertPending('correct-cal-cert-${calId}', this.checked)"> Certificate not yet received from vendor
+            </label>
+            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Standard Used <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="correct-cal-standard-${calId}" value="${r.standard_used || ''}"></div>
+            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Vendor Tracking # <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="correct-cal-vendor-tracking-${calId}" value="${r.vendor_tracking_id || ''}"></div>
+            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes <span style="color:var(--muted);text-transform:none;">(optional)</span></label><input class="form-input" id="correct-cal-notes-${calId}" value="${r.notes || ''}"></div>
+            <div class="form-group" style="margin-bottom:10px;">
+                <label class="form-label">Result</label>
+                <select class="form-select" id="correct-cal-result-${calId}">
+                    <option value="Pass" ${r.result === 'Pass' ? 'selected' : ''}>Pass</option>
+                    <option value="Fail" ${r.result === 'Fail' ? 'selected' : ''}>Fail -- out of tolerance</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Reason for Correction</label><input class="form-input" id="correct-cal-reason-${calId}" placeholder="e.g. Calibration date was mis-typed as last year"></div>
+            <div style="display:flex; gap:8px;">
+                <button type="button" class="btn btn-secondary" style="width:auto;" onclick="toggleCorrectionForm(${calId}, '${toolId}')">Cancel</button>
+                <button type="button" class="btn btn-primary" style="width:auto;" onclick="submitCorrection(${calId}, '${toolId}')">Save Correction</button>
+            </div>
+        </div>
+    `;
+    container.style.display = 'block';
+}
+
+/**
+ * Submits a correction to POST /api/calibration-records/:cal_id/correct (migrations/024), which
+ * inserts a new linked record rather than touching the original. On success, rebuilds the infra
+ * tree and reopens this tool's entity modal fresh (same pattern submitCalLogForm() uses, not the
+ * lighter reload submitCertBackfill() does) since a correction can move the tool's live
+ * last_cal_date/cal_due_date/is_calibrated, which other parts of the open modal/tree display.
+ */
+async function submitCorrection(calId, toolId) {
+    const calDate = document.getElementById(`correct-cal-date-${calId}`).value;
+    const dueDate = document.getElementById(`correct-cal-due-${calId}`).value;
+    const provider = document.getElementById(`correct-cal-provider-${calId}`).value.trim();
+    const certPending = document.getElementById(`correct-cal-cert-pending-${calId}`).checked;
+    const certificateNumber = document.getElementById(`correct-cal-cert-${calId}`).value.trim();
+    const standardUsed = document.getElementById(`correct-cal-standard-${calId}`).value.trim();
+    const vendorTrackingId = document.getElementById(`correct-cal-vendor-tracking-${calId}`).value.trim();
+    const notes = document.getElementById(`correct-cal-notes-${calId}`).value.trim();
+    const result = document.getElementById(`correct-cal-result-${calId}`).value;
+    const reason = document.getElementById(`correct-cal-reason-${calId}`).value.trim();
+
+    if (!calDate || !dueDate) return alert('⚠️ Calibration date and due date are both required.');
+    if (!provider) return alert('⚠️ Calibration provider is required.');
+    if (!certPending && !certificateNumber) return alert('⚠️ A certificate/reference number is required, unless marked as pending from the vendor.');
+    if (!reason) return alert('⚠️ A reason for the correction is required.');
+
+    try {
+        const res = await fetch(`/api/calibration-records/${calId}/correct`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({
+                cal_date: calDate, due_date: dueDate, provider,
+                certificate_number: certPending ? null : certificateNumber, cert_pending: certPending,
+                standard_used: standardUsed || null, vendor_tracking_id: vendorTrackingId || null,
+                notes: notes || null, result, correction_reason: reason
+            })
+        });
+        if (!res.ok) { const data = await res.json(); return alert('❌ ' + (data.error || 'Failed to correct calibration record.')); }
+        await renderEditableInfraTree();
+        const tool = globalToolsCache.find(t => t.tool_id == toolId);
+        if (tool) openEntityModal('tool', tool.qr_code);
     } catch (e) {
         alert('❌ Network error.');
     }
