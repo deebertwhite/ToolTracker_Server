@@ -3622,7 +3622,11 @@ app.post('/api/calibration-imports/micro-precision/analyze', requireFetchHeader,
                     match = {
                         status: alreadyCurrent ? 'already_current' : 'new',
                         toolId: tool.tool_id, toolQrCode: tool.qr_code, toolName: tool.name, toolRetired: tool.status === 'Retired',
-                        matchedOn, currentLastCalDate: currentCalDate ? String(currentCalDate).slice(0, 10) : null,
+                        // cal_date comes back from pg as a native Date object (DATE columns aren't
+                        // routed through the app's string-returning TIMESTAMP parser override) --
+                        // String(dateObj) gives "Fri Mar 20 2026 ..." not "2026-03-20"; toISOString
+                        // gives the real calendar date since pg constructs it at UTC midnight.
+                        matchedOn, currentLastCalDate: currentCalDate ? (currentCalDate instanceof Date ? currentCalDate.toISOString().slice(0, 10) : String(currentCalDate).slice(0, 10)) : null,
                         existingCalId: existingRecord ? existingRecord.cal_id : null, certAttachable,
                         toolDeptName: tool.dept_name || null, deptMismatch
                     };
