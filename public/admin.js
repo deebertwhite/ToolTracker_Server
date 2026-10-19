@@ -764,6 +764,99 @@ async function openToolboxPrintSheet(boxId) {
     window.print();
 }
 
+/**
+ * Builds and prints double-sided individual tool cards for every (non-Retired) tool currently in
+ * a toolbox -- a second, physical way to scan a tool in/out besides the binder print sheet above,
+ * small enough to go on a keychain. James: "one tool will have its picture with the QR code and
+ * number on the front, and on the back it will have the name, code and number."
+ *
+ * Laid out as 3.5x2in cards, 2 columns x 5 rows (10/page) -- matches widely-available
+ * pre-perforated business-card sheets (so this can be cut with scissors on plain paper, or
+ * printed onto perforated stock for a clean break with no cutting at all), same spirit as the
+ * print sheet's own "use what's easy to produce" choices elsewhere.
+ *
+ * For every 10 tools, emits a FRONT page immediately followed by its matching BACK page, rather
+ * than all fronts then all backs -- this way the pages interleave front/back per physical SHEET
+ * (page 1+2 = sheet 1, page 3+4 = sheet 2, ...), which works whether printed via automatic duplex
+ * OR manually (print odd pages, flip the stack, print even pages). The back page's card columns
+ * are reversed within each row (not a full 180-degree flip) -- this is the standard trick for a
+ * portrait page duplexed by flipping on its LONG edge (the common default), so a card cut from the
+ * front lines up with its own back rather than its row-neighbor's. If a printer instead flips on
+ * the SHORT edge, backs will come out rotated 180 degrees from their fronts -- not handled, since
+ * there's no way to know which convention applies without asking; flagging this rather than
+ * silently guessing wrong in a way that's hard to notice before cutting.
+ *
+ * Deliberately NOT live status or anything date-based, same reasoning as the print sheet above --
+ * a card is meant to be cut out and carried indefinitely, not reprinted on a schedule.
+ */
+async function openToolCardsPrintSheet(boxId) {
+    const box = globalBoxesCache.find(b => b.box_id == boxId);
+    if (!box) return;
+    const drawerIds = new Set(globalDrawersCache.filter(d => d.box_id == boxId).map(d => d.drawer_id));
+    const tools = globalToolsCache
+        .filter(t => drawerIds.has(t.drawer_id) && t.status !== 'Retired')
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    if (!tools.length) return alert('This toolbox has no tools to make cards for.');
+
+    const CARD_W = 3.5, CARD_H = 2, COLS = 2, ROWS = 5;
+    const PER_PAGE = COLS * ROWS;
+
+    const cardShell = (inner) => `<div style="width:${CARD_W}in; height:${CARD_H}in; box-sizing:border-box; border:1px solid #ccc; overflow:hidden; display:flex; flex-direction:column;">${inner}</div>`;
+    // Shared bottom strip (code + plain-text ID) on both sides, so the scannable code is always
+    // in the same spot on a card regardless of which face is up -- see server.js for why this
+    // uses the text-free scan-code.png rather than the tool's own stored sticker-label image.
+    const codeStrip = (t) => `
+        <div style="flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:4px 6px; border-top:1px solid #ccc;">
+            <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:0.5in; height:0.5in; object-fit:contain; flex-shrink:0;">
+            <div style="font-family:monospace; font-size:13px; font-weight:bold;">${t.qr_code}</div>
+        </div>`;
+    const frontCard = (t) => cardShell(`
+        <div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center; background:#eee; overflow:hidden;">
+            ${t.photo_url ? `<img src="${t.photo_url}" style="width:100%; height:100%; object-fit:cover;">` : `<span style="color:#999; font-size:11px;">No Photo</span>`}
+        </div>
+        ${codeStrip(t)}
+    `);
+    const backCard = (t) => cardShell(`
+        <div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center; padding:6px; text-align:center;">
+            <div style="font-size:19px; font-weight:bold; line-height:1.2;">${t.name}</div>
+        </div>
+        ${codeStrip(t)}
+    `);
+    const blankCard = `<div style="width:${CARD_W}in; height:${CARD_H}in;"></div>`;
+
+    const gridPage = (chunk, cardFn, mirrorColumns) => {
+        const rowsHtml = [];
+        for (let r = 0; r < ROWS; r++) {
+            let row = chunk.slice(r * COLS, r * COLS + COLS);
+            while (row.length < COLS) row.push(null);
+            if (mirrorColumns) row = row.slice().reverse();
+            rowsHtml.push(`<div style="display:flex;">${row.map(t => t ? cardFn(t) : blankCard).join('')}</div>`);
+        }
+        return `<div style="break-before:page;">${rowsHtml.join('')}</div>`;
+    };
+
+    let pagesHtml = '';
+    for (let i = 0; i < tools.length; i += PER_PAGE) {
+        const chunk = tools.slice(i, i + PER_PAGE);
+        pagesHtml += gridPage(chunk, frontCard, false);
+        pagesHtml += gridPage(chunk, backCard, true);
+    }
+
+    document.getElementById('toolbox-print-sheet-content').innerHTML = pagesHtml;
+    const area = document.getElementById('toolbox-print-sheet-area');
+    area.style.display = 'block';
+    await waitForImages(area);
+
+    // Plain Letter, not the toolbox sheet's tabloid override -- reuses the same injected-style id
+    // (and the one afterprint cleanup below) since only one print job is ever active at a time.
+    const pageSizeStyle = document.createElement('style');
+    pageSizeStyle.id = 'toolbox-sheet-page-size';
+    pageSizeStyle.textContent = '@page { size: 8.5in 11in; margin: 0.5in; }';
+    document.head.appendChild(pageSizeStyle);
+
+    window.print();
+}
+
 window.addEventListener('afterprint', () => {
     const area = document.getElementById('toolbox-print-sheet-area');
     if (area) area.style.display = 'none';
@@ -2368,6 +2461,7 @@ function openEntityModal(type, id) {
         }
         // Read-only, so offered regardless of canEditInfra -- same level as viewing the modal at all.
         actionsHtml += `<button class="btn btn-secondary" style="width:auto;" onclick="openToolboxPrintSheet('${entity.box_id}')">${icon('printer')} Print Sheet</button>`;
+        actionsHtml += `<button class="btn btn-secondary" style="width:auto;" onclick="openToolCardsPrintSheet('${entity.box_id}')">${icon('id-card')} Print Tool Cards</button>`;
 
     } else if (type === 'drawer') {
         entity = globalDrawersCache.find(d => d.drawer_id == id);
