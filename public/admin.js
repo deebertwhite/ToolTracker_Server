@@ -4595,7 +4595,7 @@ function buildMpcToolDatalist() {
 function renderMpcReviewScreen() {
     const container = document.getElementById('mpc-import-review');
     if (!container || !mpcAnalysisResult) return;
-    const { rows, summary } = mpcAnalysisResult;
+    const { rows, summary, unmatchedCertificates } = mpcAnalysisResult;
 
     const newRows = rows.filter(r => r.match.status === 'new');
     const upToDateRows = rows.filter(r => r.match.status === 'already_current');
@@ -4623,6 +4623,7 @@ function renderMpcReviewScreen() {
                 ${rowSummaryLine(r)}
                 <span style="color:var(--muted);"> -- Last Cal ${r.lastCalDate}, Due ${r.nextDueDate}</span>
                 ${r.serialNumber ? ` <span style="color:var(--muted);">SN: ${r.serialNumber}</span>` : ''}
+                ${r.certificateFile ? ` ${icon('clipboard-list')} cert ready -- just needs a tool` : ''}
             </div>
             <input class="form-input" style="width:220px; margin:0;" list="mpc-tool-datalist" placeholder="Pick a tool..." oninput="onMpcToolPickerInput(${r.rowNum}, this.value)">
         </div>`;
@@ -4638,6 +4639,7 @@ function renderMpcReviewScreen() {
         ${newRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">New Calibration Data (${newRows.length})</div>${newRows.map(newRowHtml).join('')}</div>` : ''}
         ${needsLinkingRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">Needs Linking (${needsLinkingRows.length}) -- pick which ToolTracker tool each one is</div>${needsLinkingRows.map(needsLinkingRowHtml).join('')}</div>` : ''}
         ${upToDateRows.length ? `<details style="margin-bottom:16px;"><summary style="cursor:pointer; font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted);">Already Up to Date (${upToDateRows.length})</summary>${upToDateRows.map(upToDateRowHtml).join('')}</details>` : ''}
+        ${unmatchedCertificates && unmatchedCertificates.length ? `<details style="margin-bottom:16px;"><summary style="cursor:pointer; font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--orange);">${icon('triangle-alert', 'icon-warning')} Certificate Files Not Used (${unmatchedCertificates.length})</summary><div style="font-size:11px; color:var(--muted); margin:6px 0;">These PDFs weren't attached to anything -- their filename didn't match a spreadsheet row's Cal Control and Last Cal Date.</div>${unmatchedCertificates.map(c => `<div style="padding:3px 0; font-size:12px; font-family:monospace;">${c.originalName} <span style="font-family:inherit; color:var(--muted);">-- ${c.reason}</span></div>`).join('')}</details>` : ''}
         <button type="button" class="btn btn-primary" id="mpc-commit-btn" style="width:auto;" onclick="commitMpcImport()">Import Selected</button>
         <div id="mpc-import-results" style="margin-top:12px;"></div>
     `;
