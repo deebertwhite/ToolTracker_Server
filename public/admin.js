@@ -4700,12 +4700,19 @@ function renderMpcReviewScreen() {
     const rowSummaryLine = (r) => `
         <span style="color:var(--muted); font-size:11px;">Cal ID</span> <span style="font-family:monospace;">${r.calControl}</span>${(r.manufacturer || r.description) ? ` -- ${[r.manufacturer, r.modelNumber, r.description].filter(Boolean).join(' ')}` : ''}${r.department ? ` <span style="color:var(--muted);">(${r.department})</span>` : ''}`;
 
+    // A second verification signal alongside the Cal Control/serial match itself -- doesn't
+    // block anything (vendor vs. ToolTracker department naming can legitimately differ), just
+    // flags an auto-match worth a second look before it's trusted.
+    const deptMismatchBadge = (r) => r.match.deptMismatch
+        ? ` <span style="background:rgba(239,68,68,0.15); color:var(--red); padding:1px 6px; border-radius:8px; font-size:10px; font-weight:bold;" title="Vendor lists department &quot;${r.department}&quot;, but this tool is in &quot;${r.match.toolDeptName}&quot; in ToolTracker -- verify this match before importing.">${icon('triangle-alert')} dept mismatch</span>`
+        : '';
+
     const newRowHtml = (r) => `
         <label style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); cursor:pointer;">
             <input type="checkbox" id="mpc-row-check-${r.rowNum}" checked style="width:16px; height:16px; flex-shrink:0;">
             <div style="flex:1; font-size:12px;">
                 ${rowSummaryLine(r)}<br>
-                <strong>${r.match.toolQrCode}</strong> -- ${r.match.toolName}${r.match.toolRetired ? ` <span style="color:var(--orange); font-weight:bold;">(Retired)</span>` : ''}
+                <strong>${r.match.toolQrCode}</strong> -- ${r.match.toolName}${r.match.toolRetired ? ` <span style="color:var(--orange); font-weight:bold;">(Retired)</span>` : ''}${deptMismatchBadge(r)}
                 <span style="color:var(--muted);"> -- Last Cal ${r.lastCalDate}, Due ${r.nextDueDate}</span>
                 ${r.certificateFile ? ` ${icon('clipboard-list')} cert attached` : ''}
                 ${r.calibrationStatus ? ` <span style="background:rgba(255,165,0,0.15); color:var(--orange); padding:1px 6px; border-radius:8px; font-size:10px; font-weight:bold;">vendor: ${r.calibrationStatus}</span>` : ''}
@@ -4726,7 +4733,7 @@ function renderMpcReviewScreen() {
 
     const upToDateRowHtml = (r) => `
         <div style="padding:4px 0; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted);">
-            ${rowSummaryLine(r)} -&gt; <strong>${r.match.toolQrCode}</strong> (already current as of ${r.match.currentLastCalDate})
+            ${rowSummaryLine(r)} -&gt; <strong>${r.match.toolQrCode}</strong> (already current as of ${r.match.currentLastCalDate})${deptMismatchBadge(r)}
         </div>`;
 
     // The date is already correct -- only the proof document is missing. No date fields shown
@@ -4737,7 +4744,7 @@ function renderMpcReviewScreen() {
             <input type="checkbox" id="mpc-row-check-${r.rowNum}" checked style="width:16px; height:16px; flex-shrink:0;">
             <div style="flex:1; font-size:12px;">
                 ${rowSummaryLine(r)}<br>
-                <strong>${r.match.toolQrCode}</strong> -- ${r.match.toolName}
+                <strong>${r.match.toolQrCode}</strong> -- ${r.match.toolName}${deptMismatchBadge(r)}
                 <span style="color:var(--muted);"> -- already current as of ${r.match.currentLastCalDate}</span>
                 ${icon('clipboard-list')} cert ready to attach
             </div>
