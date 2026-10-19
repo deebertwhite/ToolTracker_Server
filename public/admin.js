@@ -4676,9 +4676,11 @@ function buildMpcToolDatalist() {
 }
 
 /**
- * Renders the three-bucket review screen from mpcAnalysisResult: "New Calibration Data"
+ * Renders the four-bucket review screen from mpcAnalysisResult: "New Calibration Data"
  * (pre-checked, ready to import), "Needs Linking" (a tool-picker per row, checkbox disabled
- * until a valid tool is picked), and "Already Up to Date" (collapsed, informational only, no
+ * until a valid tool is picked), "Certificate Available" (pre-checked -- the date is already on
+ * file but a matching cert turned up in this batch with nothing attached yet, see certAttachable
+ * in server.js's analyze endpoint), and "Already Up to Date" (collapsed, informational only, no
  * checkbox at all -- there's nothing to commit for these).
  */
 function renderMpcReviewScreen() {
@@ -4687,7 +4689,8 @@ function renderMpcReviewScreen() {
     const { rows, summary, unmatchedCertificates } = mpcAnalysisResult;
 
     const newRows = rows.filter(r => r.match.status === 'new');
-    const upToDateRows = rows.filter(r => r.match.status === 'already_current');
+    const certAttachableRows = rows.filter(r => r.match.status === 'already_current' && r.match.certAttachable);
+    const upToDateRows = rows.filter(r => r.match.status === 'already_current' && !r.match.certAttachable);
     const needsLinkingRows = rows.filter(r => r.match.status === 'needs_linking');
 
     // "Cal ID", not left bare -- this is Micro Precision's OWN tracking number for the gage
@@ -4726,11 +4729,26 @@ function renderMpcReviewScreen() {
             ${rowSummaryLine(r)} -&gt; <strong>${r.match.toolQrCode}</strong> (already current as of ${r.match.currentLastCalDate})
         </div>`;
 
+    // The date is already correct -- only the proof document is missing. No date fields shown
+    // here (there's nothing to review about the date); checking this row just attaches the cert
+    // to the existing record on commit (attachCertOnly in commitMpcImport()).
+    const certAttachableRowHtml = (r) => `
+        <label style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); cursor:pointer;">
+            <input type="checkbox" id="mpc-row-check-${r.rowNum}" checked style="width:16px; height:16px; flex-shrink:0;">
+            <div style="flex:1; font-size:12px;">
+                ${rowSummaryLine(r)}<br>
+                <strong>${r.match.toolQrCode}</strong> -- ${r.match.toolName}
+                <span style="color:var(--muted);"> -- already current as of ${r.match.currentLastCalDate}</span>
+                ${icon('clipboard-list')} cert ready to attach
+            </div>
+        </label>`;
+
     container.innerHTML = `
         ${buildMpcToolDatalist()}
-        <div style="font-size:13px; margin-bottom:12px;">${summary.totalRows} gages read. <strong style="color:var(--green);">${summary.newImport}</strong> ready to import, <strong>${summary.needsLinking}</strong> need linking, ${summary.alreadyUpToDate} already up to date${summary.skipped ? `, ${summary.skipped} skipped (no calibration date on file yet)` : ''}.</div>
+        <div style="font-size:13px; margin-bottom:12px;">${summary.totalRows} gages read. <strong style="color:var(--green);">${summary.newImport}</strong> ready to import, <strong>${summary.needsLinking}</strong> need linking, ${summary.alreadyUpToDate} already up to date${summary.certAttachable ? ` (<strong style="color:var(--accent);">${summary.certAttachable}</strong> of those just need a certificate attached)` : ''}${summary.skipped ? `, ${summary.skipped} skipped (no calibration date on file yet)` : ''}.</div>
         ${newRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">New Calibration Data (${newRows.length})</div>${newRows.map(newRowHtml).join('')}</div>` : ''}
         ${needsLinkingRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">Needs Linking (${needsLinkingRows.length}) -- pick which ToolTracker tool each one is</div>${needsLinkingRows.map(needsLinkingRowHtml).join('')}</div>` : ''}
+        ${certAttachableRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">Certificate Available (${certAttachableRows.length}) -- date already on file, just attaching the proof document</div>${certAttachableRows.map(certAttachableRowHtml).join('')}</div>` : ''}
         ${upToDateRows.length ? `<details style="margin-bottom:16px;"><summary style="cursor:pointer; font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted);">Already Up to Date (${upToDateRows.length})</summary>${upToDateRows.map(upToDateRowHtml).join('')}</details>` : ''}
         ${unmatchedCertificates && unmatchedCertificates.length ? `<details style="margin-bottom:16px;"><summary style="cursor:pointer; font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--orange);">${icon('triangle-alert', 'icon-warning')} Certificate Files Not Used (${unmatchedCertificates.length})</summary><div style="font-size:11px; color:var(--muted); margin:6px 0;">These PDFs weren't attached to anything -- their filename didn't match a spreadsheet row's Cal Control and Last Cal Date.</div>${unmatchedCertificates.map(c => `<div style="padding:3px 0; font-size:12px; font-family:monospace;">${c.originalName} <span style="font-family:inherit; color:var(--muted);">-- ${c.reason}</span></div>`).join('')}</details>` : ''}
         <button type="button" class="btn btn-primary" id="mpc-commit-btn" style="width:auto;" onclick="commitMpcImport()">Import Selected</button>
@@ -4766,6 +4784,20 @@ async function commitMpcImport() {
     mpcAnalysisResult.rows.forEach(row => {
         const checkbox = document.getElementById(`mpc-row-check-${row.rowNum}`);
         if (!checkbox || !checkbox.checked) return;
+
+        // Already current on its date -- just attaching the proof document to the existing
+        // record, not creating a new one, so this skips the toolId/lastCalDate resolution below.
+        if (row.match.status === 'already_current' && row.match.certAttachable) {
+            if (seenToolIds.has(row.match.toolId)) duplicateBinding = true;
+            seenToolIds.add(row.match.toolId);
+            actions.push({
+                rowNum: row.rowNum, toolId: row.match.toolId, attachCertOnly: true, existingCalId: row.match.existingCalId,
+                calControl: row.calControl, serialNumber: row.serialNumber,
+                certificateStoredUrl: row.certificateFile ? row.certificateFile.storedUrl : null,
+                certNumber: row.certificateFile ? row.certificateFile.certNumber : null
+            });
+            return;
+        }
 
         let toolId = null, qrCode = null;
         if (row.match.status === 'new') {

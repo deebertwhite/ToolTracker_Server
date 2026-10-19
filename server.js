@@ -3503,9 +3503,45 @@ async function findToolBySerialNumber(client, serial) {
     return result.rows[0] || null;
 }
 
-async function getMostRecentCalDate(client, toolId) {
-    const result = await client.query('SELECT cal_date FROM calibration_records WHERE tool_id = $1 ORDER BY cal_date DESC LIMIT 1', [toolId]);
-    return result.rows[0]?.cal_date || null;
+// Returns the full most-recent record (not just its date) -- the review screen needs to know
+// not only whether a tool is already current, but whether THAT existing record already has a
+// certificate attached, so a cert found in this batch for an already-current date isn't just
+// silently dropped (see certAttachable below).
+async function getMostRecentCalRecord(client, toolId) {
+    const result = await client.query('SELECT cal_id, cal_date, photo_url FROM calibration_records WHERE tool_id = $1 ORDER BY cal_date DESC LIMIT 1', [toolId]);
+    return result.rows[0] || null;
+}
+
+// The commit body is client-supplied JSON -- validate the certificate path strictly before
+// trusting it as a DB value. Shared by the normal per-row import and the cert-only attach path
+// (an already-current record that just needs its proof document) so both go through the same
+// strict check rather than risking the two drifting apart.
+function resolveCertificateAttachment(action) {
+    let photoUrl = null, certificateNumber = null, certPending = true;
+    if (action.certificateStoredUrl && /^\/uploads\/calcert-\d+-\d+\.pdf$/.test(action.certificateStoredUrl)) {
+        const diskPath = path.join(UPLOAD_DIR, path.basename(action.certificateStoredUrl));
+        if (fs.existsSync(diskPath)) {
+            photoUrl = action.certificateStoredUrl;
+            certificateNumber = action.certNumber || null;
+            certPending = !certificateNumber;
+        }
+    }
+    return { photoUrl, certificateNumber, certPending };
+}
+
+// Backfills a tool's serial number the first time a binding reveals one, shared by the normal
+// import path and the cert-only attach path. Never fails the row over a conflict -- the
+// calibration record already written is the important part; checked proactively (not caught
+// after a failed UPDATE) since a real constraint violation here would poison the transaction.
+async function backfillSerialNumber(client, tool, serialNumber) {
+    if (!serialNumber || tool.serial_number) return null;
+    const conflict = await client.query(
+        'SELECT tool_id FROM tools WHERE tool_id != $1 AND LOWER(TRIM(serial_number)) = LOWER(TRIM($2))',
+        [tool.tool_id, serialNumber]
+    );
+    if (conflict.rows.length > 0) return ' Serial number not saved -- already registered to a different tool.';
+    await client.query('UPDATE tools SET serial_number = $1 WHERE tool_id = $2', [serialNumber, tool.tool_id]);
+    return null;
 }
 
 // Parses the uploaded inventory + certificates and matches every row against ToolTracker tools,
@@ -3542,7 +3578,7 @@ app.post('/api/calibration-imports/micro-precision/analyze', requireFetchHeader,
 
             const skippedRows = [];
             const resultRows = [];
-            let newCount = 0, upToDateCount = 0, needsLinkingCount = 0;
+            let newCount = 0, upToDateCount = 0, needsLinkingCount = 0, certAttachableCount = 0;
 
             for (const row of vendorRows) {
                 if (!row.lastCalDate) {
@@ -3564,16 +3600,23 @@ app.post('/api/calibration-imports/micro-precision/analyze', requireFetchHeader,
 
                 let match;
                 if (tool) {
-                    const currentCalDate = await getMostRecentCalDate(pool, tool.tool_id);
+                    const existingRecord = await getMostRecentCalRecord(pool, tool.tool_id);
+                    const currentCalDate = existingRecord ? existingRecord.cal_date : null;
                     const alreadyCurrent = !!currentCalDate && new Date(currentCalDate) >= new Date(row.lastCalDate);
+                    // The date being current doesn't mean the PROOF is on file -- a cert can turn
+                    // up in this batch for a date that was already logged (manually, or by an
+                    // earlier import) with no certificate attached. Surface that as its own
+                    // actionable case instead of silently discarding a found certificate.
+                    const certAttachable = alreadyCurrent && !!cert && existingRecord && !existingRecord.photo_url;
                     match = {
                         status: alreadyCurrent ? 'already_current' : 'new',
                         toolId: tool.tool_id, toolQrCode: tool.qr_code, toolName: tool.name, toolRetired: tool.status === 'Retired',
-                        matchedOn, currentLastCalDate: currentCalDate ? String(currentCalDate).slice(0, 10) : null
+                        matchedOn, currentLastCalDate: currentCalDate ? String(currentCalDate).slice(0, 10) : null,
+                        existingCalId: existingRecord ? existingRecord.cal_id : null, certAttachable
                     };
-                    if (alreadyCurrent) upToDateCount++; else newCount++;
+                    if (alreadyCurrent) { upToDateCount++; if (certAttachable) certAttachableCount++; } else newCount++;
                 } else {
-                    match = { status: 'needs_linking', toolId: null, toolQrCode: null, toolName: null, toolRetired: false, matchedOn: null, currentLastCalDate: null };
+                    match = { status: 'needs_linking', toolId: null, toolQrCode: null, toolName: null, toolRetired: false, matchedOn: null, currentLastCalDate: null, existingCalId: null, certAttachable: false };
                     needsLinkingCount++;
                 }
 
@@ -3592,7 +3635,7 @@ app.post('/api/calibration-imports/micro-precision/analyze', requireFetchHeader,
 
             res.json({
                 success: true,
-                summary: { totalRows: vendorRows.length, newImport: newCount, alreadyUpToDate: upToDateCount, needsLinking: needsLinkingCount, skipped: skippedRows.length },
+                summary: { totalRows: vendorRows.length, newImport: newCount, alreadyUpToDate: upToDateCount, needsLinking: needsLinkingCount, certAttachable: certAttachableCount, skipped: skippedRows.length },
                 rows: resultRows, skippedRows, unmatchedCertificates
             });
         } catch (err) {
@@ -3646,52 +3689,50 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
                 throw new Error('You do not have sufficient access to that department.');
             }
 
-            // The commit body is client-supplied JSON -- validate the certificate path strictly
-            // before trusting it as a DB value rather than erroring the whole row over it; a row
-            // that fails this just imports without its certificate attached (cert_pending=true).
-            let photoUrl = null, certificateNumber = null, certPending = true;
-            if (action.certificateStoredUrl && /^\/uploads\/calcert-\d+-\d+\.pdf$/.test(action.certificateStoredUrl)) {
-                const diskPath = path.join(UPLOAD_DIR, path.basename(action.certificateStoredUrl));
-                if (fs.existsSync(diskPath)) {
-                    photoUrl = action.certificateStoredUrl;
-                    certificateNumber = action.certNumber || null;
-                    certPending = !certificateNumber;
-                }
-            }
-
-            const notesParts = [`Imported from Micro Precision (Cal Control ${action.calControl}).`];
-            if (action.calibrationStatus) notesParts.push(`Vendor Calibration Status: ${action.calibrationStatus}.`);
-            if (action.trackingStatus) notesParts.push(`Vendor Tracking Status: ${action.trackingStatus}.`);
-
-            const { calId } = await recordCalibrationEvent(client, {
-                toolId: tool.tool_id, calDate: action.lastCalDate, dueDate: action.nextDueDate,
-                provider: MICRO_PRECISION_PROVIDER_NAME, certificateNumber, certPending, standardUsed: null,
-                vendorTrackingId: action.calControl, notes: notesParts.join(' '), result: 'Pass',
-                userId: req.authUser.user_id, photoUrl, auditLogSource: 'Calibration imported from Micro Precision'
-            });
-
-            // Backfill the tool's serial number if this binding revealed one for the first time --
-            // checked proactively (not caught after a failed UPDATE) since a real constraint
-            // violation here would poison the rest of this transaction. Never fails the row over
-            // a conflict -- the calibration record already committed is the important part.
-            let serialBackfillNote = null;
-            if (action.serialNumber && !tool.serial_number) {
-                const conflict = await client.query(
-                    'SELECT tool_id FROM tools WHERE tool_id != $1 AND LOWER(TRIM(serial_number)) = LOWER(TRIM($2))',
-                    [tool.tool_id, action.serialNumber]
+            let resultEntry;
+            if (action.attachCertOnly) {
+                // An already-current row where a matching certificate turned up in this batch --
+                // the date doesn't need updating, so this attaches the proof document to the
+                // EXISTING record instead of inserting a duplicate/new one (see certAttachable
+                // in the analyze endpoint above).
+                const { photoUrl, certificateNumber, certPending } = resolveCertificateAttachment(action);
+                if (!photoUrl) throw new Error('Certificate file could not be found on disk -- try re-uploading it.');
+                const updateRes = await client.query(
+                    `UPDATE calibration_records SET photo_url = $1, certificate_number = $2, cert_pending = $3,
+                         vendor_tracking_id = COALESCE(vendor_tracking_id, $4)
+                     WHERE cal_id = $5 AND tool_id = $6 RETURNING cal_id`,
+                    [photoUrl, certificateNumber, certPending, action.calControl, action.existingCalId, tool.tool_id]
                 );
-                if (conflict.rows.length === 0) {
-                    await client.query('UPDATE tools SET serial_number = $1 WHERE tool_id = $2', [action.serialNumber, tool.tool_id]);
-                } else {
-                    serialBackfillNote = ` Serial number not saved -- already registered to a different tool.`;
-                }
+                if (updateRes.rows.length === 0) throw new Error('That calibration record no longer exists on this tool -- it may have been corrected or removed since this import was reviewed.');
+                await client.query(
+                    "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_CERT_ATTACHED', $2, $3)",
+                    [req.authUser.user_id, tool.tool_id, `Certificate attached from Micro Precision (Cal Control ${action.calControl}) to an existing calibration record.`]
+                );
+                const serialBackfillNote = await backfillSerialNumber(client, tool, action.serialNumber);
+                resultEntry = { calId: action.existingCalId, message: `Certificate attached to existing record.${serialBackfillNote || ''}` };
+            } else {
+                const { photoUrl, certificateNumber, certPending } = resolveCertificateAttachment(action);
+
+                const notesParts = [`Imported from Micro Precision (Cal Control ${action.calControl}).`];
+                if (action.calibrationStatus) notesParts.push(`Vendor Calibration Status: ${action.calibrationStatus}.`);
+                if (action.trackingStatus) notesParts.push(`Vendor Tracking Status: ${action.trackingStatus}.`);
+
+                const { calId } = await recordCalibrationEvent(client, {
+                    toolId: tool.tool_id, calDate: action.lastCalDate, dueDate: action.nextDueDate,
+                    provider: MICRO_PRECISION_PROVIDER_NAME, certificateNumber, certPending, standardUsed: null,
+                    vendorTrackingId: action.calControl, notes: notesParts.join(' '), result: 'Pass',
+                    userId: req.authUser.user_id, photoUrl, auditLogSource: 'Calibration imported from Micro Precision'
+                });
+
+                const serialBackfillNote = await backfillSerialNumber(client, tool, action.serialNumber);
+                resultEntry = { calId, message: `Calibration record added.${serialBackfillNote || ''}` };
             }
 
             await client.query('COMMIT');
             imported++;
             results.push({
                 rowNum: action.rowNum, calControl: action.calControl, toolId: tool.tool_id, toolQrCode: tool.qr_code,
-                result: 'imported', calId, message: `Calibration record added.${serialBackfillNote || ''}`
+                result: 'imported', ...resultEntry
             });
         } catch (err) {
             await client.query('ROLLBACK');
