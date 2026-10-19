@@ -1918,12 +1918,32 @@ app.post('/api/departments', requireFetchHeader, requireRole(4), async (req, res
 // baked into every existing toolbox/tool barcode ID under this department, so changing it
 // after creation would desync those IDs from the department's current prefix. Requires
 // super_admin (getRoleWeight >= 4), matching create/delete.
+//
+// no_tool_inventory (migrations/025) declares a department permanently exempt from tool
+// tracking (a pure admin/office department, say) -- it's what GET /api/audits/today-status and
+// GET /api/audit-schedules check to leave such a department out of audit-status chips and the
+// Audit Schedule card. Deliberately counts EVERY tool status, not just the audit gate's own
+// "auditable" (non-Retired/Pending-Transfer/In-Calibration) subset -- "actually has no tools"
+// means literally none, a stricter and different question than "does this need auditing right
+// now."
 app.put('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, res) => {
-    const { name, cross_checkout_group_id } = req.body;
+    const { name, cross_checkout_group_id, no_tool_inventory } = req.body;
     try {
+        if (no_tool_inventory) {
+            const toolCheck = await pool.query(
+                `SELECT COUNT(*) FROM tools t
+                   JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                   JOIN toolboxes b ON dr.box_id = b.box_id
+                  WHERE b.dept_id = $1`,
+                [req.params.id]
+            );
+            if (parseInt(toolCheck.rows[0].count, 10) > 0) {
+                return res.status(400).json({ error: 'Cannot mark as "no tool inventory" -- this department still has tools assigned. Move or retire them first.' });
+            }
+        }
         await pool.query(
-            'UPDATE departments SET name = $1, cross_checkout_group_id = $2 WHERE dept_id = $3',
-            [name, cross_checkout_group_id || null, req.params.id]
+            'UPDATE departments SET name = $1, cross_checkout_group_id = $2, no_tool_inventory = $3 WHERE dept_id = $4',
+            [name, cross_checkout_group_id || null, !!no_tool_inventory, req.params.id]
         );
         res.json({ success: true });
     } catch (err) {
@@ -2026,10 +2046,16 @@ app.post('/api/toolboxes', requireFetchHeader, requireRole(3), async (req, res) 
 
         // 1. Create the Toolbox with its Barcode ID
         const boxRes = await client.query(
-            'INSERT INTO toolboxes (dept_id, name, qr_code) VALUES ($1, $2, $3) RETURNING *', 
+            'INSERT INTO toolboxes (dept_id, name, qr_code) VALUES ($1, $2, $3) RETURNING *',
             [dept_id, name, qr_code || null]
         );
         const newBox = boxRes.rows[0];
+
+        // A department flagged no_tool_inventory (migrations/025) is asserting it will NEVER
+        // hold tools -- provisioning a toolbox under it is a clear signal that's no longer true,
+        // so clear the flag automatically rather than leaving it contradictorily set once a real
+        // tool lands in this box later. Harmless no-op if the flag wasn't set.
+        await client.query('UPDATE departments SET no_tool_inventory = false WHERE dept_id = $1 AND no_tool_inventory = true', [dept_id]);
 
         // 2. Auto-generate the requested number of drawers
         const numDrawers = parseInt(drawer_count) || 0;
@@ -2163,6 +2189,13 @@ app.post('/api/tools', requireFetchHeader, requireRole(2), async (req, res) => {
             if (replaced_tool_id) {
                 await client.query('UPDATE tools SET replaced_by_id = $1 WHERE tool_id = $2', [newToolId, replaced_tool_id]);
             }
+
+            // Same reasoning as POST /api/toolboxes above -- a department flagged
+            // no_tool_inventory is asserting it will never hold tools; a tool actually landing
+            // in it means that's no longer true, so clear the flag rather than leave it
+            // contradictorily set.
+            await client.query('UPDATE departments SET no_tool_inventory = false WHERE dept_id = $1 AND no_tool_inventory = true', [drawerDeptRes.rows[0].dept_id]);
+
             await client.query('COMMIT');
         } catch (err) {
             await client.query('ROLLBACK'); throw err;
@@ -4060,7 +4093,12 @@ app.post('/api/audits/submit', async (req, res) => {
 // window is resolved from its configured schedule).
 app.get('/api/audits/today-status', async (req, res) => {
     try {
-        const depts = await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC');
+        // no_tool_inventory departments (migrations/025) are excluded -- without this, a
+        // department that will never hold a tool always resolves pending.length===0 below (there's
+        // nothing to be pending) and shows a permanent, misleading "audited" chip on the kiosk
+        // idle screen and the dashboard's audit widget, indistinguishable from a department
+        // that's legitimately caught up.
+        const depts = await pool.query('SELECT dept_id, name FROM departments WHERE NOT no_tool_inventory ORDER BY name ASC');
 
         // Each department resolves its OWN current window from its own schedule now (see
         // getDeptAuditSchedule/resolveAuditWindow) -- no longer one shared window for every
@@ -4223,9 +4261,13 @@ async function materializeDefaultSchedule(client, deptId) {
 // rows-or-default abstraction) instead of re-deriving "is this department on default" by hand.
 app.get('/api/audit-schedules', requireRole(3), async (req, res) => {
     try {
+        // NOT no_tool_inventory (migrations/025) excluded for the same reason as
+        // GET /api/audits/today-status -- a department that will never hold a tool has no real
+        // schedule to maintain, so it's left off this card entirely instead of inviting an admin
+        // to configure a cadence for something that will never need auditing.
         const deptsRes = req.authUser.role === 'super_admin'
-            ? await pool.query('SELECT dept_id, name FROM departments ORDER BY name ASC')
-            : await pool.query('SELECT dept_id, name FROM departments WHERE dept_id = ANY($1::int[]) ORDER BY name ASC', [req.authUser.accessibleDeptIds]);
+            ? await pool.query('SELECT dept_id, name FROM departments WHERE NOT no_tool_inventory ORDER BY name ASC')
+            : await pool.query('SELECT dept_id, name FROM departments WHERE dept_id = ANY($1::int[]) AND NOT no_tool_inventory ORDER BY name ASC', [req.authUser.accessibleDeptIds]);
 
         const departments = await Promise.all(deptsRes.rows.map(async (dept) => {
             const schedule = await getDeptAuditSchedule(pool, dept.dept_id);

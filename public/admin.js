@@ -197,7 +197,7 @@ function toggleTreeVisibility(containerId, headerElement) {
  * authorization from the session cookie, not from anything sent by this client), swaps
  * #auth-wall for #admin-app, and applies the role-weight hierarchy gating pattern to hide
  * UI the current role isn't entitled to:
- *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
+ *   - weight < 2 (below tool_rep): hides #hub-inventory, #hub-reports, and #hub-departments hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
  *     #card-manage-users, #card-inventory-import (bulk CSV import), #card-trace-investigations,
  *     #card-tool-groups, #card-mpc-import, and #audit-schedule-card.
@@ -219,6 +219,7 @@ function bootstrapAdminUI(user) {
     if (currentAdminWeight < 2) {
         safeSetDisplay('hub-inventory', 'none');
         safeSetDisplay('hub-reports', 'none');
+        safeSetDisplay('hub-departments', 'none');
     }
     if (currentAdminWeight < 4) {
         safeSetDisplay('card-manage-depts', 'none');
@@ -1082,8 +1083,57 @@ async function submitStructureDept() {
     const payload = { name: document.getElementById('str-dept-name').value, prefix_code: document.getElementById('str-dept-prefix').value };
     if (!payload.name || !payload.prefix_code) return alert("⚠️ Required fields missing.");
     const res = await fetch('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' }, body: JSON.stringify(payload) });
-    if (res.ok) { alert('✅ Department Established.'); document.getElementById('str-dept-name').value = ''; document.getElementById('str-dept-prefix').value = ''; syncStorageHierarchyDropdowns(); renderEditableInfraTree(); }
+    if (res.ok) {
+        alert('✅ Department Established.');
+        document.getElementById('str-dept-name').value = '';
+        document.getElementById('str-dept-prefix').value = '';
+        syncStorageHierarchyDropdowns();
+        await renderEditableInfraTree();
+        renderDepartmentRoster(); // no-op if the roster table isn't in the DOM, e.g. called from Inventory's own copy of this form
+    }
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
+}
+
+/**
+ * Entry point for the Departments hub card: primes the SAME caches the Inventory tree and
+ * department groups already use (renderEditableInfraTree() populates globalDeptsCache/
+ * globalBoxesCache/globalDrawersCache/globalToolsCache; loadDeptGroups() populates
+ * globalDeptGroupsCache), then renders the roster table from them. Reuses
+ * renderEditableInfraTree() purely for its side effect on the caches -- it also (harmlessly)
+ * re-renders the Inventory tree's own DOM, which isn't visible from here.
+ */
+async function loadDepartmentsWorkspace() {
+    await Promise.all([renderEditableInfraTree(), loadDeptGroups()]);
+    renderDepartmentRoster();
+}
+
+/** True if department deptId has ANY tool assigned to it, of any status, anywhere under any of its toolboxes/drawers -- the same question PUT /api/departments/:id enforces server-side before allowing no_tool_inventory to be turned on. Computed client-side from the already-loaded caches so the entity modal's checkbox can be disabled (with an explanation) before a doomed save, not just after one. */
+function deptHasAnyTools(deptId) {
+    const boxIds = new Set(globalBoxesCache.filter(b => b.dept_id == deptId).map(b => b.box_id));
+    const drawerIds = new Set(globalDrawersCache.filter(d => boxIds.has(d.box_id)).map(d => d.drawer_id));
+    return globalToolsCache.some(t => drawerIds.has(t.drawer_id));
+}
+
+/** Renders #dept-roster-body from globalDeptsCache/globalDeptGroupsCache -- one row per department, each opening the SAME shared entity modal the Master Storage & Asset Tree's department header already opens (openEntityModal('department', id)). A second, additional way into that modal, not a replacement for the tree's own department rows. */
+function renderDepartmentRoster() {
+    const body = document.getElementById('dept-roster-body');
+    if (!body) return;
+    if (!globalDeptsCache.length) {
+        body.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--muted);">No departments yet.</td></tr>`;
+        return;
+    }
+    body.innerHTML = globalDeptsCache
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(d => {
+            const group = globalDeptGroupsCache.find(g => g.group_id == d.cross_checkout_group_id);
+            return `<tr style="cursor:pointer;" onclick="openEntityModal('department', '${d.dept_id}')">
+                <td>${icon('building-2')} ${d.name}</td>
+                <td style="font-family:monospace;">${d.prefix_code}</td>
+                <td>${group ? group.name : '--'}</td>
+                <td>${d.no_tool_inventory ? '<span style="color:var(--muted);">Not Tracked</span>' : 'Tracked'}</td>
+            </tr>`;
+        }).join('');
 }
 
 /** Fetches GET /api/department-groups into globalDeptGroupsCache and renders #dept-groups-list -- one row per group with an inline-editable name (blur-to-rename) and a delete button. Called at boot (bootstrapAdminUI) and after every create/rename/delete here so the list and the cache driving each department's edit-view dropdown both stay current. */
@@ -1903,7 +1953,7 @@ async function deleteInfraItem(type, id) {
     if (!confirm(`Are you sure you want to delete this structure? It will only succeed if it is empty.`)) return;
     try {
         const res = await fetch(`/api/${type}/${id}`, { method: 'DELETE', headers: { 'X-Requested-With': 'ToolTracker' } });
-        if (res.ok) { closeEntityModal(); renderEditableInfraTree(); syncStorageHierarchyDropdowns(); }
+        if (res.ok) { closeEntityModal(); await renderEditableInfraTree(); syncStorageHierarchyDropdowns(); renderDepartmentRoster(); }
         else { const data = await res.json(); alert('❌ ' + (data.error || 'Failed to delete.')); }
     } catch (err) { alert('❌ Network error.'); }
 }
@@ -2451,9 +2501,15 @@ function openEntityModal(type, id) {
 
         titleHtml = `<h3 style="margin:0;">${entity.name}</h3>`;
         const currentDeptGroup = globalDeptGroupsCache.find(g => g.group_id == entity.cross_checkout_group_id);
+        // Whether THIS department currently has any tool, of any status, assigned to it anywhere
+        // under it -- the same question PUT /api/departments/:id enforces server-side before
+        // allowing no_tool_inventory to be turned on, computed here too so the checkbox can be
+        // disabled (with an explanation) before a doomed save attempt rather than after one.
+        const hasTools = deptHasAnyTools(entity.dept_id);
         readHtml = `
             <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Prefix Code</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.prefix_code}</div></div>
             <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Cross-Checkout Group</div><div style="font-size:14px;margin-top:4px;">${currentDeptGroup ? currentDeptGroup.name : '-- None --'}</div></div>
+            <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Tool Inventory</div><div style="font-size:14px;margin-top:4px;">${entity.no_tool_inventory ? 'Not tracked (excluded from audits)' : 'Tracked'}</div></div>
         `;
         fieldsHtml = `
             <div class="form-group"><label class="form-label">Department Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
@@ -2468,7 +2524,18 @@ function openEntityModal(type, id) {
                     <option value="">-- None --</option>
                     ${globalDeptGroupsCache.map(g => `<option value="${g.group_id}" ${g.group_id == entity.cross_checkout_group_id ? 'selected' : ''}>${g.name}</option>`).join('')}
                 </select>
-                <div style="font-size:11px; color: var(--muted); margin-top:4px;">Departments sharing a group can freely check out each other's tools -- manage groups from the Deployment Builder.</div>
+                <div style="font-size:11px; color: var(--muted); margin-top:4px;">Departments sharing a group can freely check out each other's tools -- manage groups from Department Management.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" style="display:flex; align-items:center; gap:8px; cursor:${hasTools ? 'not-allowed' : 'pointer'};">
+                    <input type="checkbox" id="em-input-no-inventory" ${entity.no_tool_inventory ? 'checked' : ''} ${hasTools ? 'disabled' : ''}>
+                    This department does not track tool inventory
+                </label>
+                <div style="font-size:11px; margin-top:4px; color:${hasTools ? 'var(--red)' : 'var(--muted)'};">
+                    ${hasTools
+                        ? "Can't enable -- this department still has tools assigned. Move or retire them first."
+                        : 'Removes this department from the Audit Schedule card and the audit-status dashboard/kiosk chips -- for a department that will never hold a tool.'}
+                </div>
             </div>
         `;
 
@@ -3784,6 +3851,7 @@ async function saveEntityUpdates() {
         if (type === 'department') {
             endpoint = `/api/departments/${id}`;
             payload.cross_checkout_group_id = document.getElementById('em-input-dept-group').value || null;
+            payload.no_tool_inventory = document.getElementById('em-input-no-inventory').checked;
         }
         else if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
         else if (type === 'drawer') { endpoint = `/api/drawers/${id}`; }
@@ -3821,7 +3889,7 @@ async function saveEntityUpdates() {
         }
 
         closeEntityModal();
-        if (type === 'user') { loadUsers(); loadRosterDirectory(); } else { renderEditableInfraTree(); }
+        if (type === 'user') { loadUsers(); loadRosterDirectory(); } else { await renderEditableInfraTree(); renderDepartmentRoster(); }
     } catch(e) { alert('Network Error.'); }
 }
 
@@ -4601,8 +4669,12 @@ function renderMpcReviewScreen() {
     const upToDateRows = rows.filter(r => r.match.status === 'already_current');
     const needsLinkingRows = rows.filter(r => r.match.status === 'needs_linking');
 
+    // "Cal ID", not left bare -- this is Micro Precision's OWN tracking number for the gage
+    // (their "Cal Control"/"MPC Control #"), not a manufacturer serial number. James flagged
+    // that an unlabeled code reads ambiguously like it might BE the serial number; it's shown
+    // separately (see the "SN:" badge below) and is a completely different value.
     const rowSummaryLine = (r) => `
-        <span style="font-family:monospace;">${r.calControl}</span>${(r.manufacturer || r.description) ? ` -- ${[r.manufacturer, r.modelNumber, r.description].filter(Boolean).join(' ')}` : ''}${r.department ? ` <span style="color:var(--muted);">(${r.department})</span>` : ''}`;
+        <span style="color:var(--muted); font-size:11px;">Cal ID</span> <span style="font-family:monospace;">${r.calControl}</span>${(r.manufacturer || r.description) ? ` -- ${[r.manufacturer, r.modelNumber, r.description].filter(Boolean).join(' ')}` : ''}${r.department ? ` <span style="color:var(--muted);">(${r.department})</span>` : ''}`;
 
     const newRowHtml = (r) => `
         <label style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); cursor:pointer;">
@@ -4725,7 +4797,7 @@ function renderMpcImportResults(data) {
     if (!container) return;
     const rowsHtml = data.results.map(r => `
         <div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px solid var(--border); font-size:12px;">
-            <div>${r.result === 'imported' ? icon('circle-check', 'icon-success') : icon('circle-x', 'icon-danger')} ${r.calControl}${r.toolQrCode ? ` -&gt; ${r.toolQrCode}` : ''}</div>
+            <div>${r.result === 'imported' ? icon('circle-check', 'icon-success') : icon('circle-x', 'icon-danger')} Cal ID ${r.calControl}${r.toolQrCode ? ` -&gt; ${r.toolQrCode}` : ''}</div>
             <div style="color:var(--muted); text-align:right;">${r.message}</div>
         </div>`).join('');
     container.innerHTML = `

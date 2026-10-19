@@ -85,6 +85,10 @@
             <div class="hub-card" id="hub-personnel" onclick="openWorkspace('ws-personnel')">
                 <div class="hub-icon"><span class="icon" data-icon="users"></span></div><div class="hub-title">Personnel</div><div class="hub-desc">View roster and manage accounts.</div>
             </div>
+            <!-- Card: Departments (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
+            <div class="hub-card" id="hub-departments" onclick="openWorkspace('ws-departments'); loadDepartmentsWorkspace();">
+                <div class="hub-icon"><span class="icon" data-icon="building-2"></span></div><div class="hub-title">Departments</div><div class="hub-desc">Manage departments, groups, and inventory status.</div>
+            </div>
             <!-- Card 3: Inventory (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
             <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree(); loadAuditStatus(); loadAuditSchedules();">
                 <div class="hub-icon"><span class="icon" data-icon="package"></span></div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
@@ -175,6 +179,56 @@
                 </div>
             </div>
 
+            <!-- Workspace panel: Departments. Flat (no subhub/sub-panel nesting, unlike Personnel/
+                 Inventory) -- a handful of small cards is all this needs, matching Reports' own
+                 simpler layout rather than adding a second nav level for no real benefit. The
+                 roster table below is a NEW, additional way into the same department entity modal
+                 the Master Storage & Asset Tree already opens (openEntityModal('department', id))
+                 -- not a replacement for that path, per James's own stated preference that a
+                 feature can live in more than one sensible place at once. -->
+            <div id="ws-departments" class="workspace-panel no-print">
+                <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
+                <h3 style="margin-bottom: 20px;">Department Management</h3>
+
+                <div class="card">
+                    <h3 style="margin-bottom: 4px;">Department Roster</h3>
+                    <div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Click a department to edit its name, cross-checkout group, or tool-inventory status.</div>
+                    <div class="table-responsive-wrapper">
+                        <table>
+                            <thead><tr><th>Name</th><th>Prefix</th><th>Cross-Checkout Group</th><th>Tool Inventory</th></tr></thead>
+                            <tbody id="dept-roster-body"><tr><td colspan="4" style="text-align:center; color:var(--muted);">Loading...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Relocated from Inventory's Deployment Builder, same ids -- bootstrapAdminUI's
+                     existing weight<4 hide list already targets these by id, so it needs no
+                     change for the move itself. -->
+                <div class="card" id="card-manage-depts">
+                    <h3 style="margin-bottom: 16px;">Establish New Department</h3>
+                    <div class="flex-grid-3">
+                        <div class="form-group" style="margin:0;"><label class="form-label">Department Name</label><input class="form-input" id="str-dept-name" placeholder="Avionics"></div>
+                        <div class="form-group" style="margin:0;"><label class="form-label">Prefix Code</label><input class="form-input" id="str-dept-prefix" placeholder="AVI" style="text-transform: uppercase;"></div>
+                        <button class="btn btn-secondary" style="width: auto;" onclick="submitStructureDept()">Establish Department</button>
+                    </div>
+                </div>
+
+                <!-- Cross-checkout department groups (migrations/020) -- departments sharing a
+                     group are mutually exempt from the cross-department checkout restriction
+                     (see POST /api/transactions). Assigning a department TO a group happens on
+                     the department's own entity-modal edit view (or the roster row above), not
+                     here -- this card just manages the groups themselves (create/rename/delete). -->
+                <div class="card" id="card-manage-dept-groups">
+                    <h3 style="margin-bottom: 4px;">Cross-Checkout Department Groups</h3>
+                    <div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Departments sharing a group (e.g. "Maintenance" for AVI + MX) can freely check out each other's tools -- no department-matched buddy required. Assign a department to a group from its own row above.</div>
+                    <div id="dept-groups-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px;">Loading…</div>
+                    <div style="display:flex; gap:8px;">
+                        <input class="form-input" id="new-dept-group-name" placeholder="e.g. Maintenance" style="max-width:280px;">
+                        <button class="btn btn-secondary" style="width:auto;" onclick="submitNewDeptGroup()">+ Add Group</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Workspace panel: Inventory, containing its own subhub plus two sub-panels (panel-inv-tree, panel-inv-build) toggled via openSubPanel()/closeSubPanel() -->
             <div id="ws-inventory" class="workspace-panel no-print">
                 <div id="subhub-inventory">
@@ -240,33 +294,9 @@
                 <!-- Sub-panel: Deployment Builder (provision departments, toolboxes/drawers, and ingest new tools) -->
                 <div id="panel-inv-build" class="sub-panel">
                     <button class="back-btn" onclick="closeSubPanel('ws-inventory', 'subhub-inventory')">← Back to Inventory Menu</button>
-                    
-                    <div class="card" id="card-manage-depts">
-                        <h3 style="margin-bottom: 16px;">1. Establish New Department</h3>
-                        <div class="flex-grid-3">
-                            <div class="form-group" style="margin:0;"><label class="form-label">Department Name</label><input class="form-input" id="str-dept-name" placeholder="Avionics"></div>
-                            <div class="form-group" style="margin:0;"><label class="form-label">Prefix Code</label><input class="form-input" id="str-dept-prefix" placeholder="AVI" style="text-transform: uppercase;"></div>
-                            <button class="btn btn-secondary" style="width: auto;" onclick="submitStructureDept()">Establish Department</button>
-                        </div>
-                    </div>
-
-                    <!-- Cross-checkout department groups (migrations/020) -- departments sharing a
-                         group are mutually exempt from the cross-department checkout restriction
-                         (see POST /api/transactions). Assigning a department TO a group happens on
-                         the department's own entity-modal edit view, not here -- this card just
-                         manages the groups themselves (create/rename/delete). -->
-                    <div class="card" id="card-manage-dept-groups">
-                        <h3 style="margin-bottom: 4px;">Cross-Checkout Department Groups</h3>
-                        <div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Departments sharing a group (e.g. "Maintenance" for AVI + MX) can freely check out each other's tools -- no department-matched buddy required. Assign a department to a group from its own card.</div>
-                        <div id="dept-groups-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px;">Loading…</div>
-                        <div style="display:flex; gap:8px;">
-                            <input class="form-input" id="new-dept-group-name" placeholder="e.g. Maintenance" style="max-width:280px;">
-                            <button class="btn btn-secondary" style="width:auto;" onclick="submitNewDeptGroup()">+ Add Group</button>
-                        </div>
-                    </div>
 
                     <div class="card" id="card-manage-boxes">
-                        <h3 style="margin-bottom: 16px;">2. Smart Box Builder (Storage)</h3>
+                        <h3 style="margin-bottom: 16px;">1. Smart Box Builder (Storage)</h3>
                         <div class="flex-grid-4">
                             <div class="form-group" style="margin:0;"><label class="form-label">Parent Dept</label><select class="form-select" id="str-box-dept-select" onchange="fetchNextBoxId()"></select></div>
                             <div class="form-group" style="margin:0;"><label class="form-label">Box Designation</label><input class="form-input" id="str-box-name" placeholder="e.g. Crash Cart A"></div>
@@ -287,7 +317,7 @@
                     </div>
 
                     <div class="card">
-                        <h3 style="margin-bottom: 16px;">3. Ingest New Asset (Tools)</h3>
+                        <h3 style="margin-bottom: 16px;">2. Ingest New Asset (Tools)</h3>
                         <div id="admin-reader-add" class="camera-reader" style="width: 100%; max-width: 400px; display: none; margin-bottom: 14px; border-radius: 10px; overflow: hidden; border: 2px solid var(--accent);"></div>
                         <div class="flex-grid-3">
                             <div class="form-group" style="margin: 0;"><label class="form-label">Tool Name</label><input class="form-input" id="add-tool-name" placeholder="e.g. 1/4 Drive Ratchet"></div>
