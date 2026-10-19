@@ -30,6 +30,7 @@ const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
 const ExcelJS = require('exceljs');
+const nodemailer = require('nodemailer');
 const { generatePngAtSize, generateQrPngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
 const { buildZip } = require('./scripts/lib/zip');
 
@@ -3776,6 +3777,62 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
 });
 
 // ==========================================
+// 6.6 NOTIFICATIONS (Slack / Email)
+// ==========================================
+// Outbound-only, config-gated exactly like the calendar feed token (see "8.6 CALENDAR FEED"):
+// every env var below is optional, and whichever ones are unset just make that channel silently
+// no-op rather than erroring -- so this ships now and starts actually sending the moment real
+// credentials are added, with no code change needed either way.
+//
+// Slack: a plain Incoming Webhook (SLACK_WEBHOOK_URL) -- one POST, no OAuth app/bot to register.
+// Email: any standard SMTP provider via nodemailer, not one vendor's proprietary REST API --
+// SMTP_HOST/PORT/USER/PASS can point at SendGrid, Mailgun, AWS SES, Office365, or a plain Gmail
+// relay without any code change, and NOTIFY_EMAIL_TO is a comma-separated recipient list (there's
+// no per-user notification-preference concept yet -- everyone who should see these goes in one
+// shared list for now).
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || null;
+const NOTIFY_EMAIL_TO = (process.env.NOTIFY_EMAIL_TO || '').split(',').map(s => s.trim()).filter(Boolean);
+const emailTransport = (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)
+    ? nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    })
+    : null;
+
+async function sendSlackNotification(text) {
+    if (!SLACK_WEBHOOK_URL) return false;
+    try {
+        const res = await fetch(SLACK_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+        if (!res.ok) console.error('Slack notification failed:', res.status, await res.text());
+        return res.ok;
+    } catch (err) {
+        console.error('Slack notification error:', err.message);
+        return false;
+    }
+}
+
+async function sendEmailNotification(subject, text) {
+    if (!emailTransport || NOTIFY_EMAIL_TO.length === 0) return false;
+    try {
+        await emailTransport.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: NOTIFY_EMAIL_TO.join(', '), subject, text });
+        return true;
+    } catch (err) {
+        console.error('Email notification error:', err.message);
+        return false;
+    }
+}
+
+// Fires both configured channels for one event -- call sites don't need to know which channels
+// (if any) are actually set up. Deliberately fire-and-forget: a notification failing must never
+// block or roll back the real action (a checkout, an incident report) that triggered it.
+function notifyEvent(subject, text) {
+    sendSlackNotification(`*${subject}*\n${text}`).catch(() => {});
+    sendEmailNotification(subject, text).catch(() => {});
+}
+
+// ==========================================
 // 7. KIOSK TRANSACTIONS & AUDITS
 // ==========================================
 // Process Tool Check-in / Check-out. Requires dual-PIN sign-off for every transaction (technician
@@ -4660,7 +4717,7 @@ app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above a
         // physically moved (or its drawer reassigned), the incident record shouldn't
         // silently follow it.
         const toolRes = await client.query(
-            `SELECT t.tool_id, t.status, d.name AS dept_name, b.name AS box_name, dr.name AS drawer_name
+            `SELECT t.tool_id, t.name AS tool_name, t.status, d.name AS dept_name, b.name AS box_name, dr.name AS drawer_name
              FROM tools t
              LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
              LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -4694,6 +4751,11 @@ app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above a
         );
 
         await client.query('COMMIT');
+        notifyEvent(
+            `Tool Reported ${issue_type}`,
+            `${tool.tool_name} (${qr_code}) was reported ${issue_type} by ${user.full_name || user.badge_id}.` +
+            `${tool.dept_name ? ` Department: ${tool.dept_name}.` : ''}${notes ? ` Notes: ${notes}` : ''}`
+        );
         res.json({ success: true, tool: { tool_id: tool.tool_id, status: issue_type } });
     } catch (err) {
         await client.query('ROLLBACK');
@@ -6119,8 +6181,51 @@ async function generateDailyLog() {
     }
 }
 
+// Two daily notification digests (see "6.6 NOTIFICATIONS" above for the actual Slack/email
+// senders) -- reuse the exact same queries/helper (getOutToolsForDept) the human-readable daily
+// log above already computes, rather than a second source of truth for "what's out" or "what's
+// due soon". Both are a single shop-wide digest (one Slack message / one email), not routed per
+// department or per person -- there's no per-user notification-preference concept yet. Fires once
+// per calendar day (the same day-rollover this file already detects for generateDailyLog, just
+// tracked independently below) -- NOT tied to each department's own configured audit window
+// times specifically (see getDeptAuditSchedule), since those can differ per department; this is
+// a simpler once-a-day "here's what's still out" sweep across all of them.
+const CAL_DUE_SOON_DAYS = Number(process.env.CAL_DUE_SOON_DAYS) || 7;
+
+async function notifyStillCheckedOut() {
+    const depts = await pool.query('SELECT dept_id, name FROM departments WHERE NOT no_tool_inventory ORDER BY name ASC');
+    const lines = [];
+    for (const dept of depts.rows) {
+        const outRows = await getOutToolsForDept(pool, dept.dept_id);
+        if (outRows.length === 0) continue;
+        lines.push(`${dept.name}:`);
+        outRows.forEach(r => lines.push(`  - ${r.tool_name} (${r.qr_code}) -- ${r.user_name || 'unknown'}, since ${r.timestamp ? new Date(r.timestamp).toLocaleDateString() : 'unknown'}`));
+    }
+    if (lines.length === 0) return; // nothing out anywhere -- no need to notify "nothing to report" every day
+    notifyEvent('Tools Still Checked Out', lines.join('\n'));
+}
+
+async function notifyUpcomingCalibrations() {
+    const result = await pool.query(
+        `SELECT t.qr_code, t.name AS tool_name, t.cal_due_date::text AS cal_due_date, d.name AS dept_name
+         FROM tools t
+         JOIN drawers dr ON t.drawer_id = dr.drawer_id
+         JOIN toolboxes b ON dr.box_id = b.box_id
+         JOIN departments d ON b.dept_id = d.dept_id
+         WHERE t.is_calibrated = true AND t.status != 'Retired' AND t.cal_due_date IS NOT NULL
+           AND t.cal_due_date <= (CURRENT_DATE + ($1 * INTERVAL '1 day'))
+         ORDER BY t.cal_due_date ASC`,
+        [CAL_DUE_SOON_DAYS]
+    );
+    if (result.rows.length === 0) return;
+    const today = new Date(new Date().toDateString());
+    const lines = result.rows.map(r => `  - ${r.tool_name} (${r.qr_code}, ${r.dept_name}) -- due ${r.cal_due_date}${new Date(r.cal_due_date) < today ? ' (OVERDUE)' : ''}`);
+    notifyEvent('Calibrations Due Soon', `Due within ${CAL_DUE_SOON_DAYS} days or already overdue:\n${lines.join('\n')}`);
+}
+
 let lastHourlyLog = new Date().getHours();
 let lastDailyLog = new Date().getDate();
+let lastNotifyDate = new Date().getDate();
 
 setInterval(() => {
     const now = new Date();
@@ -6129,11 +6234,16 @@ setInterval(() => {
 
     if (currentHour !== lastHourlyLog) {
         generateHourlyLog();
-        lastHourlyLog = currentHour; 
+        lastHourlyLog = currentHour;
     }
     if (currentDate !== lastDailyLog) {
         generateDailyLog();
-        lastDailyLog = currentDate; 
+        lastDailyLog = currentDate;
+    }
+    if (currentDate !== lastNotifyDate) {
+        notifyStillCheckedOut().catch(err => console.error('notifyStillCheckedOut failed:', err.message));
+        notifyUpcomingCalibrations().catch(err => console.error('notifyUpcomingCalibrations failed:', err.message));
+        lastNotifyDate = currentDate;
     }
 }, 60000);
 
