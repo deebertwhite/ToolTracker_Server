@@ -833,6 +833,17 @@ async function openToolCardsPrintSheet(boxId) {
     const CARD_W = 3.5, CARD_H = 2, COLS = 2, ROWS = 5, PER_PAGE = COLS * ROWS;
     const PHOTO_H = 1.25; // of the card's 2in -- the rest is the info strip below
     const ROTATE_DEGREES = 90; // see doc comment -- flip to -90 if portrait photos read backwards
+    const QR_W = 0.55; // the info strip's QR thumbnail, square
+    // Text column's width, explicit and fixed rather than left to flex-shrink: CARD_W minus the
+    // QR thumbnail (0.55in), the info strip's own horizontal padding (2 x 6px = 0.125in) and
+    // its gap before the text column (6px = 0.0625in), minus a bit more as a safety margin.
+    // A long name (several real tools run 45-50 characters, e.g. "SNAP-ON Semi-Deep
+    // (Mid-Length) Socket set - Metric") relying on flex-shrink + text-overflow:ellipsis to
+    // truncate measured fine on screen, but ran past the card's edge when actually printed --
+    // browsers don't always compute flex-shrink identically between screen and print rendering.
+    // A fixed width with flex-shrink:0 removes that ambiguity: there's no shrink computation
+    // left to differ between the two.
+    const TEXT_COL_W = CARD_W - QR_W - 0.125 - 0.0625 - 0.15;
 
     const cardHtml = (t) => {
         const itemNum = itemNumberByToolId[t.tool_id];
@@ -855,11 +866,11 @@ async function openToolCardsPrintSheet(boxId) {
                 ${photoInner}
             </div>
             <div style="flex:1 1 auto; min-height:0; padding:4px 6px; display:flex; align-items:center; gap:6px; border-top:1px solid #ccc;">
-                <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:0.55in; height:0.55in; object-fit:contain; flex-shrink:0;">
-                <div style="min-width:0; line-height:1.25;">
-                    ${itemNum ? `<div style="font-size:11px; font-weight:bold;">Item #${itemNum}</div>` : ''}
+                <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:${QR_W}in; height:${QR_W}in; object-fit:contain; flex-shrink:0;">
+                <div style="width:${TEXT_COL_W}in; flex-shrink:0; line-height:1.25; overflow:hidden;">
+                    ${itemNum ? `<div style="font-size:11px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Item #${itemNum}</div>` : ''}
                     <div style="font-size:13px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${t.name}</div>
-                    <div style="font-family:monospace; font-size:11px;">${t.qr_code}</div>
+                    <div style="font-family:monospace; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${t.qr_code}</div>
                 </div>
             </div>
         </div>`;
