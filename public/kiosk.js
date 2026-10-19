@@ -377,8 +377,9 @@ function setupActionScreen() {
         const submitBtn = document.getElementById('btn-submit-action');
         submitBtn.textContent = pendingMode === 'OUT' ? '✓ Complete Checkout' : '✓ Complete Check-in';
         submitBtn.disabled = false;
-        document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'block' : 'none';
+        document.getElementById('kiosk-work-order-group').style.display = pendingMode === 'OUT' ? 'flex' : 'none';
         document.getElementById('kiosk-work-order').value = '';
+        document.getElementById('kiosk-location').value = '';
         // Reset to expanded every fresh entry into check-in -- loadKioskToolNames() (called
         // below) does the actual fetch+render once pendingMode is confirmed 'IN'.
         document.getElementById('checkin-out-tools-section').style.display = pendingMode === 'IN' ? 'block' : 'none';
@@ -1386,7 +1387,8 @@ async function submitTransaction(managerCredential = null) {
                 action: pendingMode === 'OUT' ? 'CHECKOUT_TOOL' : 'CHECKIN_TOOL',
                 qr_codes: batchQueue,
                 ...(managerCredential.loginToken ? { manager_login_token: managerCredential.loginToken } : { manager_pin: managerCredential.pin }),
-                work_order: pendingMode === 'OUT' ? document.getElementById('kiosk-work-order').value : undefined
+                work_order: pendingMode === 'OUT' ? document.getElementById('kiosk-work-order').value : undefined,
+                location: pendingMode === 'OUT' ? document.getElementById('kiosk-location').value : undefined
             })
         });
 

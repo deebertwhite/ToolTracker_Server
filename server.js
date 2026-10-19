@@ -3783,8 +3783,9 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
 // restriction, any coworker can confirm) and, for checkouts, a same-day AUDIT of the tool's home
 // department (see getAuditGatePendingToolboxes).
 app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLimiter's definition */ async (req, res) => {
-    const { badge_id, pin, login_token, action, qr_codes, manager_pin, manager_login_token, work_order } = req.body;
+    const { badge_id, pin, login_token, action, qr_codes, manager_pin, manager_login_token, work_order, location } = req.body;
     const trimmedWorkOrder = (work_order || '').trim() || null;
+    const trimmedLocation = (location || '').trim() || null;
     const client = await pool.connect();
 
     try {
@@ -4038,20 +4039,21 @@ app.post('/api/transactions', /* DISABLED: authLimiter -- see note above authLim
 
                 // Execute Checkout
                 await client.query("UPDATE tools SET status = 'Out' WHERE tool_id = $1", [tool.tool_id]);
-                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes, work_order) VALUES ($1, $2, $3, $4, $5)", [user.user_id, 'CHECKOUT_TOOL', tool.tool_id, logNotes, trimmedWorkOrder]);
+                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes, work_order, location) VALUES ($1, $2, $3, $4, $5, $6)", [user.user_id, 'CHECKOUT_TOOL', tool.tool_id, logNotes, trimmedWorkOrder, trimmedLocation]);
 
             } else if (action === 'CHECKIN_TOOL') {
-                // Inherit the work order from this tool's own last checkout rather than asking
-                // the operator to retype/remember it at check-in -- a return is naturally tied
-                // to whichever job it was taken out for, and that value is already on record.
+                // Inherit the work order/location from this tool's own last checkout rather than
+                // asking the operator to retype/remember it at check-in -- a return is naturally
+                // tied to whichever job it was taken out for, and that value is already on record.
                 const lastCheckoutRes = await client.query(
-                    "SELECT work_order FROM audit_logs WHERE tool_id = $1 AND action = 'CHECKOUT_TOOL' ORDER BY timestamp DESC LIMIT 1",
+                    "SELECT work_order, location FROM audit_logs WHERE tool_id = $1 AND action = 'CHECKOUT_TOOL' ORDER BY timestamp DESC LIMIT 1",
                     [tool.tool_id]
                 );
                 const inheritedWorkOrder = lastCheckoutRes.rows[0]?.work_order || null;
+                const inheritedLocation = lastCheckoutRes.rows[0]?.location || null;
 
                 await client.query("UPDATE tools SET status = 'In', status_reason = NULL WHERE tool_id = $1", [tool.tool_id]);
-                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes, work_order) VALUES ($1, $2, $3, $4, $5)", [user.user_id, 'CHECKIN_TOOL', tool.tool_id, logNotes, inheritedWorkOrder]);
+                await client.query("INSERT INTO audit_logs (user_id, action, tool_id, notes, work_order, location) VALUES ($1, $2, $3, $4, $5, $6)", [user.user_id, 'CHECKIN_TOOL', tool.tool_id, logNotes, inheritedWorkOrder, inheritedLocation]);
             }
         }
 

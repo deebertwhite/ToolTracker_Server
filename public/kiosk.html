@@ -160,12 +160,13 @@
             <div class="card" id="panel-scanner" style="width: 100%; max-width: 600px;">
                 <div class="section-title" id="action-title"><span class="icon" data-icon="upload"></span> Scanning Tools...</div>
 
-                <!-- Checkout only (hidden for check-in by setupActionScreen()) -- entirely
-                     optional, nothing downstream requires it. Check-in inherits whatever value
-                     was given here automatically from each tool's own last checkout, so there's
-                     no matching field on the check-in side to keep in sync. -->
-                <div class="form-group" id="kiosk-work-order-group">
-                    <input class="form-input" id="kiosk-work-order" placeholder="Work Order (optional)">
+                <!-- Checkout only (hidden for check-in by setupActionScreen()) -- both entirely
+                     optional, nothing downstream requires either. Check-in inherits whatever
+                     value was given here automatically from each tool's own last checkout, so
+                     there's no matching field on the check-in side to keep in sync. -->
+                <div class="form-group" id="kiosk-work-order-group" style="display:flex; gap:8px;">
+                    <input class="form-input" id="kiosk-work-order" placeholder="Work Order (optional)" style="flex:1;">
+                    <input class="form-input" id="kiosk-location" placeholder="Location (optional)" style="flex:1;">
                 </div>
 
                 <div class="scan-box" id="scan-zone" onclick="focusScanInput('kiosk-scan-input')">
