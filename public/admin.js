@@ -1078,7 +1078,7 @@ async function fetchNextBoxId() {
     } catch (err) { document.getElementById('str-box-id').value = 'Error'; }
 }
 
-/** Validates and submits the "Establish New Department" form to POST /api/departments, then clears the inputs and refreshes the storage dropdowns and infrastructure tree. Gated to currentAdminWeight >= 4 (super_admin) by the hidden #card-manage-depts card. */
+/** Validates and submits the "Establish New Department" form (now part of the Departments workspace) to POST /api/departments, then clears the inputs and refreshes the storage dropdowns/caches/roster. Gated to currentAdminWeight >= 4 (super_admin) by the hidden #card-manage-depts card. Uses the lightweight primeStorageCaches() rather than renderEditableInfraTree() -- the Master Storage & Asset Tree isn't visible from this workspace, so there's no reason to pay for building (and image-loading) its entire off-screen DOM just to refresh a cache. */
 async function submitStructureDept() {
     const payload = { name: document.getElementById('str-dept-name').value, prefix_code: document.getElementById('str-dept-prefix').value };
     if (!payload.name || !payload.prefix_code) return alert("⚠️ Required fields missing.");
@@ -1088,8 +1088,8 @@ async function submitStructureDept() {
         document.getElementById('str-dept-name').value = '';
         document.getElementById('str-dept-prefix').value = '';
         syncStorageHierarchyDropdowns();
-        await renderEditableInfraTree();
-        renderDepartmentRoster(); // no-op if the roster table isn't in the DOM, e.g. called from Inventory's own copy of this form
+        await primeStorageCaches();
+        renderDepartmentRoster();
     }
     else { const data = await res.json(); alert('❌ ' + (data.error || 'Database error')); }
 }
@@ -1103,8 +1103,29 @@ async function submitStructureDept() {
  * re-renders the Inventory tree's own DOM, which isn't visible from here.
  */
 async function loadDepartmentsWorkspace() {
-    await Promise.all([renderEditableInfraTree(), loadDeptGroups()]);
+    await Promise.all([primeStorageCaches(), loadDeptGroups()]);
     renderDepartmentRoster();
+}
+
+/**
+ * Fetches GET /api/storage + GET /api/tools and populates globalDeptsCache/globalBoxesCache/
+ * globalDrawersCache/globalToolsCache WITHOUT rendering the Master Storage & Asset Tree --
+ * unlike renderEditableInfraTree() (which does both together), for a view that only needs the
+ * CACHES. Confirmed live as a real, not theoretical, fix: calling renderEditableInfraTree() from
+ * loadDepartmentsWorkspace() built (and image-loaded) the entire tree into its own off-screen
+ * container every single time the Departments hub was opened -- hundreds of <img> tags, one per
+ * tool's photo in the whole system -- which queued behind the browser's per-host connection limit
+ * and delayed an unrelated PUT /api/departments/:id save by several real seconds, long enough to
+ * look like the save silently did nothing in testing.
+ */
+async function primeStorageCaches() {
+    const [storageRes, toolsRes] = await Promise.all([fetch('/api/storage'), fetch('/api/tools')]);
+    const storage = await storageRes.json();
+    const tools = await toolsRes.json();
+    globalDeptsCache = storage.departments;
+    globalBoxesCache = storage.toolboxes;
+    globalDrawersCache = storage.drawers;
+    globalToolsCache = tools.tools;
 }
 
 /** True if department deptId has ANY tool assigned to it, of any status, anywhere under any of its toolboxes/drawers -- the same question PUT /api/departments/:id enforces server-side before allowing no_tool_inventory to be turned on. Computed client-side from the already-loaded caches so the entity modal's checkbox can be disabled (with an explanation) before a doomed save, not just after one. */
