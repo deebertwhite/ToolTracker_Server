@@ -765,26 +765,32 @@ async function openToolboxPrintSheet(boxId) {
 }
 
 /**
- * Builds and prints double-sided individual tool cards for every (non-Retired) tool currently in
- * a toolbox -- a second, physical way to scan a tool in/out besides the binder print sheet above,
- * small enough to go on a keychain. James: "one tool will have its picture with the QR code and
- * number on the front, and on the back it will have the name, code and number."
+ * Builds and prints individual tool cards for every (non-Retired) tool currently in a toolbox --
+ * a second, physical way to scan a tool in/out besides the binder print sheet above, small enough
+ * to go on a keychain. One-sided (James's follow-up: "drop the backside, putting all info in
+ * front" -- an earlier front/back version needed duplex alignment that was more friction than it
+ * was worth): photo, this drawer's position number (same reading-order numbering the map
+ * overlay/Tool List page above use, kept in lockstep with it deliberately), name, and the
+ * scannable code + ID, all on one face.
  *
  * Laid out as 3.5x2in cards, 2 columns x 5 rows (10/page) -- matches widely-available
  * pre-perforated business-card sheets (so this can be cut with scissors on plain paper, or
  * printed onto perforated stock for a clean break with no cutting at all), same spirit as the
  * print sheet's own "use what's easy to produce" choices elsewhere.
  *
- * For every 10 tools, emits a FRONT page immediately followed by its matching BACK page, rather
- * than all fronts then all backs -- this way the pages interleave front/back per physical SHEET
- * (page 1+2 = sheet 1, page 3+4 = sheet 2, ...), which works whether printed via automatic duplex
- * OR manually (print odd pages, flip the stack, print even pages). The back page's card columns
- * are reversed within each row (not a full 180-degree flip) -- this is the standard trick for a
- * portrait page duplexed by flipping on its LONG edge (the common default), so a card cut from the
- * front lines up with its own back rather than its row-neighbor's. If a printer instead flips on
- * the SHORT edge, backs will come out rotated 180 degrees from their fronts -- not handled, since
- * there's no way to know which convention applies without asking; flagging this rather than
- * silently guessing wrong in a way that's hard to notice before cutting.
+ * Every photo is preloaded first (getImageOrientation() below) to tell portrait from landscape
+ * before the card layout is ever built. James reported the photo looking "too zoomed in" on a
+ * real print -- the card's photo area is a wide rectangle, and object-fit:cover on a PORTRAIT
+ * photo (common for a phone photo of a hand tool stood on end) crops away most of the top and
+ * bottom to fill that wide shape, leaving a tight, zoomed-in sliver of the middle. Rotating a
+ * portrait photo 90 degrees first (so it lies on its side) gives object-fit:cover a shape close
+ * to the card's own before it ever has to crop, using the space far better than either that heavy
+ * crop or the alternative (object-fit:contain, which would shrink the whole photo down small
+ * enough to avoid cropping and letterbox it instead -- also not what was asked for). There's no
+ * way to detect which way is "upright" for an arbitrary tool photo (that's real object recognition,
+ * well beyond this), so every portrait photo rotates the same fixed direction (90deg clockwise) --
+ * if that reads wrong on a real tool's photo, flipping the single ROTATE_DEGREES constant below
+ * to -90 is the fix.
  *
  * Deliberately NOT live status or anything date-based, same reasoning as the print sheet above --
  * a card is meant to be cut out and carried indefinitely, not reprinted on a schedule.
@@ -798,48 +804,79 @@ async function openToolCardsPrintSheet(boxId) {
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     if (!tools.length) return alert('This toolbox has no tools to make cards for.');
 
-    const CARD_W = 3.5, CARD_H = 2, COLS = 2, ROWS = 5;
-    const PER_PAGE = COLS * ROWS;
+    // Position numbers: group by drawer and rank each drawer's own positioned tools in reading
+    // order (top-to-bottom, left-to-right) -- the exact same sort openToolboxPrintSheet() above
+    // uses for its map badges/Tool List numbering, so a card's number always matches that sheet.
+    const itemNumberByToolId = {};
+    const byDrawer = {};
+    tools.forEach(t => {
+        if (t.position_x === null || t.position_y === null) return;
+        (byDrawer[t.drawer_id] = byDrawer[t.drawer_id] || []).push(t);
+    });
+    Object.values(byDrawer).forEach(drawerTools => {
+        drawerTools.sort((a, b) => a.position_y - b.position_y || a.position_x - b.position_x);
+        drawerTools.forEach((t, i) => { itemNumberByToolId[t.tool_id] = i + 1; });
+    });
 
-    const cardShell = (inner) => `<div style="width:${CARD_W}in; height:${CARD_H}in; box-sizing:border-box; border:1px solid #ccc; overflow:hidden; display:flex; flex-direction:column;">${inner}</div>`;
-    // Shared bottom strip (code + plain-text ID) on both sides, so the scannable code is always
-    // in the same spot on a card regardless of which face is up -- see server.js for why this
-    // uses the text-free scan-code.png rather than the tool's own stored sticker-label image.
-    const codeStrip = (t) => `
-        <div style="flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:4px 6px; border-top:1px solid #ccc;">
-            <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:0.5in; height:0.5in; object-fit:contain; flex-shrink:0;">
-            <div style="font-family:monospace; font-size:13px; font-weight:bold;">${t.qr_code}</div>
+    // Preload every photo so its real pixel dimensions are known before building the card HTML --
+    // see this function's own doc comment for why orientation (not just "loaded yet") matters.
+    const orientationByToolId = {};
+    await Promise.all(tools.filter(t => t.photo_url).map(t => new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => { orientationByToolId[t.tool_id] = img.naturalHeight > img.naturalWidth ? 'portrait' : 'landscape'; resolve(); };
+        img.onerror = () => { orientationByToolId[t.tool_id] = 'landscape'; resolve(); };
+        img.src = t.photo_url;
+    })));
+
+    const CARD_W = 3.5, CARD_H = 2, COLS = 2, ROWS = 5, PER_PAGE = COLS * ROWS;
+    const PHOTO_H = 1.25; // of the card's 2in -- the rest is the info strip below
+    const ROTATE_DEGREES = 90; // see doc comment -- flip to -90 if portrait photos read backwards
+
+    const cardHtml = (t) => {
+        const itemNum = itemNumberByToolId[t.tool_id];
+        let photoInner;
+        if (!t.photo_url) {
+            photoInner = `<span style="color:#999; font-size:11px;">No Photo</span>`;
+        } else if (orientationByToolId[t.tool_id] === 'portrait') {
+            // Width/height swapped on the <img> itself (so object-fit:cover fills a box shaped
+            // like the ORIGINAL unrotated card area) then rotated -- the visual result after
+            // rotation exactly fills the card-shaped container again. Centered via the
+            // position:absolute + translate(-50%,-50%) pair; the container's overflow:hidden
+            // clips it to the card's actual bounds.
+            photoInner = `<img src="${t.photo_url}" style="position:absolute; top:50%; left:50%; width:${PHOTO_H}in; height:${CARD_W}in; object-fit:cover; transform:translate(-50%,-50%) rotate(${ROTATE_DEGREES}deg);">`;
+        } else {
+            photoInner = `<img src="${t.photo_url}" style="width:100%; height:100%; object-fit:cover;">`;
+        }
+        return `
+        <div style="width:${CARD_W}in; height:${CARD_H}in; box-sizing:border-box; border:1px solid #ccc; overflow:hidden; display:flex; flex-direction:column;">
+            <div style="flex:0 0 ${PHOTO_H}in; position:relative; overflow:hidden; background:#eee; display:flex; align-items:center; justify-content:center;">
+                ${photoInner}
+            </div>
+            <div style="flex:1 1 auto; min-height:0; padding:4px 6px; display:flex; align-items:center; gap:6px; border-top:1px solid #ccc;">
+                <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:0.55in; height:0.55in; object-fit:contain; flex-shrink:0;">
+                <div style="min-width:0; line-height:1.25;">
+                    ${itemNum ? `<div style="font-size:11px; font-weight:bold;">Item #${itemNum}</div>` : ''}
+                    <div style="font-size:13px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${t.name}</div>
+                    <div style="font-family:monospace; font-size:11px;">${t.qr_code}</div>
+                </div>
+            </div>
         </div>`;
-    const frontCard = (t) => cardShell(`
-        <div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center; background:#eee; overflow:hidden;">
-            ${t.photo_url ? `<img src="${t.photo_url}" style="width:100%; height:100%; object-fit:cover;">` : `<span style="color:#999; font-size:11px;">No Photo</span>`}
-        </div>
-        ${codeStrip(t)}
-    `);
-    const backCard = (t) => cardShell(`
-        <div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center; padding:6px; text-align:center;">
-            <div style="font-size:19px; font-weight:bold; line-height:1.2;">${t.name}</div>
-        </div>
-        ${codeStrip(t)}
-    `);
+    };
     const blankCard = `<div style="width:${CARD_W}in; height:${CARD_H}in;"></div>`;
 
-    const gridPage = (chunk, cardFn, mirrorColumns) => {
+    const gridPage = (chunk) => {
         const rowsHtml = [];
         for (let r = 0; r < ROWS; r++) {
-            let row = chunk.slice(r * COLS, r * COLS + COLS);
+            const row = chunk.slice(r * COLS, r * COLS + COLS);
             while (row.length < COLS) row.push(null);
-            if (mirrorColumns) row = row.slice().reverse();
-            rowsHtml.push(`<div style="display:flex;">${row.map(t => t ? cardFn(t) : blankCard).join('')}</div>`);
+            rowsHtml.push(`<div style="display:flex;">${row.map(t => t ? cardHtml(t) : blankCard).join('')}</div>`);
         }
         return `<div style="break-before:page;">${rowsHtml.join('')}</div>`;
     };
 
     let pagesHtml = '';
     for (let i = 0; i < tools.length; i += PER_PAGE) {
-        const chunk = tools.slice(i, i + PER_PAGE);
-        pagesHtml += gridPage(chunk, frontCard, false);
-        pagesHtml += gridPage(chunk, backCard, true);
+        pagesHtml += gridPage(tools.slice(i, i + PER_PAGE));
     }
 
     document.getElementById('toolbox-print-sheet-content').innerHTML = pagesHtml;
