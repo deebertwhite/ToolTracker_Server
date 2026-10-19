@@ -542,7 +542,7 @@
 
     <!-- Universal entity modal: shared editor/viewer for toolbox, drawer, and tool records; populated per-type by openEntityModal() and toggled between read/edit views by toggleModalEditMode() -->
     <div id="entity-modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
-        <div class="card modal-card-scroll" style="width: 100%; max-width: 450px; position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+        <div class="card modal-card-scroll" style="width: 100%; max-width: min(640px, 92vw); position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
             <button onclick="closeEntityModal()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;"><span class="icon" data-icon="x"></span></button>
             
             <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 15px;">

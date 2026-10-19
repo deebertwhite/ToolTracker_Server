@@ -3435,7 +3435,7 @@ async function loadCalibrationHistory(toolId) {
             const correctedBy = isSuperseded ? data.records.find(x => x.supersedes_cal_id === r.cal_id) : null;
             const corrects = r.supersedes_cal_id ? byId.get(r.supersedes_cal_id) : null;
             return `
-            <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; gap:10px; align-items:flex-start; ${isSuperseded ? 'opacity:0.55;' : ''}">
+            <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; gap:10px; align-items:center; ${isSuperseded ? 'opacity:0.55;' : ''}">
                 ${r.photo_url
                     ? (r.photo_url.toLowerCase().endsWith('.pdf')
                         ? `<a href="${r.photo_url}" target="_blank" title="View attached certificate" style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);">${icon('clipboard-list')}</a>`
@@ -3445,11 +3445,16 @@ async function loadCalibrationHistory(toolId) {
                     <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text); ${isSuperseded ? 'text-decoration:line-through;' : ''}">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
                     ${isSuperseded ? `<div style="font-size:11px; color:var(--orange); font-weight:bold; margin-top:2px;">${icon('triangle-alert', 'icon-warning')} Corrected${correctedBy ? ` -- see the ${correctedBy.cal_date.split('T')[0]} entry${correctedBy.correction_reason ? ` (${correctedBy.correction_reason})` : ''}` : ''}</div>` : ''}
                     ${corrects ? `<div style="font-size:11px; color:var(--accent); font-weight:bold; margin-top:2px;">${icon('pencil')} Correction of the ${corrects.cal_date.split('T')[0]} entry${r.correction_reason ? ` -- ${r.correction_reason}` : ''}</div>` : ''}
-                    <div style="font-size:12px; color:var(--text); margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                        ${r.cert_pending
-                            ? `${r.provider} &mdash; <span style="color:var(--orange); font-weight:bold;">Certificate Pending</span> ${!isSuperseded ? `<button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCertBackfillForm(${r.cal_id})">+ Add Cert #</button>` : ''}`
-                            : `${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span>`}
-                        ${!isSuperseded ? `<button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCorrectionForm(${r.cal_id}, '${toolId}')">${icon('pencil')} Correct</button>` : ''}
+                    <div style="font-size:12px; color:var(--text); margin-top:2px; display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                        <span style="flex:1; min-width:150px;">
+                            ${r.cert_pending
+                                ? `${r.provider} &mdash; <span style="color:var(--orange); font-weight:bold;">Certificate Pending</span>`
+                                : `${r.provider} &mdash; Cert# <span style="font-family:monospace;">${r.certificate_number}</span>`}
+                        </span>
+                        <span style="display:flex; gap:6px; flex-shrink:0;">
+                            ${r.cert_pending && !isSuperseded ? `<button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCertBackfillForm(${r.cal_id})">+ Add Cert #</button>` : ''}
+                            ${!isSuperseded ? `<button type="button" class="btn-icon" style="padding:2px 8px; font-size:11px;" onclick="toggleCorrectionForm(${r.cal_id}, '${toolId}')">${icon('pencil')} Correct</button>` : ''}
+                        </span>
                     </div>
                     ${r.cert_pending && !isSuperseded ? `
                     <div id="cert-backfill-form-${r.cal_id}" style="display:none; margin-top:6px; gap:6px;">
