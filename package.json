@@ -23,6 +23,7 @@
     "csv-parse": "^7.0.1",
     "csv-stringify": "^6.8.1",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "express-session": "^1.19.0",

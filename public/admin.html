@@ -480,6 +480,25 @@
                     <div id="tool-groups-list">Loading…</div>
                 </div>
 
+                <!-- requireRole(3) (dept_admin+) server-side on both endpoints, matching the other
+                     Reports cards -- hidden for everyone else by bootstrapAdminUI's weight<3
+                     block. Nothing is written until the review screen's checked rows are
+                     explicitly committed -- see POST .../analyze and .../commit in server.js. -->
+                <div class="card no-print" id="card-mpc-import">
+                    <h3 style="margin-bottom: 8px;">Calibration Import -- Micro Precision</h3>
+                    <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">Upload the vendor's inventory export (.xlsx) and any downloaded certificate PDFs, then review matches before anything is written.</p>
+                    <div class="form-group" style="margin-bottom:10px;">
+                        <label class="form-label">Inventory Spreadsheet (.xlsx)</label>
+                        <input type="file" class="form-input" id="mpc-xlsx-file" accept=".xlsx">
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label class="form-label">Certificate PDFs <span style="color:var(--muted);text-transform:none;">(optional)</span></label>
+                        <input type="file" class="form-input" id="mpc-pdf-files" accept=".pdf" multiple>
+                    </div>
+                    <button type="button" class="btn btn-primary" id="mpc-analyze-btn" style="width:auto;" onclick="analyzeMpcImport()">Analyze</button>
+                    <div id="mpc-import-review" style="display:none; margin-top:16px;"></div>
+                </div>
+
                 <!-- super_admin only (server-gated via requireRole(4) on GET /api/settings/calendar-feed-token) -- hidden for everyone else by bootstrapAdminUI's weight<4 block, same as #card-manage-depts. -->
                 <div class="card no-print" id="card-calendar-feed">
                     <h3 style="margin-bottom: 8px;">Calibration Calendar Feed</h3>

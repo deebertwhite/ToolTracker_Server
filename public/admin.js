@@ -200,7 +200,7 @@ function toggleTreeVisibility(containerId, headerElement) {
  *   - weight < 2 (below tool_rep): hides #hub-inventory and #hub-reports hub cards.
  *   - weight < 3 (below dept_admin): hides #card-manage-boxes, #card-manage-drawers,
  *     #card-manage-users, #card-inventory-import (bulk CSV import), #card-trace-investigations,
- *     #card-tool-groups, and #audit-schedule-card.
+ *     #card-tool-groups, #card-mpc-import, and #audit-schedule-card.
  *   - weight < 4 (below super_admin): hides #card-manage-depts.
  * Populates the Provision New User form's role dropdown with options capped at the viewer's
  * own weight (inclusive) -- matches POST /api/users, which now allows creating a peer, e.g. a
@@ -232,6 +232,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-inventory-import', 'none');
         safeSetDisplay('card-trace-investigations', 'none');
         safeSetDisplay('card-tool-groups', 'none');
+        safeSetDisplay('card-mpc-import', 'none');
         safeSetDisplay('audit-schedule-card', 'none');
     }
 
@@ -3348,7 +3349,9 @@ async function loadCalibrationHistory(toolId) {
             return `
             <div style="padding:8px 0; border-bottom:1px solid var(--border); display:flex; gap:10px; align-items:flex-start; ${isSuperseded ? 'opacity:0.55;' : ''}">
                 ${r.photo_url
-                    ? `<img src="${r.photo_url}" onclick="openImageModal('${r.photo_url}')" style="width:36px;height:36px;object-fit:cover;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`
+                    ? (r.photo_url.toLowerCase().endsWith('.pdf')
+                        ? `<a href="${r.photo_url}" target="_blank" title="View attached certificate" style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);">${icon('clipboard-list')}</a>`
+                        : `<img src="${r.photo_url}" onclick="openImageModal('${r.photo_url}')" style="width:36px;height:36px;object-fit:cover;border-radius:4px;cursor:zoom-in;flex-shrink:0;">`)
                     : `<button type="button" class="btn-icon" style="width:36px;height:36px;padding:0;flex-shrink:0;" title="Attach a photo of the certificate" onclick="triggerPhotoUpload('calibration', ${r.cal_id}, '${toolId}')">${icon('camera')}</button>`}
                 <div style="flex:1;">
                     <div style="display:flex; justify-content:space-between; font-size:13px;"><strong style="color:var(--text); ${isSuperseded ? 'text-decoration:line-through;' : ''}">${r.cal_date.split('T')[0]}</strong><span>Due: ${r.due_date.split('T')[0]}</span></div>
@@ -4525,6 +4528,207 @@ function copyCredentialsToClipboard() {
 function closeCredentialsModal() {
     document.getElementById('cred-modal-overlay').style.display = 'none';
     document.getElementById('cred-modal-body').innerHTML = '';
+}
+
+// ==========================================
+// CALIBRATION IMPORT -- MICRO PRECISION
+// ==========================================
+// See server.js's matching section header for the full design reasoning (why a review step,
+// why matching mostly needs manual linking on day one, why the PDF is just an attached document
+// rather than something parsed for data). This is a two-request flow: analyzeMpcImport() uploads
+// everything and gets back a full proposal with nothing yet written to the database;
+// commitMpcImport() sends back only the rows James actually checked.
+let mpcAnalysisResult = null; // last response from POST .../analyze, re-rendered by renderMpcReviewScreen()
+let mpcManualBindings = {}; // rowNum -> {toolId, qrCode, name} -- filled in by onMpcToolPickerInput() for "needs linking" rows
+
+/** Uploads the inventory spreadsheet + any certificate PDFs to the analyze endpoint and renders the resulting review screen. Nothing is written to the database by this call. */
+async function analyzeMpcImport() {
+    const xlsxInput = document.getElementById('mpc-xlsx-file');
+    const pdfInput = document.getElementById('mpc-pdf-files');
+    if (!xlsxInput.files[0]) return alert('⚠️ Choose the inventory spreadsheet (.xlsx) first.');
+
+    const formData = new FormData();
+    formData.append('inventory', xlsxInput.files[0]);
+    Array.from(pdfInput.files || []).forEach(f => formData.append('certificates', f));
+
+    const btn = document.getElementById('mpc-analyze-btn');
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Analyzing...';
+
+    try {
+        const res = await fetch('/api/calibration-imports/micro-precision/analyze', {
+            method: 'POST', headers: { 'X-Requested-With': 'ToolTracker' }, body: formData
+        });
+        let data;
+        try { data = await res.json(); } catch (e) {
+            return alert(`❌ Unexpected response from server (status ${res.status}). Try again with a smaller batch of files if it keeps happening.`);
+        }
+        if (!res.ok) return alert('❌ ' + (data.error || 'Failed to analyze the uploaded files.'));
+        mpcAnalysisResult = data;
+        mpcManualBindings = {};
+        renderMpcReviewScreen();
+    } catch (e) {
+        alert('❌ Network error.');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+/** One shared `<datalist>` of every non-Retired tool (qr_code + name, searchable by either since both are in the option's value), referenced by every "needs linking" row's picker input -- one shared list instead of a separate `<select>` with hundreds of `<option>`s repeated per row. */
+function buildMpcToolDatalist() {
+    const options = globalToolsCache
+        .filter(t => t.status !== 'Retired')
+        .sort((a, b) => a.qr_code.localeCompare(b.qr_code, undefined, { numeric: true }))
+        .map(t => `<option value="${t.qr_code} -- ${t.name}">`)
+        .join('');
+    return `<datalist id="mpc-tool-datalist">${options}</datalist>`;
+}
+
+/**
+ * Renders the three-bucket review screen from mpcAnalysisResult: "New Calibration Data"
+ * (pre-checked, ready to import), "Needs Linking" (a tool-picker per row, checkbox disabled
+ * until a valid tool is picked), and "Already Up to Date" (collapsed, informational only, no
+ * checkbox at all -- there's nothing to commit for these).
+ */
+function renderMpcReviewScreen() {
+    const container = document.getElementById('mpc-import-review');
+    if (!container || !mpcAnalysisResult) return;
+    const { rows, summary } = mpcAnalysisResult;
+
+    const newRows = rows.filter(r => r.match.status === 'new');
+    const upToDateRows = rows.filter(r => r.match.status === 'already_current');
+    const needsLinkingRows = rows.filter(r => r.match.status === 'needs_linking');
+
+    const rowSummaryLine = (r) => `
+        <span style="font-family:monospace;">${r.calControl}</span>${(r.manufacturer || r.description) ? ` -- ${[r.manufacturer, r.modelNumber, r.description].filter(Boolean).join(' ')}` : ''}${r.department ? ` <span style="color:var(--muted);">(${r.department})</span>` : ''}`;
+
+    const newRowHtml = (r) => `
+        <label style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); cursor:pointer;">
+            <input type="checkbox" id="mpc-row-check-${r.rowNum}" checked style="width:16px; height:16px; flex-shrink:0;">
+            <div style="flex:1; font-size:12px;">
+                ${rowSummaryLine(r)}<br>
+                <strong>${r.match.toolQrCode}</strong> -- ${r.match.toolName}${r.match.toolRetired ? ` <span style="color:var(--orange); font-weight:bold;">(Retired)</span>` : ''}
+                <span style="color:var(--muted);"> -- Last Cal ${r.lastCalDate}, Due ${r.nextDueDate}</span>
+                ${r.certificateFile ? ` ${icon('clipboard-list')} cert attached` : ''}
+                ${r.calibrationStatus ? ` <span style="background:rgba(255,165,0,0.15); color:var(--orange); padding:1px 6px; border-radius:8px; font-size:10px; font-weight:bold;">vendor: ${r.calibrationStatus}</span>` : ''}
+            </div>
+        </label>`;
+
+    const needsLinkingRowHtml = (r) => `
+        <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border);">
+            <input type="checkbox" id="mpc-row-check-${r.rowNum}" disabled style="width:16px; height:16px; flex-shrink:0;">
+            <div style="flex:1; font-size:12px;">
+                ${rowSummaryLine(r)}
+                <span style="color:var(--muted);"> -- Last Cal ${r.lastCalDate}, Due ${r.nextDueDate}</span>
+                ${r.serialNumber ? ` <span style="color:var(--muted);">SN: ${r.serialNumber}</span>` : ''}
+            </div>
+            <input class="form-input" style="width:220px; margin:0;" list="mpc-tool-datalist" placeholder="Pick a tool..." oninput="onMpcToolPickerInput(${r.rowNum}, this.value)">
+        </div>`;
+
+    const upToDateRowHtml = (r) => `
+        <div style="padding:4px 0; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted);">
+            ${rowSummaryLine(r)} -&gt; <strong>${r.match.toolQrCode}</strong> (already current as of ${r.match.currentLastCalDate})
+        </div>`;
+
+    container.innerHTML = `
+        ${buildMpcToolDatalist()}
+        <div style="font-size:13px; margin-bottom:12px;">${summary.totalRows} gages read. <strong style="color:var(--green);">${summary.newImport}</strong> ready to import, <strong>${summary.needsLinking}</strong> need linking, ${summary.alreadyUpToDate} already up to date${summary.skipped ? `, ${summary.skipped} skipped (no calibration date on file yet)` : ''}.</div>
+        ${newRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">New Calibration Data (${newRows.length})</div>${newRows.map(newRowHtml).join('')}</div>` : ''}
+        ${needsLinkingRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">Needs Linking (${needsLinkingRows.length}) -- pick which ToolTracker tool each one is</div>${needsLinkingRows.map(needsLinkingRowHtml).join('')}</div>` : ''}
+        ${upToDateRows.length ? `<details style="margin-bottom:16px;"><summary style="cursor:pointer; font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted);">Already Up to Date (${upToDateRows.length})</summary>${upToDateRows.map(upToDateRowHtml).join('')}</details>` : ''}
+        <button type="button" class="btn btn-primary" id="mpc-commit-btn" style="width:auto;" onclick="commitMpcImport()">Import Selected</button>
+        <div id="mpc-import-results" style="margin-top:12px;"></div>
+    `;
+    container.style.display = 'block';
+}
+
+/** Resolves a "needs linking" row's typed/picked datalist value ("AVI-0327 -- Wire Cutter") back to a real tool, records the binding, and auto-checks/unchecks that row's checkbox to match -- a row can only ever be imported once it resolves to a real, non-Retired tool. */
+function onMpcToolPickerInput(rowNum, typedValue) {
+    const qrCode = (typedValue || '').split(' -- ')[0].trim();
+    const tool = globalToolsCache.find(t => t.qr_code === qrCode && t.status !== 'Retired');
+    const checkbox = document.getElementById(`mpc-row-check-${rowNum}`);
+    if (!checkbox) return;
+    if (tool) {
+        mpcManualBindings[rowNum] = { toolId: tool.tool_id, qrCode: tool.qr_code, name: tool.name };
+        checkbox.disabled = false;
+        checkbox.checked = true;
+    } else {
+        delete mpcManualBindings[rowNum];
+        checkbox.disabled = true;
+        checkbox.checked = false;
+    }
+}
+
+/** Builds the commit payload from whichever rows are currently checked (reading straight from the DOM -- this screen doesn't re-render reactively, so the DOM is the simplest source of truth), validates no two checked rows share a tool, and POSTs it. */
+async function commitMpcImport() {
+    if (!mpcAnalysisResult) return;
+    const actions = [];
+    const seenToolIds = new Set();
+    let duplicateBinding = false;
+
+    mpcAnalysisResult.rows.forEach(row => {
+        const checkbox = document.getElementById(`mpc-row-check-${row.rowNum}`);
+        if (!checkbox || !checkbox.checked) return;
+
+        let toolId = null, qrCode = null;
+        if (row.match.status === 'new') {
+            toolId = row.match.toolId; qrCode = row.match.toolQrCode;
+        } else if (row.match.status === 'needs_linking' && mpcManualBindings[row.rowNum]) {
+            toolId = mpcManualBindings[row.rowNum].toolId; qrCode = mpcManualBindings[row.rowNum].qrCode;
+        }
+        if (!toolId) return;
+
+        if (seenToolIds.has(toolId)) duplicateBinding = true;
+        seenToolIds.add(toolId);
+
+        actions.push({
+            rowNum: row.rowNum, toolId, calControl: row.calControl, serialNumber: row.serialNumber,
+            lastCalDate: row.lastCalDate, nextDueDate: row.nextDueDate, calibrationStatus: row.calibrationStatus,
+            trackingStatus: row.trackingStatus,
+            certificateStoredUrl: row.certificateFile ? row.certificateFile.storedUrl : null,
+            certNumber: row.certificateFile ? row.certificateFile.certNumber : null
+        });
+    });
+
+    if (actions.length === 0) return alert('⚠️ Nothing is checked to import.');
+    if (duplicateBinding) return alert('⚠️ More than one row is bound to the same tool -- fix that before importing.');
+
+    const btn = document.getElementById('mpc-commit-btn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = 'Importing...';
+
+    try {
+        const res = await fetch('/api/calibration-imports/micro-precision/commit', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify({ actions })
+        });
+        const data = await res.json();
+        if (!res.ok) { alert('❌ ' + (data.error || 'Import failed.')); return; }
+        renderMpcImportResults(data);
+        await renderEditableInfraTree();
+    } catch (e) {
+        alert('❌ Network error.');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+/** Renders commitMpcImport()'s per-row results into #mpc-import-results, below the (left in place) review checklist. */
+function renderMpcImportResults(data) {
+    const container = document.getElementById('mpc-import-results');
+    if (!container) return;
+    const rowsHtml = data.results.map(r => `
+        <div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px solid var(--border); font-size:12px;">
+            <div>${r.result === 'imported' ? icon('circle-check', 'icon-success') : icon('circle-x', 'icon-danger')} ${r.calControl}${r.toolQrCode ? ` -&gt; ${r.toolQrCode}` : ''}</div>
+            <div style="color:var(--muted); text-align:right;">${r.message}</div>
+        </div>`).join('');
+    container.innerHTML = `
+        <div style="font-weight:bold; margin-bottom:8px;">${data.summary.imported} imported, ${data.summary.errors} error(s).</div>
+        <div style="max-height:400px; overflow-y:auto;">${rowsHtml}</div>`;
 }
 
 // Restore an existing admin session on page load, if there is one (see restoreAdminSession()).

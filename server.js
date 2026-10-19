@@ -29,6 +29,7 @@ const sharp = require('sharp');
 const bcrypt = require('bcrypt');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
+const ExcelJS = require('exceljs');
 const { generatePngAtSize, generateQrPngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
 const { buildZip } = require('./scripts/lib/zip');
 
@@ -105,7 +106,11 @@ app.use(helmet({
     },
 }));
 
-app.use(express.json());
+// 2mb, not the default 100kb -- the bulk calibration-import commit endpoint's payload is a
+// few hundred bytes per row, and a full several-hundred-row commit genuinely exceeds the
+// default. Still a real, deliberate cap, not unlimited -- this is an internal,
+// session-authenticated, CSRF-header-gated app, not a public upload surface.
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ==========================================
@@ -1080,6 +1085,70 @@ app.get('/api/tools/:id/scan-code.png', requireRole(2), async (req, res) => {
 // the single most-recent calibration_records row for this tool (by cal_date) rather than
 // just whatever was submitted -- so backfilling an OLD record after a newer one already
 // exists doesn't clobber the tool's current due date with stale data.
+/**
+ * Inserts one calibration_records row and advances the tool's live last_cal_date/cal_due_date/
+ * is_calibrated snapshot if this is now the most recent calibration event on file for it (else
+ * leaves the snapshot untouched, still marking is_calibrated true) -- the exact guard
+ * POST /api/tools/:id/calibration-history has always used, extracted here so the bulk calibration
+ * import's commit step (see "CALIBRATION IMPORT -- MICRO PRECISION" section below) can share the
+ * identical logic rather than risking the two paths drifting apart. Must be called inside an
+ * already-open transaction (client) -- does not itself BEGIN/COMMIT/ROLLBACK; the single-entry
+ * endpoint below wraps one call per request, the bulk import wraps one call per row independently,
+ * so one bad row there can't roll back a batch of others the user already reviewed and approved.
+ * auditLogSource varies only the human-readable prefix on the audit_logs entry (e.g. "Calibration
+ * logged directly by admin" vs. "Calibration imported from Micro Precision") -- everything else
+ * about the written record is identical regardless of where it came from.
+ * @returns {Promise<{calId: number}>}
+ * @throws on any DB error, or if toolId doesn't exist -- callers catch and ROLLBACK their own transaction.
+ */
+async function recordCalibrationEvent(client, { toolId, calDate, dueDate, provider, certificateNumber, certPending, standardUsed, vendorTrackingId, notes, result, userId, photoUrl, auditLogSource }) {
+    const toolRes = await client.query('SELECT tool_id, last_cal_date FROM tools WHERE tool_id = $1', [toolId]);
+    if (toolRes.rows.length === 0) {
+        const notFoundErr = new Error('Tool not found.');
+        notFoundErr.statusCode = 404;
+        throw notFoundErr;
+    }
+    const currentLastCal = toolRes.rows[0].last_cal_date;
+
+    const calRes = await client.query(
+        `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, cert_pending, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result, photo_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING cal_id`,
+        [toolId, calDate, dueDate, provider, certPending ? null : certificateNumber, certPending, standardUsed || null, vendorTrackingId || null, notes || null, userId, result, photoUrl || null]
+    );
+
+    // Only advance the tool's snapshot fields if this record is now the most recent calibration
+    // event for it. Comparing against calibration_records alone (e.g. "is this the newest row
+    // for this tool") isn't enough: existing inventory can have a last_cal_date that predates
+    // ANY calibration_records row (set directly by the ingest form, a plain edit, or CSV import,
+    // with no traceable record behind it at all) -- backfilling an older historical record for
+    // that tool must not regress a legacy date that's already there just because it's untracked.
+    if (!currentLastCal || new Date(calDate) >= new Date(currentLastCal)) {
+        // A failed calibration doesn't bring the tool into compliance -- back-date its due date
+        // to the failure itself so the existing checkout hard-stop (CAL_EXPIRED) blocks it
+        // immediately as a secondary signal (the primary one is the trace-back investigation
+        // opened below, checked directly via CAL_INVESTIGATION_OPEN).
+        const effectiveDueDate = result === 'Fail' ? calDate : dueDate;
+        await client.query(
+            'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
+            [calDate, effectiveDueDate, toolId]
+        );
+    } else {
+        await client.query('UPDATE tools SET is_calibrated = true WHERE tool_id = $1', [toolId]);
+    }
+
+    const certDisplay = certPending ? 'PENDING' : certificateNumber;
+    await client.query(
+        "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
+        [userId, toolId, `${auditLogSource}: ${provider} (cert ${certDisplay})${result === 'Fail' ? ' -- FAILED' : ''}`]
+    );
+
+    if (result === 'Fail') {
+        await triggerFailedCalibration(client, { toolId, calDate, provider, certificateNumber: certDisplay, calId: calRes.rows[0].cal_id, userId });
+    }
+
+    return { calId: calRes.rows[0].cal_id };
+}
+
 app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2), async (req, res) => {
     const { cal_date, due_date, provider, certificate_number, standard_used, vendor_tracking_id, notes, result, cert_pending } = req.body;
     if (!cal_date || !due_date) return res.status(400).json({ error: 'Calibration date and due date are both required.' });
@@ -1096,57 +1165,18 @@ app.post('/api/tools/:id/calibration-history', requireFetchHeader, requireRole(2
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-
-        const toolRes = await client.query('SELECT tool_id, last_cal_date FROM tools WHERE tool_id = $1', [req.params.id]);
-        if (toolRes.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tool not found.' }); }
-        const currentLastCal = toolRes.rows[0].last_cal_date;
-
-        const calRes = await client.query(
-            `INSERT INTO calibration_records (tool_id, cal_date, due_date, provider, certificate_number, cert_pending, standard_used, vendor_tracking_id, notes, recorded_by_user_id, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING cal_id`,
-            [req.params.id, cal_date, due_date, provider, certPending ? null : certificate_number, certPending, standard_used || null, vendor_tracking_id || null, notes || null, req.authUser.user_id, calResult]
-        );
-
-        // Only advance the tool's snapshot fields if this record is now the most recent
-        // calibration event for it. Comparing against calibration_records alone (e.g. "is
-        // this the newest row for this tool") isn't enough: existing inventory can have a
-        // last_cal_date that predates ANY calibration_records row (set directly by the
-        // ingest form, a plain edit, or CSV import, with no traceable record behind it at
-        // all) -- backfilling an older historical record for that tool must not regress a
-        // legacy date that's already there just because it happens to be untracked.
-        if (!currentLastCal || new Date(cal_date) >= new Date(currentLastCal)) {
-            // A failed calibration doesn't bring the tool into compliance -- back-date its due
-            // date to the failure itself so the existing checkout hard-stop (CAL_EXPIRED)
-            // blocks it immediately as a secondary signal (the primary one is the trace-back
-            // investigation opened below, checked directly via CAL_INVESTIGATION_OPEN).
-            const effectiveDueDate = calResult === 'Fail' ? cal_date : due_date;
-            await client.query(
-                'UPDATE tools SET last_cal_date = $1, cal_due_date = $2, is_calibrated = true WHERE tool_id = $3',
-                [cal_date, effectiveDueDate, req.params.id]
-            );
-        } else {
-            await client.query('UPDATE tools SET is_calibrated = true WHERE tool_id = $1', [req.params.id]);
-        }
-
-        const certDisplay = certPending ? 'PENDING' : certificate_number;
-        await client.query(
-            "INSERT INTO audit_logs (user_id, action, tool_id, notes) VALUES ($1, 'CAL_COMPLETE', $2, $3)",
-            [req.authUser.user_id, req.params.id, `Calibration logged directly by admin: ${provider} (cert ${certDisplay})${calResult === 'Fail' ? ' -- FAILED' : ''}`]
-        );
-
-        if (calResult === 'Fail') {
-            await triggerFailedCalibration(client, {
-                toolId: req.params.id, calDate: cal_date, provider, certificateNumber: certDisplay,
-                calId: calRes.rows[0].cal_id, userId: req.authUser.user_id
-            });
-        }
-
+        await recordCalibrationEvent(client, {
+            toolId: req.params.id, calDate: cal_date, dueDate: due_date, provider,
+            certificateNumber: certificate_number, certPending, standardUsed: standard_used,
+            vendorTrackingId: vendor_tracking_id, notes, result: calResult, userId: req.authUser.user_id,
+            auditLogSource: 'Calibration logged directly by admin'
+        });
         await client.query('COMMIT');
         res.json({ success: true });
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('Add Calibration Record Error:', err);
-        res.status(500).json({ error: 'Failed to log calibration record.' });
+        res.status(err.statusCode || 500).json({ error: err.statusCode ? err.message : 'Failed to log calibration record.' });
     } finally {
         client.release();
     }
@@ -3291,6 +3321,349 @@ app.post('/api/upload', requireFetchHeader, requireRole(2), (req, res, next) => 
         if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
         res.status(403).json({ error: err.message || 'Upload failed.' });
     }
+});
+
+// ==========================================
+// 6.5 CALIBRATION IMPORT -- MICRO PRECISION
+// ==========================================
+// James got a login to Micro Precision Calibration's customer portal and asked for an
+// automated way to pull that data in and "verify on the regular" rather than re-typing every
+// certificate by hand. Their portal exports (a) a full equipment inventory as .xlsx and (b)
+// individual calibration certificates as PDFs, filenamed exactly `<CalControl>_<YYYYMMDD>_
+// <CertNo>.pdf` -- confirmed against a real export rather than assumed. The PDF's own text is
+// real and selectable (not a scanned image) but its raw linear extraction order is scrambled
+// relative to the visual table layout, so it's used only as an attached supporting document;
+// the spreadsheet already carries every structured field needed (their own tracking id, serial
+// number, last/next cal dates, and a status column) keyed by the same Cal Control, and the
+// filename alone gives the cert number -- no PDF text parsing is needed or attempted.
+//
+// The real problem this has to solve: cross-checking a real export against production found
+// ToolTracker has almost no existing link to the vendor's identifiers (only ~5% of active tools
+// have a serial_number on file at all, and of those only one actually matched the vendor's
+// data). So this can't be "match everything automatically" on day one -- analyze() matches what
+// it can (by a prior import's vendor_tracking_id first, then by serial number, Retired tools
+// excluded and short/placeholder-looking serials never auto-trusted) and leaves the rest for a
+// human to bind by hand in the review screen; every binding backfills tools.serial_number (when
+// it was empty) and every import writes vendor_tracking_id, so each subsequent import gets more
+// automatic. Nothing here is written to the database until commit() -- analyze() is read-only
+// except for saving the uploaded files themselves to disk.
+
+const MICRO_PRECISION_PROVIDER_NAME = 'Micro Precision Calibration Inc.';
+// Below this length a vendor "Serial Number" is almost certainly a placeholder, not a real
+// identifier -- confirmed live: cross-checking a real export caught coincidental matches on
+// trivial serials like "1"/"2" belonging to entirely different physical tools. Never auto-bind
+// on one of these; the row just falls through to needing a manual link instead.
+const MIN_TRUSTED_SERIAL_LENGTH = 4;
+
+// Separate multer instance from the shared single-file `upload` above (not a stylistic choice --
+// /api/upload requires an existing entity_id to attach a photo to immediately, and no
+// calibration_records row exists yet at analyze time; there's nothing to attach to until
+// commit). Mirrors its naming/storage convention (UPLOAD_DIR, `${prefix}-${timestamp}-${rand}
+// ${ext}`) without reusing the route. 20MB/certificates is generous -- a certificate PDF is
+// typically a few hundred KB.
+const calImportStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const prefix = file.fieldname === 'inventory' ? 'calimport-xlsx' : 'calcert';
+        cb(null, prefix + '-' + uniqueSuffix + path.extname(file.originalname).toLowerCase());
+    }
+});
+const calImportUpload = multer({ storage: calImportStorage, limits: { fileSize: 20 * 1024 * 1024, files: 201 } });
+
+// null/undefined/the literal string "NONE" (the vendor's own blank-cell placeholder, confirmed
+// in a real export) all normalize to null; anything else is trimmed.
+function normalizeVendorCell(v) {
+    if (v === null || v === undefined) return null;
+    const str = String(v).trim();
+    if (!str || str.toUpperCase() === 'NONE') return null;
+    return str;
+}
+
+// Reads the vendor's inventory export: one sheet, one gage per row, columns fixed at Cal
+// Control/Cust Control/Serial Number/Department/Location/Manufacturer/Model Number/Type/
+// Description/Work Order/Tracking Status/Last Cal Date/Next Due Date/Calibration Status (1-14,
+// confirmed against a real export -- ExcelJS's colNumber is 1-indexed). Date cells came back as
+// plain "YYYY-MM-DD" strings in testing (not JS Date objects), which is exactly the format
+// recordCalibrationEvent()/Postgres DATE columns want, so they're passed through untouched. A
+// row with no Cal Control has nothing to track it by and is dropped entirely (not even worth a
+// skipped-row entry); a row with a Cal Control but no Last Cal Date is kept (so it can still be
+// reported/linked) but the route below excludes it from the real import/already-current buckets.
+async function parseMicroPrecisionWorkbook(buffer) {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer);
+    const ws = wb.worksheets[0];
+    if (!ws) return [];
+    const rows = [];
+    for (let r = 2; r <= ws.rowCount; r++) {
+        const row = ws.getRow(r);
+        const vals = [];
+        row.eachCell({ includeEmpty: true }, (cell, colNumber) => { vals[colNumber] = cell.value; });
+        const calControl = normalizeVendorCell(vals[1]);
+        if (!calControl) continue;
+        rows.push({
+            rowNum: r, calControl, custControl: normalizeVendorCell(vals[2]), serialNumber: normalizeVendorCell(vals[3]),
+            department: normalizeVendorCell(vals[4]), location: normalizeVendorCell(vals[5]), manufacturer: normalizeVendorCell(vals[6]),
+            modelNumber: normalizeVendorCell(vals[7]), type: normalizeVendorCell(vals[8]), description: normalizeVendorCell(vals[9]),
+            workOrder: normalizeVendorCell(vals[10]), trackingStatus: normalizeVendorCell(vals[11]),
+            lastCalDate: normalizeVendorCell(vals[12]), nextDueDate: normalizeVendorCell(vals[13]), calibrationStatus: normalizeVendorCell(vals[14])
+        });
+    }
+    return rows;
+}
+
+// A cert PDF's filename is its own structured record: <CalControl>_<YYYYMMDD>_<CertNo>.pdf,
+// confirmed against a real export. Matching on (CalControl, date) together rather than
+// CalControl alone matters once a gage has been re-certified more than once and more than one
+// of its historical PDFs gets uploaded in the same batch -- date-qualified matching attaches the
+// right one to the right row and reports any other as unmatched, rather than arbitrarily picking
+// one and silently orphaning the rest.
+function parseCertFilename(filename) {
+    const m = /^([^_]+)_(\d{4})(\d{2})(\d{2})_(.+)\.pdf$/i.exec(filename);
+    if (!m) return null;
+    const [, calControl, yyyy, mm, dd, certNumber] = m;
+    return { calControl, date: `${yyyy}-${mm}-${dd}`, certNumber };
+}
+
+// Confirmed match, regardless of the tool's current status -- a tool legitimately retired since
+// the vendor's last snapshot is still the CORRECT match (the UI flags it with a Retired badge so
+// James notices rather than silently excluding it). Only ever populated by a PRIOR run of this
+// same importer (vendor_tracking_id is written on every commit), so this is what makes every
+// import after the first one progressively more automatic.
+async function findToolByVendorTrackingId(client, calControl) {
+    const result = await client.query(
+        `SELECT t.tool_id, t.qr_code, t.name, t.status, t.serial_number, d.dept_id, d.name AS dept_name
+         FROM calibration_records cr
+         JOIN tools t ON cr.tool_id = t.tool_id
+         LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+         LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+         LEFT JOIN departments d ON b.dept_id = d.dept_id
+         WHERE cr.vendor_tracking_id = $1
+         ORDER BY cr.recorded_at DESC LIMIT 1`,
+        [calControl]
+    );
+    return result.rows[0] || null;
+}
+
+// Confirmed match by manufacturer serial number -- Retired tools excluded (nothing should newly
+// attach to a retired tool via auto-match) and anything under MIN_TRUSTED_SERIAL_LENGTH refused
+// outright rather than offered as a weak "suggestion": a real cross-check of production found
+// coincidental collisions on trivial serials like "1"/"2" that were almost certainly different
+// physical tools, and a wrong auto-suggestion is worse than just asking for a manual link.
+async function findToolBySerialNumber(client, serial) {
+    if (!serial || serial.length < MIN_TRUSTED_SERIAL_LENGTH) return null;
+    const result = await client.query(
+        `SELECT t.tool_id, t.qr_code, t.name, t.status, t.serial_number, d.dept_id, d.name AS dept_name
+         FROM tools t
+         LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+         LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+         LEFT JOIN departments d ON b.dept_id = d.dept_id
+         WHERE t.status != 'Retired' AND LOWER(TRIM(t.serial_number)) = LOWER(TRIM($1))`,
+        [serial]
+    );
+    return result.rows[0] || null;
+}
+
+async function getMostRecentCalDate(client, toolId) {
+    const result = await client.query('SELECT cal_date FROM calibration_records WHERE tool_id = $1 ORDER BY cal_date DESC LIMIT 1', [toolId]);
+    return result.rows[0]?.cal_date || null;
+}
+
+// Parses the uploaded inventory + certificates and matches every row against ToolTracker tools,
+// but writes NOTHING to calibration_records/tools -- see this section's own header comment for
+// why a review step is required here (most rows need a human judgment call the server can't
+// make) rather than importing immediately the way the plain tools CSV import does. Uploaded
+// files ARE saved to disk at this point (so they have a stable URL the review screen and the
+// later commit can reference) -- an unreviewed/unselected row's file is accepted as a low-stakes
+// orphan rather than built out with its own temp-and-promote lifecycle (a certificate PDF is a
+// few hundred KB; see scripts/cleanup-unused-barcode-variants.js for the established precedent
+// of cleaning up this class of orphaned file later if it's ever actually worth doing).
+app.post('/api/calibration-imports/micro-precision/analyze', requireFetchHeader, requireRole(3),
+    calImportUpload.fields([{ name: 'inventory', maxCount: 1 }, { name: 'certificates', maxCount: 200 }]),
+    async (req, res) => {
+        try {
+            const inventoryFile = req.files?.inventory?.[0];
+            if (!inventoryFile) return res.status(400).json({ error: 'An inventory spreadsheet (.xlsx) is required.' });
+            const certFiles = req.files?.certificates || [];
+
+            const vendorRows = await parseMicroPrecisionWorkbook(fs.readFileSync(inventoryFile.path));
+
+            const certsByKey = new Map();
+            const unmatchedCertificates = [];
+            for (const file of certFiles) {
+                const parsed = parseCertFilename(file.originalname);
+                if (!parsed) {
+                    unmatchedCertificates.push({ originalName: file.originalname, reason: 'Filename does not match the expected <CalControl>_<date>_<CertNo>.pdf pattern.' });
+                    continue;
+                }
+                certsByKey.set(`${parsed.calControl}|${parsed.date}`, {
+                    originalName: file.originalname, storedUrl: `/uploads/${path.basename(file.path)}`, certNumber: parsed.certNumber
+                });
+            }
+
+            const skippedRows = [];
+            const resultRows = [];
+            let newCount = 0, upToDateCount = 0, needsLinkingCount = 0;
+
+            for (const row of vendorRows) {
+                if (!row.lastCalDate) {
+                    skippedRows.push({ rowNum: row.rowNum, calControl: row.calControl, reason: 'No Last Cal Date on file for this gage yet -- nothing to import.' });
+                    continue;
+                }
+
+                let tool = await findToolByVendorTrackingId(pool, row.calControl);
+                let matchedOn = tool ? 'vendor_tracking_id' : null;
+
+                if (!tool && row.serialNumber) {
+                    tool = await findToolBySerialNumber(pool, row.serialNumber);
+                    if (tool) matchedOn = 'serial_number';
+                }
+
+                const certKey = `${row.calControl}|${row.lastCalDate}`;
+                const cert = certsByKey.get(certKey) || null;
+                if (cert) certsByKey.delete(certKey); // consumed -- leftovers at the end never matched any row
+
+                let match;
+                if (tool) {
+                    const currentCalDate = await getMostRecentCalDate(pool, tool.tool_id);
+                    const alreadyCurrent = !!currentCalDate && new Date(currentCalDate) >= new Date(row.lastCalDate);
+                    match = {
+                        status: alreadyCurrent ? 'already_current' : 'new',
+                        toolId: tool.tool_id, toolQrCode: tool.qr_code, toolName: tool.name, toolRetired: tool.status === 'Retired',
+                        matchedOn, currentLastCalDate: currentCalDate ? String(currentCalDate).slice(0, 10) : null
+                    };
+                    if (alreadyCurrent) upToDateCount++; else newCount++;
+                } else {
+                    match = { status: 'needs_linking', toolId: null, toolQrCode: null, toolName: null, toolRetired: false, matchedOn: null, currentLastCalDate: null };
+                    needsLinkingCount++;
+                }
+
+                resultRows.push({
+                    rowNum: row.rowNum, calControl: row.calControl, serialNumber: row.serialNumber,
+                    department: row.department, manufacturer: row.manufacturer, modelNumber: row.modelNumber,
+                    description: row.description, trackingStatus: row.trackingStatus,
+                    lastCalDate: row.lastCalDate, nextDueDate: row.nextDueDate, calibrationStatus: row.calibrationStatus,
+                    certificateFile: cert, match
+                });
+            }
+
+            for (const leftover of certsByKey.values()) {
+                unmatchedCertificates.push({ originalName: leftover.originalName, reason: 'No spreadsheet row with this Cal Control and date.' });
+            }
+
+            res.json({
+                success: true,
+                summary: { totalRows: vendorRows.length, newImport: newCount, alreadyUpToDate: upToDateCount, needsLinking: needsLinkingCount, skipped: skippedRows.length },
+                rows: resultRows, skippedRows, unmatchedCertificates
+            });
+        } catch (err) {
+            console.error('Calibration Import Analyze Error:', err);
+            res.status(500).json({ error: 'Failed to analyze the uploaded files.' });
+        }
+    }
+);
+
+// Commits a James-reviewed subset of analyze()'s proposal. One independent transaction per row
+// (not one transaction around the whole batch) -- deliberately: rows are unrelated to each other
+// (different tools), and a single bad row (a tool deleted since the review screen loaded, a
+// stale binding) must not discard a batch of other rows James already spent time deliberately
+// reviewing and checking off. Same reasoning the plain tools CSV import's own per-row try/catch
+// already uses.
+app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, requireRole(3), async (req, res) => {
+    const { actions } = req.body;
+    if (!Array.isArray(actions) || actions.length === 0) return res.status(400).json({ error: 'No actions to commit.' });
+
+    // Reject up front if two rows are bound to the same tool -- letting both through would
+    // double-insert a calibration record, and whichever runs second could undo the first's
+    // snapshot advance depending on date comparison, silently depending on loop order.
+    const countByToolId = new Map();
+    actions.forEach(a => countByToolId.set(a.toolId, (countByToolId.get(a.toolId) || 0) + 1));
+    const duplicates = [...countByToolId.entries()].filter(([, c]) => c > 1).map(([id]) => id);
+    if (duplicates.length > 0) {
+        return res.status(400).json({ error: `More than one row is bound to the same tool (tool_id ${duplicates.join(', ')}). Fix the duplicate binding and try again.` });
+    }
+
+    const results = [];
+    let imported = 0, errors = 0;
+
+    for (const action of actions) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+            const toolRes = await client.query(
+                `SELECT t.tool_id, t.qr_code, t.serial_number, d.dept_id
+                 FROM tools t
+                 LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+                 LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+                 LEFT JOIN departments d ON b.dept_id = d.dept_id
+                 WHERE t.tool_id = $1`,
+                [action.toolId]
+            );
+            if (toolRes.rows.length === 0) throw new Error('Tool not found -- it may have been deleted since this import was reviewed.');
+            const tool = toolRes.rows[0];
+
+            if (!canAccessDept(req.authUser, tool.dept_id, 3)) {
+                throw new Error('You do not have sufficient access to that department.');
+            }
+
+            // The commit body is client-supplied JSON -- validate the certificate path strictly
+            // before trusting it as a DB value rather than erroring the whole row over it; a row
+            // that fails this just imports without its certificate attached (cert_pending=true).
+            let photoUrl = null, certificateNumber = null, certPending = true;
+            if (action.certificateStoredUrl && /^\/uploads\/calcert-\d+-\d+\.pdf$/.test(action.certificateStoredUrl)) {
+                const diskPath = path.join(UPLOAD_DIR, path.basename(action.certificateStoredUrl));
+                if (fs.existsSync(diskPath)) {
+                    photoUrl = action.certificateStoredUrl;
+                    certificateNumber = action.certNumber || null;
+                    certPending = !certificateNumber;
+                }
+            }
+
+            const notesParts = [`Imported from Micro Precision (Cal Control ${action.calControl}).`];
+            if (action.calibrationStatus) notesParts.push(`Vendor Calibration Status: ${action.calibrationStatus}.`);
+            if (action.trackingStatus) notesParts.push(`Vendor Tracking Status: ${action.trackingStatus}.`);
+
+            const { calId } = await recordCalibrationEvent(client, {
+                toolId: tool.tool_id, calDate: action.lastCalDate, dueDate: action.nextDueDate,
+                provider: MICRO_PRECISION_PROVIDER_NAME, certificateNumber, certPending, standardUsed: null,
+                vendorTrackingId: action.calControl, notes: notesParts.join(' '), result: 'Pass',
+                userId: req.authUser.user_id, photoUrl, auditLogSource: 'Calibration imported from Micro Precision'
+            });
+
+            // Backfill the tool's serial number if this binding revealed one for the first time --
+            // checked proactively (not caught after a failed UPDATE) since a real constraint
+            // violation here would poison the rest of this transaction. Never fails the row over
+            // a conflict -- the calibration record already committed is the important part.
+            let serialBackfillNote = null;
+            if (action.serialNumber && !tool.serial_number) {
+                const conflict = await client.query(
+                    'SELECT tool_id FROM tools WHERE tool_id != $1 AND LOWER(TRIM(serial_number)) = LOWER(TRIM($2))',
+                    [tool.tool_id, action.serialNumber]
+                );
+                if (conflict.rows.length === 0) {
+                    await client.query('UPDATE tools SET serial_number = $1 WHERE tool_id = $2', [action.serialNumber, tool.tool_id]);
+                } else {
+                    serialBackfillNote = ` Serial number not saved -- already registered to a different tool.`;
+                }
+            }
+
+            await client.query('COMMIT');
+            imported++;
+            results.push({
+                rowNum: action.rowNum, calControl: action.calControl, toolId: tool.tool_id, toolQrCode: tool.qr_code,
+                result: 'imported', calId, message: `Calibration record added.${serialBackfillNote || ''}`
+            });
+        } catch (err) {
+            await client.query('ROLLBACK');
+            errors++;
+            results.push({ rowNum: action.rowNum, calControl: action.calControl, toolId: action.toolId || null, result: 'error', message: err.message });
+        } finally {
+            client.release();
+        }
+    }
+
+    res.json({ success: true, results, summary: { imported, errors } });
 });
 
 // ==========================================
