@@ -4547,8 +4547,8 @@ async function deleteToolGroup(id) {
 /**
  * Fills #calendar-feed-body (super_admin only card in the Reports workspace) from
  * GET /api/settings/calendar-feed-token. Shows setup instructions if CALENDAR_FEED_TOKEN
- * isn't configured server-side yet, or the actual subscribe URL (built client-side from
- * location.origin + the token, since the server only knows the token itself) if it is.
+ * isn't configured server-side yet, or the actual subscribe URL (server-built on the known
+ * public origin, NOT location.origin -- this page may be open on the LAN address) if it is.
  */
 async function loadCalendarFeedInfo() {
     const body = document.getElementById('calendar-feed-body');
@@ -4565,7 +4565,7 @@ async function loadCalendarFeedInfo() {
                 </div>`;
             return;
         }
-        const url = `${location.origin}/api/calendar/calibration.ics?token=${encodeURIComponent(data.token)}`;
+        const url = data.feedUrl;
         body.innerHTML = `
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                 <input class="form-input" id="calendar-feed-url" value="${url}" readonly style="flex:1; min-width:220px; font-family:monospace; font-size:12px;">

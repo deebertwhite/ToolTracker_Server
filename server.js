@@ -57,6 +57,12 @@ const ALLOWED_ORIGINS = [
     'https://lta-tooltracker.duckdns.org',
     'http://localhost:3000',
 ];
+// The one public origin this deployment is actually reachable at from the outside internet
+// (Google/Outlook/Apple's calendar servers, a phone off the LAN, etc) -- as opposed to
+// whatever host a given browser happens to be on (e.g. the LAN's tooltracker.local:3000),
+// which only resolves/responds on the local network. Anything handed to an external service
+// (the calendar feed subscribe URL, this session) must use this, not req.get('host')/location.origin.
+const PUBLIC_BASE_URL = ALLOWED_ORIGINS[0];
 app.use(cors({
     origin: (origin, callback) => {
         // No Origin header at all (same-origin requests, curl, server-to-server) -- always allowed.
@@ -5721,7 +5727,12 @@ function formatIcsDate(dateStr) {
 app.get('/api/settings/calendar-feed-token', requireRole(4), async (req, res) => {
     const token = process.env.CALENDAR_FEED_TOKEN;
     if (!token) return res.json({ configured: false });
-    res.json({ configured: true, token });
+    // Built server-side with the known public origin -- not left to the client to stitch onto
+    // location.origin, which silently produces an unreachable tooltracker.local URL whenever
+    // the admin happens to be on the LAN address instead of the public HTTPS domain (Google's
+    // calendar servers can't resolve or reach that at all, and fail completely silently).
+    const feedUrl = `${PUBLIC_BASE_URL}/api/calendar/calibration.ics?token=${encodeURIComponent(token)}`;
+    res.json({ configured: true, feedUrl });
 });
 
 /**
