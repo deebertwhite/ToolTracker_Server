@@ -618,12 +618,19 @@ async function openToolboxPrintSheet(boxId) {
     // photo. Neither of these two layouts has that overlap risk (a sidebar list and an
     // auto-wrapping grid both just add rows as needed), so there's no reason to drop the name/ID
     // text here too.
+    // min-width:0 at EVERY flex level between here and the grid cell it's actually drawn in
+    // (this div, and detailRow's own wrapper below) -- a flex/grid item defaults to
+    // min-width:auto, which refuses to shrink below its content's natural width unless
+    // overridden. Without it, a long name's nowrap text doesn't just fail to ellipsis -- the
+    // whole card grows wider than its grid track and physically overlaps the next one, which
+    // is what James saw as the name looking like it ran "outside the box" on one card and
+    // "cut off" on its neighbor (the next card's opaque background painting over it).
     const toolCard = (t, codeSizePx) => `
-        <div style="display:flex; align-items:center; gap:4px; white-space:nowrap;">
+        <div style="display:flex; align-items:center; gap:4px; white-space:nowrap; min-width:0;">
             <img src="/api/tools/${t.tool_id}/scan-code.png" style="width:${codeSizePx}px; height:${codeSizePx}px; object-fit:contain; flex-shrink:0;">
             <div style="line-height:1.15; min-width:0;">
-                <div style="font-size:12px; font-weight:bold; white-space:${codeSizePx > 40 ? 'nowrap' : 'normal'};">${t.name}</div>
-                <div style="font-size:11px; font-family:monospace;">${t.qr_code}</div>
+                <div style="font-size:12px; font-weight:bold; white-space:${codeSizePx > 40 ? 'nowrap' : 'normal'}; ${codeSizePx > 40 ? 'overflow:hidden; text-overflow:ellipsis;' : ''}">${t.name}</div>
+                <div style="font-size:11px; font-family:monospace; ${codeSizePx > 40 ? 'overflow:hidden; text-overflow:ellipsis;' : ''}">${t.qr_code}</div>
             </div>
         </div>`;
 
@@ -646,7 +653,7 @@ async function openToolboxPrintSheet(boxId) {
     // matching the one floated over this tool's position on the map page (null for an
     // unpositioned tool, which has no map badge to match).
     const detailRow = (t, number) => `
-        <div style="display:flex; align-items:center; gap:8px; border:1px solid #ccc; border-radius:5px; padding:6px;">
+        <div style="display:flex; align-items:center; gap:8px; border:1px solid #ccc; border-radius:5px; padding:6px; min-width:0;">
             ${numberBadge(number, 22)}
             ${toolCard(t, 44)}
         </div>`;
@@ -668,7 +675,7 @@ async function openToolboxPrintSheet(boxId) {
             // separate Tool List page for this case.
             const grid = tools.length
                 ? `<div style="flex:1 1 auto; min-height:0; overflow:hidden; display:grid; grid-auto-rows:min-content; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:10px; align-content:start;">
-                        ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px;">${toolCard(t, 50)}</div>`).join('')}
+                        ${tools.sort(byName).map(t => `<div style="border:1px solid #ccc; border-radius:5px; padding:6px; min-width:0;">${toolCard(t, 50)}</div>`).join('')}
                    </div>`
                 : `<div style="flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center;">${emptyDrawerStamp(64, false)}</div>`;
             return pageDiv(`${pageTitle(drawer)}${grid}`);
