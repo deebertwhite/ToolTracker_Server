@@ -29,6 +29,11 @@ let kioskToolItemNumberByQr = {};
 // the other per-qr lookups in loadKioskToolNames(); see describeToolLocation()/renderQueue().
 let kioskToolBoxByQr = {};
 let kioskToolDrawerByQr = {};
+// Photo per qr_code, for a thumbnail in the checkout/check-in scan queue (James, per a tech's
+// request: seeing the actual tool, not just its name/code, helps confirm the right physical
+// item got scanned -- especially among several similar-looking tools). Populated alongside the
+// other per-qr lookups in loadKioskToolNames(); see renderQueue().
+let kioskToolPhotoByQr = {};
 
 // Specific Audit State Variables
 let auditTools = []; // tools currently 'In' this box -- physically confirmed, submitted as 'Present'
@@ -403,11 +408,13 @@ async function loadKioskToolNames() {
         kioskToolDeptByQr = {};
         kioskToolBoxByQr = {};
         kioskToolDrawerByQr = {};
+        kioskToolPhotoByQr = {};
         (data.tools || []).forEach(t => {
             kioskToolNameByQr[t.qr_code] = t.name;
             kioskToolDeptByQr[t.qr_code] = t.tool_dept_id;
             kioskToolBoxByQr[t.qr_code] = t.toolbox_name;
             kioskToolDrawerByQr[t.qr_code] = t.drawer_name;
+            kioskToolPhotoByQr[t.qr_code] = t.photo_url;
         });
 
         // Item numbers: group positioned tools by drawer and rank each drawer's own tools in
@@ -650,23 +657,38 @@ function handleToolScan() {
  * number against the drawer's printed shadow-board sheet or the on-screen map -- and the bare
  * ID last, de-emphasized, only shown alongside a real name (falls back to the ID alone as the
  * primary label if the name lookup hasn't resolved yet or the tool isn't in it for some reason).
+ * Also leads with a small photo thumbnail (a wrench/box icon as a placeholder where there's no
+ * photo on file) -- a tech's request, so the right physical tool can be visually confirmed at a
+ * glance rather than only by reading a code. Bounded to just what's actually in the queue (a
+ * handful of items at a time), unlike the full tree admin.js's Master Storage view can build --
+ * no connection-starvation risk here.
  */
 function renderQueue() {
     document.getElementById('queue-count').textContent = batchQueue.length;
     const liveCount = document.getElementById('queue-count-live');
     if (liveCount) liveCount.textContent = batchQueue.length;
-    document.getElementById('queue-list').innerHTML = batchQueue.map((qr, index) => `
+    document.getElementById('queue-list').innerHTML = batchQueue.map((qr, index) => {
+        const isBox = isToolboxCode(qr);
+        const photoUrl = !isBox ? kioskToolPhotoByQr[qr] : null;
+        const thumb = photoUrl
+            ? `<img src="${photoUrl}" loading="lazy" style="width:44px;height:44px;border-radius:6px;object-fit:cover;flex-shrink:0;">`
+            : `<div style="width:44px;height:44px;border-radius:6px;background:var(--surface);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted);">${icon(isBox ? 'package' : 'wrench')}</div>`;
+        const detail = isBox
+            ? `<strong>${qr}</strong> <span style="color:var(--accent); font-size:11px;">(whole toolbox)</span>`
+            : (() => {
+                const loc = describeToolLocation(qr);
+                return `${loc.location ? `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.3px;">${loc.location}</div>` : ''}
+                        <div>${loc.itemBadge}<strong>${loc.name}</strong>${loc.showId ? ` <span style="color:var(--muted); font-size:11px;">(${qr})</span>` : ''}</div>`;
+            })();
+        return `
         <div class="batch-item">
-            <div>${isToolboxCode(qr)
-                ? `${icon('package')} <strong>${qr}</strong> <span style="color:var(--accent); font-size:11px;">(whole toolbox)</span>`
-                : (() => {
-                    const loc = describeToolLocation(qr);
-                    return `${loc.location ? `<div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.3px;">${loc.location}</div>` : ''}
-                            <div>${icon('wrench')} ${loc.itemBadge}<strong>${loc.name}</strong>${loc.showId ? ` <span style="color:var(--muted); font-size:11px;">(${qr})</span>` : ''}</div>`;
-                })()}</div>
-            <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;" onclick="removeItem(${index})">${icon('x')}</div>
-        </div>
-    `).join('');
+            <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                ${thumb}
+                <div style="min-width:0;">${detail}</div>
+            </div>
+            <div style="color:var(--red);cursor:pointer;font-weight:bold;font-size:16px;padding:0 10px;flex-shrink:0;" onclick="removeItem(${index})">${icon('x')}</div>
+        </div>`;
+    }).join('');
 }
 
 /**
