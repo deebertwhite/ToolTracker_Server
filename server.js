@@ -3689,19 +3689,32 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
                 throw new Error('You do not have sufficient access to that department.');
             }
 
+            // Resolved either explicitly (attachCertOnly, flagged at analyze time) or discovered
+            // fresh right here as a safety net: analyze and commit can be far apart in practice
+            // (a review session spanning hours, or a "needs linking" row manually bound to a tool
+            // that -- unbeknownst to the matcher at analyze time, since it never found the tool at
+            // all -- already has this exact date on file). Either way, an already-covered date
+            // gets its proof document attached to the EXISTING record rather than a duplicate
+            // historical row for a date that isn't actually new.
+            let targetCalId = action.attachCertOnly ? action.existingCalId : null;
+            if (!action.attachCertOnly) {
+                const existingRecord = await getMostRecentCalRecord(client, tool.tool_id);
+                if (existingRecord && action.lastCalDate && new Date(existingRecord.cal_date) >= new Date(action.lastCalDate)) {
+                    targetCalId = existingRecord.cal_id;
+                }
+            }
+
             let resultEntry;
-            if (action.attachCertOnly) {
-                // An already-current row where a matching certificate turned up in this batch --
-                // the date doesn't need updating, so this attaches the proof document to the
-                // EXISTING record instead of inserting a duplicate/new one (see certAttachable
-                // in the analyze endpoint above).
+            if (targetCalId) {
                 const { photoUrl, certificateNumber, certPending } = resolveCertificateAttachment(action);
-                if (!photoUrl) throw new Error('Certificate file could not be found on disk -- try re-uploading it.');
+                if (!photoUrl) throw new Error(action.attachCertOnly
+                    ? 'Certificate file could not be found on disk -- try re-uploading it.'
+                    : 'This date is already on file for this tool, and no certificate was found to attach -- nothing to do.');
                 const updateRes = await client.query(
                     `UPDATE calibration_records SET photo_url = $1, certificate_number = $2, cert_pending = $3,
                          vendor_tracking_id = COALESCE(vendor_tracking_id, $4)
                      WHERE cal_id = $5 AND tool_id = $6 RETURNING cal_id`,
-                    [photoUrl, certificateNumber, certPending, action.calControl, action.existingCalId, tool.tool_id]
+                    [photoUrl, certificateNumber, certPending, action.calControl, targetCalId, tool.tool_id]
                 );
                 if (updateRes.rows.length === 0) throw new Error('That calibration record no longer exists on this tool -- it may have been corrected or removed since this import was reviewed.');
                 await client.query(
@@ -3709,7 +3722,7 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
                     [req.authUser.user_id, tool.tool_id, `Certificate attached from Micro Precision (Cal Control ${action.calControl}) to an existing calibration record.`]
                 );
                 const serialBackfillNote = await backfillSerialNumber(client, tool, action.serialNumber);
-                resultEntry = { calId: action.existingCalId, message: `Certificate attached to existing record.${serialBackfillNote || ''}` };
+                resultEntry = { calId: targetCalId, message: `Certificate attached to existing record.${serialBackfillNote || ''}` };
             } else {
                 const { photoUrl, certificateNumber, certPending } = resolveCertificateAttachment(action);
 
