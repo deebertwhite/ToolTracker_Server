@@ -535,6 +535,13 @@
                     <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">A private, read-only calendar of every calibrated tool's due date. Subscribe from Google/Outlook/Apple Calendar ("From URL") for auto-refreshing reminders, or download and import a snapshot.</p>
                     <div id="calendar-feed-body">Loading…</div>
                 </div>
+
+                <!-- super_admin only (server-gated via requireRole(4) on GET /api/admin/export-all) -- hidden for everyone else by bootstrapAdminUI's weight<4 block, same as #card-calendar-feed. -->
+                <div class="card no-print" id="card-data-export">
+                    <h3 style="margin-bottom: 8px;">Full Data Export</h3>
+                    <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">A single download bundling the entire database, every uploaded photo and certificate, and the logger's hourly/daily files -- everything needed to fully reconstitute this deployment. Can take a few minutes for a large inventory. The same export is also available by hand on the Pi for copying to a second drive: <code>bash scripts/export-all-data.sh /path/to/drive</code>.</p>
+                    <button type="button" class="btn btn-primary" style="width:auto;" onclick="window.location.href='/api/admin/export-all'"><span class="icon" data-icon="download"></span> Download All Data</button>
+                </div>
             </div>
 
         </div>

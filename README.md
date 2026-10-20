@@ -371,7 +371,21 @@ Protects against a different failure than #1: losing the *entire* Pi (stolen, de
 
 To restore from one of these backups: download it from the `ToolTracker_Backups` folder in Drive (`rclone copy gdrive:ToolTracker_Backups/<file> .`), then follow step 5 of the migration procedure above.
 
-### 3. DuckDNS stays in sync with the Pi's local IP automatically
+### 3. A full, on-demand data export (not just the database)
+
+The backup above is database-only, on a timer, going to the cloud. For a complete, on-demand copy of everything -- the database, every uploaded tool photo and calibration certificate, and the hourly/daily logger files -- use `scripts/export-all-data.sh` instead:
+
+```bash
+# Bundles everything into a timestamped .tar.gz in /tmp
+bash scripts/export-all-data.sh
+
+# Or copy it straight to a second drive once it's plugged in and mounted
+bash scripts/export-all-data.sh /path/to/mounted/drive
+```
+
+The same script backs the admin panel's "Download All Data" button (Reports workspace, super_admin only: `GET /api/admin/export-all`), so the manual and in-app paths always produce an identical archive.
+
+### 4. DuckDNS stays in sync with the Pi's local IP automatically
 
 Covered in [If the Pi's local IP ever changes](#if-the-pis-local-ip-ever-changes) above — `scripts/update-duckdns-ip.sh` runs every 5 minutes via `tooltracker-duckdns-update.timer`, so a DHCP lease change (no router-level reservation yet) gets corrected automatically instead of silently breaking access for everyone until it's noticed. Setup, if redoing this on a new Pi:
 

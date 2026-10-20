@@ -31,6 +31,9 @@ const { parse: parseCsv } = require('csv-parse/sync');
 const { stringify: stringifyCsv } = require('csv-stringify/sync');
 const ExcelJS = require('exceljs');
 const nodemailer = require('nodemailer');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 const { generatePngAtSize, generateQrPngAtSize, addNameRow } = require('./scripts/lib/datamatrix');
 const { buildZip } = require('./scripts/lib/zip');
 
@@ -1934,7 +1937,7 @@ app.post('/api/departments', requireFetchHeader, requireRole(4), async (req, res
 // means literally none, a stricter and different question than "does this need auditing right
 // now."
 app.put('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, res) => {
-    const { name, cross_checkout_group_id, no_tool_inventory } = req.body;
+    const { name, cross_checkout_group_id, no_tool_inventory, notify_incidents, notify_still_checked_out, notify_cal_due } = req.body;
     try {
         if (no_tool_inventory) {
             const toolCheck = await pool.query(
@@ -1949,8 +1952,10 @@ app.put('/api/departments/:id', requireFetchHeader, requireRole(4), async (req, 
             }
         }
         await pool.query(
-            'UPDATE departments SET name = $1, cross_checkout_group_id = $2, no_tool_inventory = $3 WHERE dept_id = $4',
-            [name, cross_checkout_group_id || null, !!no_tool_inventory, req.params.id]
+            `UPDATE departments SET name = $1, cross_checkout_group_id = $2, no_tool_inventory = $3,
+                 notify_incidents = $4, notify_still_checked_out = $5, notify_cal_due = $6
+             WHERE dept_id = $7`,
+            [name, cross_checkout_group_id || null, !!no_tool_inventory, !!notify_incidents, !!notify_still_checked_out, !!notify_cal_due, req.params.id]
         );
         res.json({ success: true });
     } catch (err) {
@@ -3785,11 +3790,16 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
 // credentials are added, with no code change needed either way.
 //
 // Slack: a plain Incoming Webhook (SLACK_WEBHOOK_URL) -- one POST, no OAuth app/bot to register.
+// Shop-wide/shared, not per department (James chose one shared Slack destination over a separate
+// channel per department) -- per-department CONTROL is which event types reach it at all (see
+// departments.notify_incidents/notify_still_checked_out/notify_cal_due, migration 027), not a
+// different destination per department.
 // Email: any standard SMTP provider via nodemailer, not one vendor's proprietary REST API --
 // SMTP_HOST/PORT/USER/PASS can point at SendGrid, Mailgun, AWS SES, Office365, or a plain Gmail
-// relay without any code change, and NOTIFY_EMAIL_TO is a comma-separated recipient list (there's
-// no per-user notification-preference concept yet -- everyone who should see these goes in one
-// shared list for now).
+// relay without any code change. Recipients are computed per department (see
+// getNotificationRecipients() below) from each user's own account email rather than a separate
+// list to maintain; NOTIFY_EMAIL_TO (if set) is additionally cc'd on every email regardless of
+// department, for a fixed "send me everything" address.
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || null;
 const NOTIFY_EMAIL_TO = (process.env.NOTIFY_EMAIL_TO || '').split(',').map(s => s.trim()).filter(Boolean);
 const emailTransport = (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)
@@ -3813,10 +3823,10 @@ async function sendSlackNotification(text) {
     }
 }
 
-async function sendEmailNotification(subject, text) {
-    if (!emailTransport || NOTIFY_EMAIL_TO.length === 0) return false;
+async function sendEmailNotification(to, subject, text) {
+    if (!emailTransport || !to || to.length === 0) return false;
     try {
-        await emailTransport.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: NOTIFY_EMAIL_TO.join(', '), subject, text });
+        await emailTransport.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: to.join(', '), subject, text });
         return true;
     } catch (err) {
         console.error('Email notification error:', err.message);
@@ -3824,12 +3834,28 @@ async function sendEmailNotification(subject, text) {
     }
 }
 
+// Who should get an EMAIL about something concerning a specific department: every active
+// super_admin (shop-wide oversight, regardless of their own dept_id) plus that department's own
+// active dept_admins -- anyone with no email on their account is silently excluded rather than
+// erroring. deptId may be null (an orphaned tool with no resolvable department) -- the dept_admin
+// half of the match just yields nothing in that case, which is fine. NOTIFY_EMAIL_TO is always
+// included on top of whatever this resolves to.
+async function getNotificationRecipients(deptId) {
+    const result = await pool.query(
+        `SELECT DISTINCT email FROM users
+         WHERE is_active = true AND email IS NOT NULL AND TRIM(email) != ''
+           AND (role = 'super_admin' OR (role = 'dept_admin' AND dept_id = $1))`,
+        [deptId]
+    );
+    return [...new Set([...result.rows.map(r => r.email), ...NOTIFY_EMAIL_TO])];
+}
+
 // Fires both configured channels for one event -- call sites don't need to know which channels
 // (if any) are actually set up. Deliberately fire-and-forget: a notification failing must never
 // block or roll back the real action (a checkout, an incident report) that triggered it.
-function notifyEvent(subject, text) {
+function notifyEvent(subject, text, emailRecipients) {
     sendSlackNotification(`*${subject}*\n${text}`).catch(() => {});
-    sendEmailNotification(subject, text).catch(() => {});
+    sendEmailNotification(emailRecipients, subject, text).catch(() => {});
 }
 
 // ==========================================
@@ -4717,7 +4743,8 @@ app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above a
         // physically moved (or its drawer reassigned), the incident record shouldn't
         // silently follow it.
         const toolRes = await client.query(
-            `SELECT t.tool_id, t.name AS tool_name, t.status, d.name AS dept_name, b.name AS box_name, dr.name AS drawer_name
+            `SELECT t.tool_id, t.name AS tool_name, t.status, d.dept_id, d.name AS dept_name,
+                    COALESCE(d.notify_incidents, true) AS notify_incidents, b.name AS box_name, dr.name AS drawer_name
              FROM tools t
              LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
              LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -4751,11 +4778,14 @@ app.post('/api/kiosk/report-issue', /* DISABLED: authLimiter -- see note above a
         );
 
         await client.query('COMMIT');
-        notifyEvent(
-            `Tool Reported ${issue_type}`,
-            `${tool.tool_name} (${qr_code}) was reported ${issue_type} by ${user.full_name || user.badge_id}.` +
-            `${tool.dept_name ? ` Department: ${tool.dept_name}.` : ''}${notes ? ` Notes: ${notes}` : ''}`
-        );
+        if (tool.notify_incidents) {
+            getNotificationRecipients(tool.dept_id).then(recipients => notifyEvent(
+                `Tool Reported ${issue_type}`,
+                `${tool.tool_name} (${qr_code}) was reported ${issue_type} by ${user.full_name || user.badge_id}.` +
+                `${tool.dept_name ? ` Department: ${tool.dept_name}.` : ''}${notes ? ` Notes: ${notes}` : ''}`,
+                recipients
+            )).catch(() => {});
+        }
         res.json({ success: true, tool: { tool_id: tool.tool_id, status: issue_type } });
     } catch (err) {
         await client.query('ROLLBACK');
@@ -5927,6 +5957,37 @@ app.get('/api/calendar/calibration.ics', calendarFeedLimiter, async (req, res) =
 });
 
 // ==========================================
+// 8.7 FULL DATA EXPORT (James's second-USB-drive / "download everything" request)
+// ==========================================
+// Shells out to scripts/export-all-data.sh -- the SAME script covers both this in-app download
+// and James's own manual second-drive workflow (`bash scripts/export-all-data.sh /path/to/drive`
+// run by hand over SSH), so there's exactly one definition of "the full export" rather than two
+// that could drift apart. super_admin-only: this bundles the entire database (every user,
+// every tool, every calibration record) plus every uploaded photo and certificate, not a
+// narrow slice -- the most sensitive export surface in the app.
+app.get('/api/admin/export-all', requireFetchHeader, requireRole(4), async (req, res) => {
+    let archivePath = null;
+    try {
+        const { stdout } = await execFileAsync('bash', ['scripts/export-all-data.sh'], {
+            cwd: __dirname, maxBuffer: 10 * 1024 * 1024, timeout: 10 * 60 * 1000
+        });
+        archivePath = stdout.trim();
+        if (!archivePath || !fs.existsSync(archivePath)) {
+            console.error('Export script produced no file. Output:', stdout);
+            return res.status(500).json({ error: 'Export failed -- no archive produced.' });
+        }
+        res.download(archivePath, path.basename(archivePath), (err) => {
+            if (err) console.error('Export download error:', err.message);
+            fs.unlink(archivePath, () => {}); // best-effort cleanup either way -- never leave it sitting in /tmp
+        });
+    } catch (err) {
+        console.error('Export-all failed:', err.message);
+        if (archivePath) fs.unlink(archivePath, () => {});
+        res.status(500).json({ error: 'Failed to generate the data export.' });
+    }
+});
+
+// ==========================================
 // 9. AUTOMATED BACKGROUND LOGGER
 // ==========================================
 const hourlyDir = path.join(LOG_DIR, 'hourly');
@@ -6184,43 +6245,61 @@ async function generateDailyLog() {
 // Two daily notification digests (see "6.6 NOTIFICATIONS" above for the actual Slack/email
 // senders) -- reuse the exact same queries/helper (getOutToolsForDept) the human-readable daily
 // log above already computes, rather than a second source of truth for "what's out" or "what's
-// due soon". Both are a single shop-wide digest (one Slack message / one email), not routed per
-// department or per person -- there's no per-user notification-preference concept yet. Fires once
-// per calendar day (the same day-rollover this file already detects for generateDailyLog, just
-// tracked independently below) -- NOT tied to each department's own configured audit window
-// times specifically (see getDeptAuditSchedule), since those can differ per department; this is
-// a simpler once-a-day "here's what's still out" sweep across all of them.
+// due soon". Slack stays ONE combined shop-wide message (James chose a shared destination over a
+// channel per department), but each department can opt out of a given digest entirely
+// (notify_still_checked_out/notify_cal_due, migration 027) -- an opted-out department's tools
+// just don't appear in that day's message at all. Email, by contrast, IS split per department --
+// a separate email per department to that department's own recipients (getNotificationRecipients),
+// not one combined email naming every department to everyone. Fires once per calendar day (the
+// same day-rollover this file already detects for generateDailyLog, just tracked independently
+// below) -- NOT tied to each department's own configured audit window times specifically (see
+// getDeptAuditSchedule), since those can differ per department; this is a simpler once-a-day
+// "here's what's still out" sweep across whichever departments want it.
 const CAL_DUE_SOON_DAYS = Number(process.env.CAL_DUE_SOON_DAYS) || 7;
 
 async function notifyStillCheckedOut() {
-    const depts = await pool.query('SELECT dept_id, name FROM departments WHERE NOT no_tool_inventory ORDER BY name ASC');
-    const lines = [];
+    const depts = await pool.query('SELECT dept_id, name FROM departments WHERE NOT no_tool_inventory AND notify_still_checked_out ORDER BY name ASC');
+    const slackLines = [];
     for (const dept of depts.rows) {
         const outRows = await getOutToolsForDept(pool, dept.dept_id);
         if (outRows.length === 0) continue;
-        lines.push(`${dept.name}:`);
-        outRows.forEach(r => lines.push(`  - ${r.tool_name} (${r.qr_code}) -- ${r.user_name || 'unknown'}, since ${r.timestamp ? new Date(r.timestamp).toLocaleDateString() : 'unknown'}`));
+        const deptLines = outRows.map(r => `  - ${r.tool_name} (${r.qr_code}) -- ${r.user_name || 'unknown'}, since ${r.timestamp ? new Date(r.timestamp).toLocaleDateString() : 'unknown'}`);
+        slackLines.push(`${dept.name}:`, ...deptLines);
+
+        const recipients = await getNotificationRecipients(dept.dept_id);
+        sendEmailNotification(recipients, 'Tools Still Checked Out', `${dept.name}:\n${deptLines.join('\n')}`).catch(() => {});
     }
-    if (lines.length === 0) return; // nothing out anywhere -- no need to notify "nothing to report" every day
-    notifyEvent('Tools Still Checked Out', lines.join('\n'));
+    if (slackLines.length === 0) return; // nothing out anywhere that wants reporting -- no need to post "nothing to report" every day
+    sendSlackNotification(`*Tools Still Checked Out*\n${slackLines.join('\n')}`).catch(() => {});
 }
 
 async function notifyUpcomingCalibrations() {
     const result = await pool.query(
-        `SELECT t.qr_code, t.name AS tool_name, t.cal_due_date::text AS cal_due_date, d.name AS dept_name
+        `SELECT t.qr_code, t.name AS tool_name, t.cal_due_date::text AS cal_due_date, d.dept_id, d.name AS dept_name
          FROM tools t
          JOIN drawers dr ON t.drawer_id = dr.drawer_id
          JOIN toolboxes b ON dr.box_id = b.box_id
          JOIN departments d ON b.dept_id = d.dept_id
          WHERE t.is_calibrated = true AND t.status != 'Retired' AND t.cal_due_date IS NOT NULL
            AND t.cal_due_date <= (CURRENT_DATE + ($1 * INTERVAL '1 day'))
-         ORDER BY t.cal_due_date ASC`,
+           AND d.notify_cal_due
+         ORDER BY d.name ASC, t.cal_due_date ASC`,
         [CAL_DUE_SOON_DAYS]
     );
     if (result.rows.length === 0) return;
     const today = new Date(new Date().toDateString());
-    const lines = result.rows.map(r => `  - ${r.tool_name} (${r.qr_code}, ${r.dept_name}) -- due ${r.cal_due_date}${new Date(r.cal_due_date) < today ? ' (OVERDUE)' : ''}`);
-    notifyEvent('Calibrations Due Soon', `Due within ${CAL_DUE_SOON_DAYS} days or already overdue:\n${lines.join('\n')}`);
+    const byDept = new Map();
+    result.rows.forEach(r => {
+        if (!byDept.has(r.dept_id)) byDept.set(r.dept_id, { name: r.dept_name, lines: [] });
+        byDept.get(r.dept_id).lines.push(`  - ${r.tool_name} (${r.qr_code}) -- due ${r.cal_due_date}${new Date(r.cal_due_date) < today ? ' (OVERDUE)' : ''}`);
+    });
+    const slackLines = [];
+    for (const [deptId, group] of byDept) {
+        slackLines.push(`${group.name}:`, ...group.lines);
+        const recipients = await getNotificationRecipients(deptId);
+        sendEmailNotification(recipients, 'Calibrations Due Soon', `${group.name} -- due within ${CAL_DUE_SOON_DAYS} days or overdue:\n${group.lines.join('\n')}`).catch(() => {});
+    }
+    sendSlackNotification(`*Calibrations Due Soon (within ${CAL_DUE_SOON_DAYS} days or overdue)*\n${slackLines.join('\n')}`).catch(() => {});
 }
 
 let lastHourlyLog = new Date().getHours();

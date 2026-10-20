@@ -225,6 +225,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('card-manage-depts', 'none');
         safeSetDisplay('card-manage-dept-groups', 'none');
         safeSetDisplay('card-calendar-feed', 'none');
+        safeSetDisplay('card-data-export', 'none');
     }
     if (currentAdminWeight < 3) {
         safeSetDisplay('card-manage-boxes', 'none');
@@ -2549,6 +2550,11 @@ function openEntityModal(type, id) {
             <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Prefix Code</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.prefix_code}</div></div>
             <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Cross-Checkout Group</div><div style="font-size:14px;margin-top:4px;">${currentDeptGroup ? currentDeptGroup.name : '-- None --'}</div></div>
             <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Tool Inventory</div><div style="font-size:14px;margin-top:4px;">${entity.no_tool_inventory ? 'Not tracked (excluded from audits)' : 'Tracked'}</div></div>
+            <div style="margin-top:15px;"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Notifications</div><div style="font-size:14px;margin-top:4px;">${[
+                entity.notify_incidents !== false ? 'Incidents' : null,
+                entity.notify_still_checked_out !== false ? 'Still Checked Out' : null,
+                entity.notify_cal_due !== false ? 'Calibration Due' : null,
+            ].filter(Boolean).join(', ') || 'None'}</div></div>
         `;
         fieldsHtml = `
             <div class="form-group"><label class="form-label">Department Name</label><input class="form-input" id="em-input-name" value="${entity.name}"></div>
@@ -2575,6 +2581,22 @@ function openEntityModal(type, id) {
                         ? "Can't enable -- this department still has tools assigned. Move or retire them first."
                         : 'Removes this department from the Audit Schedule card and the audit-status dashboard/kiosk chips -- for a department that will never hold a tool.'}
                 </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Notify This Department On</label>
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:13px; margin-bottom:6px;">
+                    <input type="checkbox" id="em-input-notify-incidents" ${entity.notify_incidents !== false ? 'checked' : ''}>
+                    A tool reported Missing/Broken/Worn
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:13px; margin-bottom:6px;">
+                    <input type="checkbox" id="em-input-notify-checked-out" ${entity.notify_still_checked_out !== false ? 'checked' : ''}>
+                    Daily digest of tools still checked out
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:13px;">
+                    <input type="checkbox" id="em-input-notify-cal-due" ${entity.notify_cal_due !== false ? 'checked' : ''}>
+                    Daily digest of calibrations due soon/overdue
+                </label>
+                <div style="font-size:11px; margin-top:4px; color:var(--muted);">Sent to a shared Slack channel (if configured) and to this department's admins by email -- see Settings for the shop-wide Slack/email setup.</div>
             </div>
         `;
 
@@ -3896,6 +3918,9 @@ async function saveEntityUpdates() {
             endpoint = `/api/departments/${id}`;
             payload.cross_checkout_group_id = document.getElementById('em-input-dept-group').value || null;
             payload.no_tool_inventory = document.getElementById('em-input-no-inventory').checked;
+            payload.notify_incidents = document.getElementById('em-input-notify-incidents').checked;
+            payload.notify_still_checked_out = document.getElementById('em-input-notify-checked-out').checked;
+            payload.notify_cal_due = document.getElementById('em-input-notify-cal-due').checked;
         }
         else if (type === 'toolbox') { endpoint = `/api/toolboxes/${id}`; }
         else if (type === 'drawer') { endpoint = `/api/drawers/${id}`; }
