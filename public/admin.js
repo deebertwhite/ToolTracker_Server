@@ -4714,11 +4714,19 @@ async function analyzeMpcImport() {
 }
 
 /** One shared `<datalist>` of every non-Retired tool (qr_code + name, searchable by either since both are in the option's value), referenced by every "needs linking" row's picker input -- one shared list instead of a separate `<select>` with hundreds of `<option>`s repeated per row. */
+// Includes the tool's serial number in the searchable option text (not just QR/name) -- a
+// native <datalist> only filters by substring-matching the whole option value, so without this,
+// typing a serial number (exactly the kind of identifier someone would have on hand from a
+// vendor cert, or from an older tool where the vendor's own ID was manually recorded as the
+// "serial number" before this importer existed -- see AVI-0332/AVI-0336's history) could never
+// find anything, even though the tool is right there. onMpcToolPickerInput() only ever reads the
+// FIRST " -- "-delimited segment back out as the qr_code, so appending more text after the name
+// is safe regardless of which suggestion ends up selected.
 function buildMpcToolDatalist() {
     const options = globalToolsCache
         .filter(t => t.status !== 'Retired')
         .sort((a, b) => a.qr_code.localeCompare(b.qr_code, undefined, { numeric: true }))
-        .map(t => `<option value="${t.qr_code} -- ${t.name}">`)
+        .map(t => `<option value="${t.qr_code} -- ${t.name}${t.serial_number ? ` (SN: ${t.serial_number})` : ''}">`)
         .join('');
     return `<datalist id="mpc-tool-datalist">${options}</datalist>`;
 }
