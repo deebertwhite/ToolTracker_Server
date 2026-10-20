@@ -4679,7 +4679,10 @@ function closeCredentialsModal() {
 // everything and gets back a full proposal with nothing yet written to the database;
 // commitMpcImport() sends back only the rows James actually checked.
 let mpcAnalysisResult = null; // last response from POST .../analyze, re-rendered by renderMpcReviewScreen()
-let mpcManualBindings = {}; // rowNum -> {toolId, qrCode, name} -- filled in by onMpcToolPickerInput() for "needs linking" rows
+let mpcManualBindings = {}; // rowNum -> {toolId, qrCode, name} -- filled in by selectMpcPickerResult() (cleared by clearMpcToolBinding()) for "needs linking" rows
+let mpcPickerRowNum = null; // which "needs linking" row #mpc-tool-picker-overlay is currently open for (see openMpcToolPicker())
+let mpcPickerResults = [];  // the up-to-50 tools currently rendered in #mpc-picker-results, indexed the same as the rendered rows -- read by keyboard nav/selection
+let mpcPickerHighlightIndex = -1; // index into mpcPickerResults of the currently arrow-key/mouse-hover-highlighted row, -1 for none
 
 /** Uploads the inventory spreadsheet + any certificate PDFs to the analyze endpoint and renders the resulting review screen. Nothing is written to the database by this call. */
 async function analyzeMpcImport() {
@@ -4716,23 +4719,14 @@ async function analyzeMpcImport() {
     }
 }
 
-/** One shared `<datalist>` of every non-Retired tool (qr_code + name, searchable by either since both are in the option's value), referenced by every "needs linking" row's picker input -- one shared list instead of a separate `<select>` with hundreds of `<option>`s repeated per row. */
-// Includes the tool's serial number in the searchable option text (not just QR/name) -- a
-// native <datalist> only filters by substring-matching the whole option value, so without this,
-// typing a serial number (exactly the kind of identifier someone would have on hand from a
-// vendor cert, or from an older tool where the vendor's own ID was manually recorded as the
-// "serial number" before this importer existed -- see AVI-0332/AVI-0336's history) could never
-// find anything, even though the tool is right there. onMpcToolPickerInput() only ever reads the
-// FIRST " -- "-delimited segment back out as the qr_code, so appending more text after the name
-// is safe regardless of which suggestion ends up selected.
-function buildMpcToolDatalist() {
-    const options = globalToolsCache
-        .filter(t => t.status !== 'Retired')
-        .sort((a, b) => a.qr_code.localeCompare(b.qr_code, undefined, { numeric: true }))
-        .map(t => `<option value="${t.qr_code} -- ${t.name}${t.serial_number ? ` (SN: ${t.serial_number})` : ''}">`)
-        .join('');
-    return `<datalist id="mpc-tool-datalist">${options}</datalist>`;
-}
+// "Cal ID", not left bare -- this is Micro Precision's OWN tracking number for the gage
+// (their "Cal Control"/"MPC Control #"), not a manufacturer serial number. James flagged
+// that an unlabeled code reads ambiguously like it might BE the serial number; it's shown
+// separately (see the "SN:" badge below) and is a completely different value.
+// Hoisted to top level (was previously local to renderMpcReviewScreen()) so
+// openMpcToolPicker() can reuse it for the picker modal's header.
+const rowSummaryLine = (r) => `
+    <span style="color:var(--muted); font-size:11px;">Cal ID</span> <span style="font-family:monospace;">${r.calControl}</span>${(r.manufacturer || r.description) ? ` -- ${[r.manufacturer, r.modelNumber, r.description].filter(Boolean).join(' ')}` : ''}${r.department ? ` <span style="color:var(--muted);">(${r.department})</span>` : ''}`;
 
 /**
  * Renders the four-bucket review screen from mpcAnalysisResult: "New Calibration Data"
@@ -4751,13 +4745,6 @@ function renderMpcReviewScreen() {
     const certAttachableRows = rows.filter(r => r.match.status === 'already_current' && r.match.certAttachable);
     const upToDateRows = rows.filter(r => r.match.status === 'already_current' && !r.match.certAttachable);
     const needsLinkingRows = rows.filter(r => r.match.status === 'needs_linking');
-
-    // "Cal ID", not left bare -- this is Micro Precision's OWN tracking number for the gage
-    // (their "Cal Control"/"MPC Control #"), not a manufacturer serial number. James flagged
-    // that an unlabeled code reads ambiguously like it might BE the serial number; it's shown
-    // separately (see the "SN:" badge below) and is a completely different value.
-    const rowSummaryLine = (r) => `
-        <span style="color:var(--muted); font-size:11px;">Cal ID</span> <span style="font-family:monospace;">${r.calControl}</span>${(r.manufacturer || r.description) ? ` -- ${[r.manufacturer, r.modelNumber, r.description].filter(Boolean).join(' ')}` : ''}${r.department ? ` <span style="color:var(--muted);">(${r.department})</span>` : ''}`;
 
     // A second verification signal alongside the Cal Control/serial match itself -- doesn't
     // block anything (vendor vs. ToolTracker department naming can legitimately differ), just
@@ -4787,7 +4774,7 @@ function renderMpcReviewScreen() {
                 ${r.serialNumber ? ` <span style="color:var(--muted);">SN: ${r.serialNumber}</span>` : ''}
                 ${r.certificateFile ? ` ${icon('clipboard-list')} cert ready -- just needs a tool` : ''}
             </div>
-            <input class="form-input" style="width:220px; margin:0;" list="mpc-tool-datalist" placeholder="Pick a tool..." oninput="onMpcToolPickerInput(${r.rowNum}, this.value)">
+            <div id="mpc-row-trigger-${r.rowNum}" style="display:flex; align-items:center; gap:4px; flex-shrink:0;">${mpcRowTriggerHtml(r.rowNum, mpcManualBindings[r.rowNum] || null)}</div>
         </div>`;
 
     const upToDateRowHtml = (r) => `
@@ -4810,7 +4797,6 @@ function renderMpcReviewScreen() {
         </label>`;
 
     container.innerHTML = `
-        ${buildMpcToolDatalist()}
         <div style="font-size:13px; margin-bottom:12px;">${summary.totalRows} gages read. <strong style="color:var(--green);">${summary.newImport}</strong> ready to import, <strong>${summary.needsLinking}</strong> need linking, ${summary.alreadyUpToDate} already up to date${summary.certAttachable ? ` (<strong style="color:var(--accent);">${summary.certAttachable}</strong> of those just need a certificate attached)` : ''}${summary.skipped ? `, ${summary.skipped} skipped (no calibration date on file yet)` : ''}.</div>
         ${newRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">New Calibration Data (${newRows.length})</div>${newRows.map(newRowHtml).join('')}</div>` : ''}
         ${needsLinkingRows.length ? `<div style="margin-bottom:16px;"><div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">Needs Linking (${needsLinkingRows.length}) -- pick which ToolTracker tool each one is</div>${needsLinkingRows.map(needsLinkingRowHtml).join('')}</div>` : ''}
@@ -4823,21 +4809,216 @@ function renderMpcReviewScreen() {
     container.style.display = 'block';
 }
 
-/** Resolves a "needs linking" row's typed/picked datalist value ("AVI-0327 -- Wire Cutter") back to a real tool, records the binding, and auto-checks/unchecks that row's checkbox to match -- a row can only ever be imported once it resolves to a real, non-Retired tool. */
-function onMpcToolPickerInput(rowNum, typedValue) {
-    const qrCode = (typedValue || '').split(' -- ')[0].trim();
-    const tool = globalToolsCache.find(t => t.qr_code === qrCode && t.status !== 'Retired');
-    const checkbox = document.getElementById(`mpc-row-check-${rowNum}`);
-    if (!checkbox) return;
-    if (tool) {
-        mpcManualBindings[rowNum] = { toolId: tool.tool_id, qrCode: tool.qr_code, name: tool.name };
-        checkbox.disabled = false;
-        checkbox.checked = true;
-    } else {
-        delete mpcManualBindings[rowNum];
-        checkbox.disabled = true;
-        checkbox.checked = false;
+/**
+ * Returns the HTML for one "Needs Linking" row's tool-picker trigger slot
+ * (`#mpc-row-trigger-${rowNum}`'s innerHTML), given that row's current binding from
+ * mpcManualBindings (or null if unbound). Used both by needsLinkingRowHtml() at initial
+ * render and by selectMpcPickerResult()/clearMpcToolBinding() to repaint just that one row's
+ * slot after a pick changes -- the rest of the (possibly ~500-row) screen is never
+ * re-rendered for a single pick.
+ */
+function mpcRowTriggerHtml(rowNum, binding) {
+    if (!binding) {
+        return `<button type="button" class="btn-icon" onclick="openMpcToolPicker(${rowNum})" style="width:220px; display:flex; align-items:center; gap:6px; text-align:left; color:var(--muted); border-style:dashed;">${icon('search')} Pick a tool...</button>`;
     }
+    return `
+        <button type="button" class="btn-icon" onclick="openMpcToolPicker(${rowNum})" title="Click to change" style="max-width:190px; display:flex; align-items:center; gap:6px; text-align:left; border-left:3px solid var(--accent);">
+            <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><strong>${binding.qrCode}</strong> -- ${binding.name}</span>
+        </button>
+        <div onclick="clearMpcToolBinding(${rowNum})" title="Clear this pick" style="color:var(--red); cursor:pointer; font-weight:bold; font-size:16px; padding:0 6px; flex-shrink:0;">${icon('x')}</div>`;
+}
+
+/**
+ * Opens the shared tool-picker modal (#mpc-tool-picker-overlay) for one "Needs Linking" row:
+ * stashes rowNum in mpcPickerRowNum, echoes that row's own Cal ID/description/department/
+ * serial number (the exact same rowSummaryLine() string already shown on the row -- reusing
+ * it here doesn't open any new path for spreadsheet-derived text to reach innerHTML, it's the
+ * identical value rendered the identical unescaped way a second time) into the modal header,
+ * pre-fills the search box with the row's existing bound QR code if it has one (so reopening
+ * to change a pick starts from that match) or empty if not, runs the initial filter, shows
+ * the overlay, and autofocuses+selects the search box's text.
+ */
+function openMpcToolPicker(rowNum) {
+    const row = mpcAnalysisResult && mpcAnalysisResult.rows.find(r => r.rowNum === rowNum);
+    if (!row) return;
+    mpcPickerRowNum = rowNum;
+
+    document.getElementById('mpc-picker-row-context').innerHTML = `${rowSummaryLine(row)}${row.serialNumber ? `<br><span style="color:var(--muted);">SN: ${row.serialNumber}</span>` : ''}`;
+
+    const searchInput = document.getElementById('mpc-picker-search');
+    const existing = mpcManualBindings[rowNum];
+    searchInput.value = existing ? existing.qrCode : '';
+    renderMpcPickerResults(searchInput.value);
+
+    document.getElementById('mpc-tool-picker-overlay').style.display = 'flex';
+    searchInput.focus();
+    searchInput.select();
+}
+
+/** Hides the tool-picker modal and clears its transient state (which row it was open for, the current result set/highlight). Cancels with zero side effects -- whatever binding existed before opening (if any) is untouched. */
+function closeMpcToolPicker() {
+    document.getElementById('mpc-tool-picker-overlay').style.display = 'none';
+    mpcPickerRowNum = null;
+    mpcPickerResults = [];
+    mpcPickerHighlightIndex = -1;
+}
+
+/**
+ * Filters globalToolsCache (excluding Retired) by substring match against qr_code, name,
+ * serial_number, and cal_id (the TOOL's own Cal ID field, distinct from calibration_records'
+ * unrelated cal_id primary key used elsewhere in this file), ranks QR-prefix matches first,
+ * caps the rendered list at 50, and writes the result into #mpc-picker-results -- also resets
+ * mpcPickerResults/mpcPickerHighlightIndex for keyboard nav. Called on every keystroke in
+ * #mpc-picker-search (no debounce -- globalToolsCache is already loaded client-side and a
+ * plain array scan over it is sub-millisecond). An empty query shows a plain hint instead of
+ * a default list, so opening the modal never renders rows nobody asked to see.
+ */
+function renderMpcPickerResults(query) {
+    const container = document.getElementById('mpc-picker-results');
+    const q = (query || '').trim().toUpperCase();
+    mpcPickerHighlightIndex = -1;
+
+    if (!q) {
+        mpcPickerResults = [];
+        container.innerHTML = `<div style="padding:14px; color:var(--muted); font-size:12px; text-align:center;">Type a QR code, name, serial number, or Cal ID to search.</div>`;
+        return;
+    }
+
+    const matches = globalToolsCache.filter(t => t.status !== 'Retired' && (
+        (t.qr_code || '').toUpperCase().includes(q) ||
+        (t.name || '').toUpperCase().includes(q) ||
+        (t.serial_number || '').toUpperCase().includes(q) ||
+        (t.cal_id || '').toUpperCase().includes(q)
+    ));
+    // QR-prefix matches first (the most common way someone searches -- they usually have the
+    // QR code on hand from the tool itself), then everything else, each group alphabetical/
+    // numeric by QR.
+    matches.sort((a, b) => {
+        const aPrefix = (a.qr_code || '').toUpperCase().startsWith(q) ? 0 : 1;
+        const bPrefix = (b.qr_code || '').toUpperCase().startsWith(q) ? 0 : 1;
+        if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+        return (a.qr_code || '').localeCompare(b.qr_code || '', undefined, { numeric: true });
+    });
+
+    mpcPickerResults = matches.slice(0, 50);
+
+    if (mpcPickerResults.length === 0) {
+        container.innerHTML = `<div style="padding:14px; color:var(--muted); font-size:12px; text-align:center;">No tools match "${query}". Check spelling, or it may be Retired.</div>`;
+        return;
+    }
+
+    container.innerHTML = mpcPickerResults.map((t, i) => mpcPickerResultRowHtml(t, i)).join('')
+        + (matches.length > 50 ? `<div style="padding:8px 14px; color:var(--muted); font-size:11px; text-align:center; border-top:1px solid var(--border);">+${matches.length - 50} more -- keep typing to narrow it down</div>` : '');
+}
+
+/**
+ * Renders one result row for #mpc-picker-results at index i (i is used for ArrowUp/ArrowDown
+ * highlight tracking and click-to-select) -- a 44px photo-or-fallback-icon thumbnail (mirrors
+ * kiosk.js's renderQueue() convention exactly, for visual consistency across the app), the QR
+ * code + name, and a muted serial number / Cal ID / department line underneath for
+ * disambiguation. Tool fields are interpolated unescaped, matching this file's existing
+ * convention for tool data everywhere else.
+ */
+function mpcPickerResultRowHtml(t, i) {
+    const thumb = t.photo_url
+        ? `<img src="${t.photo_url}" loading="lazy" style="width:44px;height:44px;border-radius:6px;object-fit:cover;flex-shrink:0;">`
+        : `<div style="width:44px;height:44px;border-radius:6px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted);">${icon('wrench')}</div>`;
+    const detailBits = [
+        t.serial_number ? `SN: ${t.serial_number}` : null,
+        t.cal_id ? `Cal ID: ${t.cal_id}` : null,
+        t.department_name || null
+    ].filter(Boolean).join(' -- ');
+    return `
+        <div data-index="${i}" onmouseenter="setMpcPickerHighlight(${i})" onclick="selectMpcPickerResult(${i})" style="display:flex; align-items:center; gap:10px; padding:8px 10px; cursor:pointer; border-bottom:1px solid var(--border);">
+            ${thumb}
+            <div style="min-width:0; flex:1;">
+                <div><strong style="color:var(--accent); font-family:monospace;">${t.qr_code}</strong> ${t.name}</div>
+                ${detailBits ? `<div style="color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${detailBits}</div>` : ''}
+            </div>
+        </div>`;
+}
+
+/**
+ * Keyboard nav for the tool-picker's search box: ArrowDown/ArrowUp move a highlighted index
+ * through the currently rendered results (mpcPickerResults, capped at 50), Enter selects the
+ * highlighted result (or the top result if none is highlighted yet, so pressing Enter right
+ * after typing a specific-enough query works with zero arrow presses), and Escape cancels the
+ * whole picker, leaving any existing binding untouched.
+ */
+function onMpcPickerSearchKeydown(event) {
+    if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (mpcPickerResults.length === 0) return;
+        setMpcPickerHighlight(Math.min(mpcPickerHighlightIndex + 1, mpcPickerResults.length - 1));
+    } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (mpcPickerResults.length === 0) return;
+        setMpcPickerHighlight(Math.max(mpcPickerHighlightIndex - 1, 0));
+    } else if (event.key === 'Enter') {
+        event.preventDefault();
+        const index = mpcPickerHighlightIndex >= 0 ? mpcPickerHighlightIndex : 0;
+        if (mpcPickerResults[index]) selectMpcPickerResult(index);
+    } else if (event.key === 'Escape') {
+        event.preventDefault();
+        closeMpcToolPicker();
+    }
+}
+
+/** Updates mpcPickerHighlightIndex and toggles .mpc-picker-row-highlighted on the newly/previously highlighted result row (not a full re-render -- this fires on every arrow key press and every mouse hover). Shared by keyboard nav and mouse hover so both stay in sync. */
+function setMpcPickerHighlight(index) {
+    const container = document.getElementById('mpc-picker-results');
+    const prev = container.querySelector(`[data-index="${mpcPickerHighlightIndex}"]`);
+    if (prev) prev.classList.remove('mpc-picker-row-highlighted');
+    mpcPickerHighlightIndex = index;
+    const next = container.querySelector(`[data-index="${index}"]`);
+    if (next) {
+        next.classList.add('mpc-picker-row-highlighted');
+        next.scrollIntoView({ block: 'nearest' });
+    }
+}
+
+/**
+ * Commits mpcPickerResults[index] as the binding for the row the picker is currently open for
+ * (mpcPickerRowNum) -- sets mpcManualBindings[rowNum] and enables+checks that row's checkbox
+ * exactly like onMpcToolPickerInput() used to in its match branch (commitMpcImport() reads
+ * both of those and needs no changes), repaints only that row's trigger slot, then closes the
+ * modal and returns focus to the row's trigger button so a keyboard user lands back where they
+ * were and can keep tabbing down the list.
+ */
+function selectMpcPickerResult(index) {
+    const tool = mpcPickerResults[index];
+    if (!tool) return;
+    const rowNum = mpcPickerRowNum;
+
+    mpcManualBindings[rowNum] = { toolId: tool.tool_id, qrCode: tool.qr_code, name: tool.name };
+    const checkbox = document.getElementById(`mpc-row-check-${rowNum}`);
+    if (checkbox) { checkbox.disabled = false; checkbox.checked = true; }
+
+    const trigger = document.getElementById(`mpc-row-trigger-${rowNum}`);
+    if (trigger) trigger.innerHTML = mpcRowTriggerHtml(rowNum, mpcManualBindings[rowNum]);
+
+    closeMpcToolPicker();
+
+    if (trigger) {
+        trigger.scrollIntoView({ block: 'center' });
+        const btn = trigger.querySelector('button');
+        if (btn) btn.focus();
+    }
+}
+
+/**
+ * Clears an existing manual binding for a "Needs Linking" row without opening the picker --
+ * deletes mpcManualBindings[rowNum] and disables+unchecks that row's checkbox, exactly
+ * mirroring onMpcToolPickerInput()'s old "no match" branch, then repaints just that row's
+ * trigger back to its unbound state. Wired to the inline clear (x) control that only appears
+ * once a row is bound (see mpcRowTriggerHtml()).
+ */
+function clearMpcToolBinding(rowNum) {
+    delete mpcManualBindings[rowNum];
+    const checkbox = document.getElementById(`mpc-row-check-${rowNum}`);
+    if (checkbox) { checkbox.disabled = true; checkbox.checked = false; }
+    const trigger = document.getElementById(`mpc-row-trigger-${rowNum}`);
+    if (trigger) trigger.innerHTML = mpcRowTriggerHtml(rowNum, null);
 }
 
 /** Builds the commit payload from whichever rows are currently checked (reading straight from the DOM -- this screen doesn't re-render reactively, so the DOM is the simplest source of truth), validates no two checked rows share a tool, and POSTs it. */

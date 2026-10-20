@@ -576,6 +576,25 @@
         <img id="image-modal-content" style="max-width: 95%; max-height: 95%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
     </div>
 
+    <!-- Calibration Import tool picker: one shared modal reused by every "Needs Linking" row
+         (there can be ~500 on screen at once) instead of a per-row native <datalist>. Mirrors the
+         #image-modal-overlay / #entity-modal-overlay convention: built once, shown/hidden via
+         display, content replaced fresh on each open. Opened via openMpcToolPicker(rowNum),
+         closed via closeMpcToolPicker(). See the "CALIBRATION IMPORT -- MICRO PRECISION" section
+         of admin.js. -->
+    <div id="mpc-tool-picker-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); z-index: 10002; justify-content: center; align-items: center; padding: 20px;" onclick="if (event.target === this) closeMpcToolPicker()">
+        <div class="card modal-card-scroll" style="width: 100%; max-width: min(680px, 92vw); position: relative; margin: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.8);">
+            <button type="button" onclick="closeMpcToolPicker()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px;"><span class="icon" data-icon="x"></span></button>
+
+            <div style="font-weight:bold; font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">Pick a tool for</div>
+            <div id="mpc-picker-row-context" style="font-size:13px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border);"></div>
+
+            <input type="text" id="mpc-picker-search" class="form-input" placeholder="Search by QR code, name, serial number, or Cal ID" autocomplete="off" oninput="renderMpcPickerResults(this.value)" onkeydown="onMpcPickerSearchKeydown(event)" style="margin-bottom:10px;">
+
+            <div id="mpc-picker-results" style="max-height:360px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;"></div>
+        </div>
+    </div>
+
     <!-- Position editor: full-screen drag-and-drop shadow-board map editor for a drawer's tool positions, opened via openPositionEditor(drawerId) from the compact preview in a drawer's entity modal -->
     <div id="position-editor-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.92); z-index: 10001; flex-direction: column; align-items: center; padding: 20px; box-sizing: border-box;">
         <div style="width:100%; max-width:1400px; display:flex; justify-content:space-between; align-items:center; gap:12px; color:white; margin-bottom:12px; flex-wrap:wrap;">
