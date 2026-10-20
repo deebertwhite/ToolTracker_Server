@@ -89,6 +89,10 @@
             <div class="hub-card" id="hub-departments" onclick="openWorkspace('ws-departments'); loadDepartmentsWorkspace();">
                 <div class="hub-icon"><span class="icon" data-icon="building-2"></span></div><div class="hub-title">Departments</div><div class="hub-desc">Manage departments, groups, and inventory status.</div>
             </div>
+            <!-- Card: Calibrated Tools (hidden for roles below tool_rep via currentAdminWeight check in bootstrapAdminUI, same bucket as Inventory/Reports/Departments) -->
+            <div class="hub-card" id="hub-calibrated-tools" onclick="openWorkspace('ws-calibrated-tools'); loadCalibratedToolsWorkspace();">
+                <div class="hub-icon"><span class="icon" data-icon="shield"></span></div><div class="hub-title">Calibrated Tools</div><div class="hub-desc">Sort, review, and bulk-edit every tool that requires calibration.</div>
+            </div>
             <!-- Card 3: Inventory (hidden for roles below tool_rep via currentAdminWeight check in loginAdmin) -->
             <div class="hub-card" id="hub-inventory" onclick="openWorkspace('ws-inventory'); syncStorageHierarchyDropdowns(); renderEditableInfraTree(); loadAuditStatus(); loadAuditSchedules();">
                 <div class="hub-icon"><span class="icon" data-icon="package"></span></div><div class="hub-title">Inventory</div><div class="hub-desc">Manage physical storage and tools.</div>
@@ -225,6 +229,37 @@
                     <div style="display:flex; gap:8px;">
                         <input class="form-input" id="new-dept-group-name" placeholder="e.g. Maintenance" style="max-width:280px;">
                         <button class="btn btn-secondary" style="width:auto;" onclick="submitNewDeptGroup()">+ Add Group</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Workspace panel: Calibrated Tools. Flat (no subhub), same reasoning as Departments --
+                 a single sortable table needs no second nav level. Data comes entirely from
+                 globalToolsCache (no dedicated GET endpoint); edits reuse PUT /api/tools/:id as-is --
+                 see loadCalibratedToolsWorkspace()/renderCalibratedToolsTable()/saveCalibratedToolRow()
+                 in admin.js. -->
+            <div id="ws-calibrated-tools" class="workspace-panel no-print">
+                <button class="back-btn" onclick="showMainHub()">← Return to Main Hub</button>
+                <h3 style="margin-bottom: 4px;">Calibrated Tools</h3>
+                <div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Every tool flagged "Requires Calibration" (Retired tools excluded). Click a column header to sort; click the pencil to edit Serial Number, Cal ID, Last Cal, or Cal Due right here. Click a tool's name to open its full record.</div>
+                <div class="card">
+                    <div class="table-responsive-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th class="sortable-th" data-sort-key="name" onclick="sortCalibratedTools('name')">Tool <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th class="sortable-th" data-sort-key="department_name" onclick="sortCalibratedTools('department_name')">Department <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th class="sortable-th" data-sort-key="status" onclick="sortCalibratedTools('status')">Status <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th class="sortable-th" data-sort-key="serial_number" onclick="sortCalibratedTools('serial_number')">Serial Number <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th class="sortable-th" data-sort-key="cal_id" onclick="sortCalibratedTools('cal_id')">Cal ID <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th class="sortable-th" data-sort-key="last_cal_date" onclick="sortCalibratedTools('last_cal_date')">Last Cal <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th class="sortable-th" data-sort-key="cal_due_date" onclick="sortCalibratedTools('cal_due_date')">Cal Due <span class="icon sort-icon" data-icon="chevron-down"></span></th>
+                                    <th>Calibration</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="cal-tools-body"><tr><td colspan="9" style="text-align:center; color:var(--muted);">Loading...</td></tr></tbody>
+                        </table>
                     </div>
                 </div>
             </div>

@@ -220,6 +220,7 @@ function bootstrapAdminUI(user) {
         safeSetDisplay('hub-inventory', 'none');
         safeSetDisplay('hub-reports', 'none');
         safeSetDisplay('hub-departments', 'none');
+        safeSetDisplay('hub-calibrated-tools', 'none');
     }
     if (currentAdminWeight < 4) {
         safeSetDisplay('card-manage-depts', 'none');
@@ -1362,6 +1363,29 @@ function exportScopedLabels() {
     window.location.href = `/api/tools/labels/export${params.toString() ? '?' + params.toString() : ''}`;
 }
 
+/**
+ * Returns the calibration-urgency status as an inline <span> -- the one shared implementation
+ * of the priority chain used by both the Master Storage & Asset Tree (renderEditableInfraTree)
+ * and the Calibrated Tools workspace: open investigation, then a sub-assembly itself overdue/
+ * uncertified, then (for a tool not flagged is_calibrated at all) "Not calibrated", then no due
+ * date, then no certificate on file, then expired, else the due date itself. Mirrors exactly
+ * what blocks a checkout (see GROUP_MEMBER_BLOCKED_SQL in server.js) -- any future change to
+ * that gate must be mirrored here too, which is now a one-place change instead of two.
+ * @param {object} tool - a globalToolsCache-shaped row: is_calibrated, cal_due_date,
+ *   has_cal_record, has_open_investigation, sub_assemblies ([{is_calibrated, cal_due_date, name}]).
+ */
+function calibrationStatusHtml(tool) {
+    const calIsExpired = tool.cal_due_date && new Date(tool.cal_due_date) <= new Date(new Date().toDateString());
+    const blockedSub = (tool.sub_assemblies || []).find(sa => sa.is_calibrated && (!sa.cal_due_date || new Date(sa.cal_due_date) <= new Date(new Date().toDateString())));
+    if (tool.has_open_investigation) return `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Investigation open</span>`;
+    if (blockedSub) return `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Sub-assembly "${blockedSub.name}" needs cal</span>`;
+    if (!tool.is_calibrated) return `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`;
+    if (!tool.cal_due_date) return `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No due date</span>`;
+    if (!tool.has_cal_record) return `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No certificate</span>`;
+    if (calIsExpired) return `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Cal expired</span>`;
+    return `<span style="font-size: 11px; color: var(--text);">Cal Due: ${tool.cal_due_date.split('T')[0]}</span>`;
+}
+
 // Unified Editable Tree replacing the 3 old tables
 /**
  * Recursively renders the full department -> toolbox -> drawer -> tool hierarchy into
@@ -1515,26 +1539,7 @@ async function renderEditableInfraTree() {
                                 // date and a real calibration_records row on file -- matches the
                                 // checkout hard-stop's own rule (see PUT /api/transactions), so
                                 // what blocks a checkout is visible here before anyone scans it.
-                                const calIsExpired = tool.cal_due_date && new Date(tool.cal_due_date) <= new Date(new Date().toDateString());
-                                // A sub-assembly (migrations/018) that itself needs calibration and is out
-                                // of cal blocks the PARENT's checkout regardless of the parent's own
-                                // is_calibrated flag -- checked before that flag below, same ordering
-                                // reason open-investigation is checked first (see blockedReason() in the
-                                // Tool Groups section for the identical rule, mirrored here).
-                                const blockedSub = (tool.sub_assemblies || []).find(sa => sa.is_calibrated && (!sa.cal_due_date || new Date(sa.cal_due_date) <= new Date(new Date().toDateString())));
-                                const calDueDisplay = tool.has_open_investigation
-                                    ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Investigation open</span>`
-                                    : blockedSub
-                                    ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Sub-assembly "${blockedSub.name}" needs cal</span>`
-                                    : !tool.is_calibrated
-                                    ? `<span style="font-size: 11px; color: var(--muted); font-style: italic;">Not calibrated</span>`
-                                    : !tool.cal_due_date
-                                        ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No due date</span>`
-                                        : !tool.has_cal_record
-                                            ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} No certificate</span>`
-                                            : calIsExpired
-                                                ? `<span style="font-size: 11px; color: var(--red); font-weight:bold;">${icon('circle-x', 'icon-danger')} Cal expired</span>`
-                                                : `<span style="font-size: 11px; color: var(--text);">Cal Due: ${tool.cal_due_date.split('T')[0]}</span>`;
+                                const calDueDisplay = calibrationStatusHtml(tool);
 
                                 // Whole row opens the entity modal -- there's nothing to expand/collapse
                                 // at this level (tools are leaves), so no separate toggle icon is needed.
@@ -5103,6 +5108,204 @@ function renderMpcImportResults(data) {
     container.innerHTML = `
         <div style="font-weight:bold; margin-bottom:8px;">${data.summary.imported} imported, ${data.summary.errors} error(s).</div>
         <div style="max-height:400px; overflow-y:auto;">${rowsHtml}</div>`;
+}
+
+// ==========================================
+// CALIBRATED TOOLS WORKSPACE
+// ==========================================
+// A flat, sortable, bulk-editable view of every tool flagged is_calibrated (Retired excluded)
+// -- James's own request: "sort the tools to what is calibrated, and edit them all from one
+// page." Reuses globalToolsCache (no dedicated GET endpoint -- see primeStorageCaches()) for
+// the read side and PUT /api/tools/:id as-is for the write side (the same full-payload
+// endpoint the universal entity modal's saveEntityUpdates() already uses), so this is
+// presentation + sorting + a thin row-edit layer over existing, already-hardened code.
+
+let calSortKey = 'cal_due_date';   // which globalToolsCache field the table is sorted by
+let calSortAsc = true;             // true = ascending (default: soonest/missing due date first)
+let calEditingToolId = null;       // tool_id of the one row currently in edit mode, or null (loose-compared against dataset strings -- see note in renderCalibratedToolRow)
+
+/** Hub card entry point: primes globalToolsCache (the lightweight fetch Departments already uses, not a full tree rebuild) and renders the table. */
+async function loadCalibratedToolsWorkspace() {
+    await primeStorageCaches();
+    renderCalibratedToolsTable();
+}
+
+/** Toggles the Calibrated Tools table's sort column/direction and re-renders. Clicking the already-active column flips asc/desc; clicking a different column switches to it, ascending. */
+function sortCalibratedTools(key) {
+    if (calSortKey === key) { calSortAsc = !calSortAsc; } else { calSortKey = key; calSortAsc = true; }
+    renderCalibratedToolsTable();
+}
+
+/**
+ * Generic comparator for the Calibrated Tools table. A missing Last Cal/Cal Due sorts as the
+ * earliest possible date regardless of direction -- this deliberately matches
+ * calibrationStatusHtml()'s own urgency order, which already treats "No due date" as WORSE
+ * than an expired-but-present date, so ascending-by-Cal-Due (the default) puts the loudest
+ * problem at row one, not buried under real-but-expired dates. A missing text value (serial
+ * number, Cal ID) sorts as an empty string, which localeCompare already puts first ascending.
+ */
+function compareCalibratedTools(a, b, key) {
+    let av = a[key], bv = b[key];
+    if (key === 'last_cal_date' || key === 'cal_due_date') {
+        av = av ? new Date(av).getTime() : -Infinity;
+        bv = bv ? new Date(bv).getTime() : -Infinity;
+        const diff = av - bv;
+        return calSortAsc ? diff : -diff;
+    }
+    av = (av || '').toString();
+    bv = (bv || '').toString();
+    const cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+    return calSortAsc ? cmp : -cmp;
+}
+
+/**
+ * Renders #cal-tools-body from globalToolsCache, filtered to calibrated, non-Retired tools and
+ * sorted by calSortKey/calSortAsc. Refreshes the active column's sort-icon state and
+ * (re)attaches the tbody's delegated click handler -- same idempotent dataset.delegated guard
+ * loadToolGroups() already uses for #tool-groups-list, safe on every render since innerHTML
+ * only replaces the tbody's children, never the tbody element itself.
+ */
+function renderCalibratedToolsTable() {
+    const tbody = document.getElementById('cal-tools-body');
+    if (!tbody) return;
+
+    const rows = globalToolsCache
+        .filter(t => t.is_calibrated && t.status !== 'Retired')
+        .sort((a, b) => compareCalibratedTools(a, b, calSortKey));
+
+    tbody.innerHTML = rows.length
+        ? rows.map(renderCalibratedToolRow).join('')
+        : `<tr><td colspan="9" style="text-align:center; color:var(--muted);">No calibrated tools yet.</td></tr>`;
+
+    document.querySelectorAll('#ws-calibrated-tools .sortable-th').forEach(th => {
+        const active = th.dataset.sortKey === calSortKey;
+        th.classList.toggle('active', active);
+        th.classList.toggle('desc', active && !calSortAsc);
+    });
+
+    if (!tbody.dataset.delegated) {
+        tbody.dataset.delegated = 'true';
+        tbody.addEventListener('click', onCalibratedToolsBodyClick);
+    }
+}
+
+/** Single delegated click handler for #cal-tools-body -- routes by data-action on the clicked element (edit / cancel-edit / save-edit), same pattern as onToolGroupsListClick. */
+function onCalibratedToolsBodyClick(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    const toolId = el.dataset.toolId; // a string -- compared with == against cached tool_id below, never ===
+    if (el.dataset.action === 'edit') { calEditingToolId = toolId; renderCalibratedToolsTable(); }
+    else if (el.dataset.action === 'cancel-edit') { calEditingToolId = null; renderCalibratedToolsTable(); }
+    else if (el.dataset.action === 'save-edit') { saveCalibratedToolRow(toolId); }
+}
+
+/**
+ * Renders one <tr> -- read-only cells, except Serial Number/Cal ID/Last Cal/Cal Due, which
+ * swap for inputs when this row is the one in edit mode. The tool's name is always a plain
+ * click-through to the full entity modal (openEntityModal), regardless of edit state -- the
+ * escape hatch for every field this view doesn't expose. Only this one span is clickable; the
+ * row itself has no click handler (unlike the Master Tree's rows), since four of its cells
+ * become live inputs during edit and must never fight a row-level handler.
+ *
+ * tool.tool_id is compared with calEditingToolId using == , not === : calEditingToolId comes
+ * from a DOM dataset value (always a string), while tool.tool_id is a number from the cached
+ * JSON row -- this is the same == the rest of this file already uses for exactly this
+ * cache-id-vs-dataset-string comparison (see e.g. the tool_id lookups around saveEntityUpdates'
+ * callers). Using === here would silently never match, leaving edit mode permanently "stuck
+ * closed" with no visible error.
+ */
+function renderCalibratedToolRow(tool) {
+    const statusColor = tool.status === 'In' ? 'var(--green)' : (tool.status === 'Out' ? 'var(--accent)' : 'var(--red)');
+    const location = [tool.toolbox_name, tool.drawer_name].filter(Boolean).join(' → '); // same &rarr; separator the trace-investigation detail view already uses
+    const isEditing = tool.tool_id == calEditingToolId;
+
+    const nameCell = `<span style="cursor:pointer; font-weight:bold;" onclick="openEntityModal('tool', '${tool.qr_code}')">${tool.name}</span><br><span style="font-family:monospace; font-size:10px; color:var(--muted);">${tool.qr_code}</span>`;
+    const deptCell = `${tool.department_name || '--'}${location ? `<div style="font-size:11px; color:var(--muted);">${location}</div>` : ''}`;
+    const statusCell = `<span style="font-size:10px; font-weight:bold; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.05); color:${statusColor};">${tool.status}</span>`;
+    const calCell = calibrationStatusHtml(tool);
+
+    const serialCell = isEditing
+        ? `<input class="form-input" style="padding:6px 8px; font-size:13px; text-transform:uppercase;" id="cal-edit-serial-${tool.tool_id}" value="${escapeHtmlAttr(tool.serial_number || '')}" oninput="uppercaseInput(this)">`
+        : (tool.serial_number ? `<span style="font-family:monospace;">${tool.serial_number}</span>` : `<span style="color:var(--muted); font-style:italic;">--</span>`);
+    const calIdCell = isEditing
+        ? `<input class="form-input" style="padding:6px 8px; font-size:13px; text-transform:uppercase;" id="cal-edit-calid-${tool.tool_id}" value="${escapeHtmlAttr(tool.cal_id || '')}" oninput="uppercaseInput(this)">`
+        : (tool.cal_id ? `<span style="font-family:monospace;">${tool.cal_id}</span>` : `<span style="color:var(--muted); font-style:italic;">--</span>`);
+
+    const lastCalVal = tool.last_cal_date ? tool.last_cal_date.split('T')[0] : '';
+    const dueCalVal = tool.cal_due_date ? tool.cal_due_date.split('T')[0] : '';
+    const lastCalCell = isEditing
+        ? `<input type="date" class="form-input" style="padding:6px 8px; font-size:13px;" id="cal-edit-lastcal-${tool.tool_id}" value="${lastCalVal}" onchange="document.getElementById('cal-edit-caldue-${tool.tool_id}').value = oneYearFromDate(this.value)">`
+        : (lastCalVal || '--');
+    const dueCalCell = isEditing
+        ? `<input type="date" class="form-input" style="padding:6px 8px; font-size:13px;" id="cal-edit-caldue-${tool.tool_id}" value="${dueCalVal}">`
+        : (dueCalVal || '--');
+
+    const actionsCell = isEditing
+        ? `<button type="button" class="btn-icon" data-action="save-edit" data-tool-id="${tool.tool_id}" title="Save">${icon('save')}</button><button type="button" class="btn-icon" style="margin-left:6px;" data-action="cancel-edit" data-tool-id="${tool.tool_id}" title="Cancel">${icon('x')}</button>`
+        : `<button type="button" class="btn-icon" data-action="edit" data-tool-id="${tool.tool_id}" title="Edit">${icon('pencil')}</button>`;
+
+    return `<tr>
+        <td>${nameCell}</td>
+        <td>${deptCell}</td>
+        <td>${statusCell}</td>
+        <td>${serialCell}</td>
+        <td>${calIdCell}</td>
+        <td>${lastCalCell}</td>
+        <td>${dueCalCell}</td>
+        <td>${calCell}</td>
+        <td style="white-space:nowrap;">${actionsCell}</td>
+    </tr>`;
+}
+
+/**
+ * Saves one Calibrated Tools row's four editable fields via the existing PUT /api/tools/:id --
+ * which is keyed by qr_code despite its :id route-param name (a tool_id there throws "invalid
+ * input syntax for type integer" -- see openEntityModal/saveEntityUpdates) and requires the
+ * tool's FULL payload, never a partial patch. Clones every untouched field straight from the
+ * already-cached tool object, exactly what saveEntityUpdates() already does against this same
+ * endpoint from the full entity modal, so none of PUT /api/tools/:id's own validation/
+ * duplicate-serial/duplicate-cal-id logic is duplicated here.
+ * On success: re-primes the caches (primeStorageCaches(), not a full tree rebuild) and
+ * re-renders, so the row reflects server-confirmed values and can visibly move if its own sort
+ * key changed. On failure: alerts the server's message and leaves the row in edit mode with the
+ * typed values untouched -- identical to saveEntityUpdates()'s own failure path, no new
+ * inline-error pattern for this one view.
+ */
+async function saveCalibratedToolRow(toolId) {
+    const tool = globalToolsCache.find(t => t.tool_id == toolId); // == : toolId is a dataset string, tool_id is a number
+    if (!tool) return;
+
+    const payload = {
+        name: tool.name,
+        description: tool.description,
+        replacement_url: tool.replacement_url,
+        status: tool.status,
+        is_calibrated: tool.is_calibrated,
+        last_cal_date: document.getElementById(`cal-edit-lastcal-${toolId}`).value || null,
+        cal_due_date: document.getElementById(`cal-edit-caldue-${toolId}`).value || null,
+        drawer_id: tool.drawer_id,
+        group_id: tool.group_id,
+        serial_number: document.getElementById(`cal-edit-serial-${toolId}`).value || null,
+        part_number: tool.part_number,
+        cal_id: document.getElementById(`cal-edit-calid-${toolId}`).value || null
+    };
+
+    try {
+        const res = await fetch(`/api/tools/${tool.qr_code}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'ToolTracker' },
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+            const data = await res.json();
+            alert('❌ ' + (data.error || 'Failed to save.'));
+            return; // stay in edit mode, typed values untouched
+        }
+
+        calEditingToolId = null;
+        await primeStorageCaches();
+        renderCalibratedToolsTable();
+    } catch (e) { alert('Network Error.'); } // stay in edit mode, typed values untouched -- same as above
 }
 
 // Restore an existing admin session on page load, if there is one (see restoreAdminSession()).
