@@ -2692,6 +2692,7 @@ function openEntityModal(type, id) {
             <div style="display: flex; gap: 30px; margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Serial Number</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.serial_number || '--'}</div></div>
                 <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Part Number</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.part_number || '--'}</div></div>
+                <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Cal ID</div><div style="font-size:14px;margin-top:4px;font-family:monospace;">${entity.cal_id || '--'}</div></div>
             </div>
             <div style="margin-bottom:15px; background: var(--surface2); padding: 12px; border-radius: 8px;">
                 <div style="font-size:11px;color:var(--muted);text-transform:uppercase; margin-bottom:8px;">Alt Part Numbers</div>
@@ -2963,9 +2964,10 @@ function openEntityModal(type, id) {
                     <select class="form-select" id="em-input-move-drawer">${moveDrawerOptions}</select>
                 </div>
             </div>
-            <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
+            <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr 1fr; margin-bottom: 0;">
                 <div class="form-group"><label class="form-label">Serial Number</label><input class="form-input" id="em-input-serial" style="text-transform:uppercase;" oninput="uppercaseInput(this)" value="${entity.serial_number || ''}" placeholder="Optional"></div>
                 <div class="form-group"><label class="form-label">Part Number (for reordering)</label><input class="form-input" id="em-input-partnum" style="text-transform:uppercase;" oninput="uppercaseInput(this)" value="${entity.part_number || ''}" placeholder="Optional"></div>
+                <div class="form-group"><label class="form-label">Cal ID</label><input class="form-input" id="em-input-cal-id" style="text-transform:uppercase;" oninput="uppercaseInput(this)" value="${entity.cal_id || ''}" placeholder="Optional"></div>
             </div>
             <div class="form-group"><label class="form-label">Group <span style="color:var(--muted);text-transform:none;">(optional -- part of a tracked kit/assembly)</span></label><select class="form-select" id="em-input-group">${groupOptions}</select></div>
             <div class="flex-grid-3" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
@@ -3930,6 +3932,7 @@ async function saveEntityUpdates() {
             payload.drawer_id = document.getElementById('em-input-move-drawer').value || null;
             payload.serial_number = document.getElementById('em-input-serial').value || null;
             payload.part_number = document.getElementById('em-input-partnum').value || null;
+            payload.cal_id = document.getElementById('em-input-cal-id').value || null;
             payload.replacement_url = document.getElementById('em-input-url').value;
             payload.status = document.getElementById('em-input-status').value;
             payload.is_calibrated = document.getElementById('em-input-is-cal').checked;

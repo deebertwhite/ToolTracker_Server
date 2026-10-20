@@ -763,6 +763,19 @@ function duplicateSerialErrorMessage(existing) {
     return `Serial number is already registered to "${existing.name}" (${existing.qr_code}).${hint}`;
 }
 
+/** Same idea as findDuplicateSerial, for cal_id (migrations/028) -- no sub-assembly concept
+ *  applies here (a vendor Cal ID identifies a top-level calibrated gage, never a sub-assembly). */
+async function findDuplicateCalId(client, calId, excludeToolId) {
+    if (!calId || !calId.trim()) return null;
+    const result = await client.query(
+        `SELECT tool_id, qr_code, name FROM tools
+         WHERE LOWER(TRIM(cal_id)) = LOWER(TRIM($1)) AND ($2::int IS NULL OR tool_id != $2)
+         LIMIT 1`,
+        [calId, excludeToolId || null]
+    );
+    return result.rows[0] || null;
+}
+
 /**
  * Opens a sub-tolerance trace-back investigation for a tool (or extends the one already
  * open, if any -- at most one OPEN investigation per tool at a time, see
@@ -2463,6 +2476,7 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
     const { name, description, replacement_url, status, is_calibrated, last_cal_date, cal_due_date, drawer_id, group_id } = req.body;
     const serial_number = normalizeCode(req.body.serial_number);
     const part_number = normalizeCode(req.body.part_number);
+    const cal_id = normalizeCode(req.body.cal_id);
 
     // If they checked the box but didn't provide a due date, throw an error
     if (is_calibrated && !cal_due_date) {
@@ -2529,15 +2543,21 @@ app.put('/api/tools/:id', requireFetchHeader, requireRole(2), async (req, res) =
             return res.status(409).json({ error: duplicateSerialErrorMessage(duplicateSerial), code: 'DUPLICATE_SERIAL' });
         }
 
+        const duplicateCalId = await findDuplicateCalId(client, cal_id, toolId);
+        if (duplicateCalId) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: `Cal ID is already registered to "${duplicateCalId.name}" (${duplicateCalId.qr_code}).`, code: 'DUPLICATE_CAL_ID' });
+        }
+
         await client.query(
             `UPDATE tools
              SET name = $1, description = $2, replacement_url = $3, status = $4,
                  is_calibrated = $5, last_cal_date = $6, cal_due_date = $7,
-                 serial_number = $8, part_number = $9, drawer_id = $10, group_id = $11
-             WHERE tool_id = $12`,
+                 serial_number = $8, part_number = $9, drawer_id = $10, group_id = $11, cal_id = $12
+             WHERE tool_id = $13`,
             [name, description || null, replacement_url || null, status,
              is_calibrated || false, last_cal_date || null, cal_due_date || null,
-             serial_number, part_number, drawer_id, group_id || null, toolId]
+             serial_number, part_number, drawer_id, group_id || null, cal_id, toolId]
         );
 
         // If this save just retired a flagged tool (Missing/Broken/Worn -> Retired), auto-close
@@ -3470,11 +3490,33 @@ function parseCertFilename(filename) {
     return { calControl, date: `${yyyy}-${mm}-${dd}`, certNumber };
 }
 
-// Confirmed match, regardless of the tool's current status -- a tool legitimately retired since
-// the vendor's last snapshot is still the CORRECT match (the UI flags it with a Retired badge so
-// James notices rather than silently excluding it). Only ever populated by a PRIOR run of this
-// same importer (vendor_tracking_id is written on every commit), so this is what makes every
-// import after the first one progressively more automatic.
+// The primary match: a dedicated, stable, tool-level Cal ID field (migrations/028), checked
+// before anything else. Same "match regardless of status" reasoning as
+// findToolByVendorTrackingId below (a Retired tool is still the correct match, just flagged) --
+// this is really the same concept, just promoted to living directly on the tool instead of only
+// ever being inferred from calibration_records.vendor_tracking_id, which requires a PRIOR
+// committed import to have set it. A tool whose Cal ID is entered directly (via the entity
+// modal, or migrated from an old serial-number workaround -- see migrations/028's own comment)
+// auto-matches on its very FIRST import, with no chicken-and-egg problem.
+async function findToolByCalId(client, calControl) {
+    const result = await client.query(
+        `SELECT t.tool_id, t.qr_code, t.name, t.status, t.serial_number, d.dept_id, d.name AS dept_name
+         FROM tools t
+         LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
+         LEFT JOIN toolboxes b ON dr.box_id = b.box_id
+         LEFT JOIN departments d ON b.dept_id = d.dept_id
+         WHERE t.cal_id IS NOT NULL AND LOWER(TRIM(t.cal_id)) = LOWER(TRIM($1))`,
+        [calControl]
+    );
+    return result.rows[0] || null;
+}
+
+// Fallback match for a tool whose cal_id field was never (or not yet) populated directly, but
+// which a PRIOR run of this same importer already linked -- vendor_tracking_id is written on
+// every commit (see recordCalibrationEvent/syncCalId), so this still catches anything
+// findToolByCalId above doesn't. Confirmed match, regardless of the tool's current status -- a
+// tool legitimately retired since the vendor's last snapshot is still the CORRECT match (the UI
+// flags it with a Retired badge so James notices rather than silently excluding it).
 async function findToolByVendorTrackingId(client, calControl) {
     const result = await client.query(
         `SELECT t.tool_id, t.qr_code, t.name, t.status, t.serial_number, d.dept_id, d.name AS dept_name
@@ -3556,6 +3598,28 @@ async function syncSerialNumber(client, tool, serialNumber) {
     return current ? ` Serial number corrected from "${current}" to "${incoming}" (from vendor data).` : null;
 }
 
+// Same idea as syncSerialNumber, for the tool's cal_id field (migrations/028) -- the vendor's Cal
+// Control is the authoritative, permanent identifier for that physical gage, so it's kept in
+// sync on every commit regardless of whether this row auto-matched via cal_id already (a no-op,
+// since they'd already be equal) or got here some other way (vendor_tracking_id, serial number,
+// or a fresh manual link) -- that last case is what lets a manually-linked tool auto-match on
+// every import from here on, not just this one.
+async function syncCalId(client, tool, calControl) {
+    const incoming = (calControl || '').trim();
+    if (!incoming) return null;
+    const current = (tool.cal_id || '').trim();
+    if (current.toLowerCase() === incoming.toLowerCase()) return null;
+
+    const conflict = await client.query(
+        'SELECT tool_id, qr_code, name FROM tools WHERE tool_id != $1 AND LOWER(TRIM(cal_id)) = LOWER(TRIM($2))',
+        [tool.tool_id, incoming]
+    );
+    if (conflict.rows.length > 0) return ` Cal ID not updated -- already registered to "${conflict.rows[0].name}" (${conflict.rows[0].qr_code}).`;
+
+    await client.query('UPDATE tools SET cal_id = $1 WHERE tool_id = $2', [incoming, tool.tool_id]);
+    return current ? ` Cal ID corrected from "${current}" to "${incoming}".` : null;
+}
+
 // Parses the uploaded inventory + certificates and matches every row against ToolTracker tools,
 // but writes NOTHING to calibration_records/tools -- see this section's own header comment for
 // why a review step is required here (most rows need a human judgment call the server can't
@@ -3598,8 +3662,13 @@ app.post('/api/calibration-imports/micro-precision/analyze', requireFetchHeader,
                     continue;
                 }
 
-                let tool = await findToolByVendorTrackingId(pool, row.calControl);
-                let matchedOn = tool ? 'vendor_tracking_id' : null;
+                let tool = await findToolByCalId(pool, row.calControl);
+                let matchedOn = tool ? 'cal_id' : null;
+
+                if (!tool) {
+                    tool = await findToolByVendorTrackingId(pool, row.calControl);
+                    if (tool) matchedOn = 'vendor_tracking_id';
+                }
 
                 if (!tool && row.serialNumber) {
                     tool = await findToolBySerialNumber(pool, row.serialNumber);
@@ -3696,7 +3765,7 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
             await client.query('BEGIN');
 
             const toolRes = await client.query(
-                `SELECT t.tool_id, t.qr_code, t.serial_number, d.dept_id
+                `SELECT t.tool_id, t.qr_code, t.serial_number, t.cal_id, d.dept_id
                  FROM tools t
                  LEFT JOIN drawers dr ON t.drawer_id = dr.drawer_id
                  LEFT JOIN toolboxes b ON dr.box_id = b.box_id
@@ -3744,7 +3813,8 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
                     [req.authUser.user_id, tool.tool_id, `Certificate attached from Micro Precision (Cal Control ${action.calControl}) to an existing calibration record.`]
                 );
                 const serialSyncNote = await syncSerialNumber(client, tool, action.serialNumber);
-                resultEntry = { calId: targetCalId, message: `Certificate attached to existing record.${serialSyncNote || ''}` };
+                const calIdSyncNote = await syncCalId(client, tool, action.calControl);
+                resultEntry = { calId: targetCalId, message: `Certificate attached to existing record.${serialSyncNote || ''}${calIdSyncNote || ''}` };
             } else {
                 const { photoUrl, certificateNumber, certPending } = resolveCertificateAttachment(action);
 
@@ -3760,7 +3830,8 @@ app.post('/api/calibration-imports/micro-precision/commit', requireFetchHeader, 
                 });
 
                 const serialSyncNote = await syncSerialNumber(client, tool, action.serialNumber);
-                resultEntry = { calId, message: `Calibration record added.${serialSyncNote || ''}` };
+                const calIdSyncNote = await syncCalId(client, tool, action.calControl);
+                resultEntry = { calId, message: `Calibration record added.${serialSyncNote || ''}${calIdSyncNote || ''}` };
             }
 
             await client.query('COMMIT');
